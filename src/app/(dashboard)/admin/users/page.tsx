@@ -28,11 +28,11 @@ import { useRole } from "@/lib/role-context"
 type Role = "admin" | "doctor" | "receptionist"
 
 interface DBPermissions {
-  patients:  { view: boolean; create: boolean; edit: boolean }
-  billing:   { view: boolean; create: boolean; edit: boolean }
-  reports:   { view: boolean; create: boolean; edit: boolean }
+  patients: { view: boolean; create: boolean; edit: boolean }
+  billing: { view: boolean; create: boolean; edit: boolean }
+  reports: { view: boolean; create: boolean; edit: boolean }
   analytics: { view: boolean }
-  users:     { view: boolean; create: boolean; edit: boolean }
+  users: { view: boolean; create: boolean; edit: boolean }
 }
 
 interface ManagedUser {
@@ -52,40 +52,40 @@ const ROLE_ICON: Record<Role, React.ElementType> = {
 }
 
 const ROLE_COLOR: Record<Role, string> = {
-  admin:        "bg-blue-100 text-blue-700 border-blue-200",
-  doctor:       "bg-purple-100 text-purple-700 border-purple-200",
+  admin: "bg-blue-100 text-blue-700 border-blue-200",
+  doctor: "bg-purple-100 text-purple-700 border-purple-200",
   receptionist: "bg-green-100 text-green-700 border-green-200",
 }
 
 const PERMISSION_MODULES = [
-  { key: "patients",  label: "Patients",   actions: ["view", "create", "edit"] },
-  { key: "billing",   label: "Billing",    actions: ["view", "create", "edit"] },
-  { key: "reports",   label: "Reports",    actions: ["view", "create", "edit"] },
-  { key: "analytics", label: "Analytics",  actions: ["view"] },
-  { key: "users",     label: "Users",      actions: ["view", "create", "edit"] },
+  { key: "patients", label: "Patients", actions: ["view", "create", "edit"] },
+  { key: "billing", label: "Billing", actions: ["view", "create", "edit"] },
+  { key: "reports", label: "Reports", actions: ["view", "create", "edit"] },
+  { key: "analytics", label: "Analytics", actions: ["view"] },
+  { key: "users", label: "Users", actions: ["view", "create", "edit"] },
 ] as const
 
 const ROLE_DEFAULTS: Record<Role, DBPermissions> = {
   admin: {
-    patients:  { view: true,  create: true,  edit: true  },
-    billing:   { view: true,  create: true,  edit: true  },
-    reports:   { view: true,  create: true,  edit: true  },
-    analytics: { view: true  },
-    users:     { view: true,  create: true,  edit: true  },
+    patients: { view: true, create: true, edit: true },
+    billing: { view: true, create: true, edit: true },
+    reports: { view: true, create: true, edit: true },
+    analytics: { view: true },
+    users: { view: true, create: true, edit: true },
   },
   doctor: {
-    patients:  { view: true,  create: false, edit: false },
-    billing:   { view: false, create: false, edit: false },
-    reports:   { view: true,  create: true,  edit: true  },
+    patients: { view: true, create: false, edit: false },
+    billing: { view: false, create: false, edit: false },
+    reports: { view: true, create: true, edit: true },
     analytics: { view: false },
-    users:     { view: false, create: false, edit: false },
+    users: { view: false, create: false, edit: false },
   },
   receptionist: {
-    patients:  { view: true,  create: true,  edit: true  },
-    billing:   { view: true,  create: true,  edit: false },
-    reports:   { view: true,  create: false, edit: false },
+    patients: { view: true, create: true, edit: true },
+    billing: { view: true, create: true, edit: false },
+    reports: { view: true, create: false, edit: false },
     analytics: { view: false },
-    users:     { view: false, create: false, edit: false },
+    users: { view: false, create: false, edit: false },
   },
 }
 
@@ -98,13 +98,13 @@ function initials(name: string) {
 function permissionSummary(permissions: DBPermissions | undefined, role: Role): string {
   if (role === "admin") return "Full access"
   if (!permissions) return "Default"
-  const total   = PERMISSION_MODULES.reduce((s, m) => s + m.actions.length, 0)
+  const total = PERMISSION_MODULES.reduce((s, m) => s + m.actions.length, 0)
   const granted = PERMISSION_MODULES.reduce(
-    (s, m) => s + m.actions.filter(a => (permissions as Record<string, Record<string, boolean>>)[m.key]?.[a]).length,
+    (s, m) => s + m.actions.filter(a => (permissions as unknown as Record<string, Record<string, boolean>>)[m.key]?.[a]).length,
     0
   )
   if (granted === total) return "Full access"
-  if (granted === 0)     return "No access"
+  if (granted === 0) return "No access"
   return `${granted}/${total} permissions`
 }
 
@@ -118,7 +118,7 @@ function PermissionEditor({
   onChange: (p: DBPermissions) => void
 }) {
   const toggle = (module: string, action: string) => {
-    const permsMap = permissions as Record<string, Record<string, boolean>>
+    const permsMap = permissions as unknown as Record<string, Record<string, boolean>>
     const updated = {
       ...permissions,
       [module]: { ...permsMap[module], [action]: !permsMap[module]?.[action] },
@@ -126,7 +126,7 @@ function PermissionEditor({
     onChange(updated as DBPermissions)
   }
 
-  const permsMap = permissions as Record<string, Record<string, boolean>>
+  const permsMap = permissions as unknown as Record<string, Record<string, boolean>>
 
   return (
     <div className="space-y-3">
@@ -141,11 +141,10 @@ function PermissionEditor({
                   key={action}
                   type="button"
                   onClick={() => toggle(key, action)}
-                  className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors capitalize ${
-                    allowed
+                  className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors capitalize ${allowed
                       ? "bg-blue-600 text-white border-blue-600"
                       : "bg-white text-slate-500 border-slate-200 hover:border-slate-300"
-                  }`}
+                    }`}
                 >
                   {action}
                 </button>
@@ -164,20 +163,20 @@ export default function AdminUsersPage() {
   const { user: me } = useRole()
   const router = useRouter()
 
-  const [users,     setUsers]     = useState<ManagedUser[]>([])
-  const [loading,   setLoading]   = useState(true)
-  const [error,     setError]     = useState<string | null>(null)
-  const [saving,    setSaving]    = useState<string | null>(null)
+  const [users, setUsers] = useState<ManagedUser[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState<string | null>(null)
 
   const [createOpen, setCreateOpen] = useState(false)
-  const [editUser,   setEditUser]   = useState<ManagedUser | null>(null)
-  const [deleteId,   setDeleteId]   = useState<string | null>(null)
-  const [pwdUser,    setPwdUser]    = useState<ManagedUser | null>(null)
+  const [editUser, setEditUser] = useState<ManagedUser | null>(null)
+  const [deleteId, setDeleteId] = useState<string | null>(null)
+  const [pwdUser, setPwdUser] = useState<ManagedUser | null>(null)
 
-  const [form,      setForm]      = useState({ name: "", email: "", password: "", role: "receptionist" as Role })
-  const [newPerms,  setNewPerms]  = useState<DBPermissions>(ROLE_DEFAULTS.receptionist)
+  const [form, setForm] = useState({ name: "", email: "", password: "", role: "receptionist" as Role })
+  const [newPerms, setNewPerms] = useState<DBPermissions>(ROLE_DEFAULTS.receptionist)
   const [createErr, setCreateErr] = useState("")
-  const [newPwd,    setNewPwd]    = useState("")
+  const [newPwd, setNewPwd] = useState("")
 
   // ── Data loading ─────────────────────────────────────────────────────────────
 
@@ -185,7 +184,7 @@ export default function AdminUsersPage() {
     setLoading(true)
     setError(null)
     try {
-      const res  = await fetch("/api/users")
+      const res = await fetch("/api/users")
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
       setUsers(data.users ?? [])
@@ -220,10 +219,10 @@ export default function AdminUsersPage() {
     setCreateErr("")
     setSaving("__new__")
     try {
-      const res  = await fetch("/api/users", {
-        method:  "POST",
+      const res = await fetch("/api/users", {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ ...form, permissions: newPerms }),
+        body: JSON.stringify({ ...form, permissions: newPerms }),
       })
       const data = await res.json()
       if (!res.ok) { setCreateErr(data.error ?? "Failed to create user."); return }
@@ -243,9 +242,9 @@ export default function AdminUsersPage() {
     setSaving(editUser._id)
     try {
       const res = await fetch(`/api/users/${editUser._id}`, {
-        method:  "PATCH",
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ permissions: editUser.permissions }),
+        body: JSON.stringify({ permissions: editUser.permissions }),
       })
       if (!res.ok) { setError("Failed to save permissions."); return }
       setUsers(us => us.map(u => u._id === editUser._id ? { ...u, permissions: editUser.permissions } : u))
@@ -261,9 +260,9 @@ export default function AdminUsersPage() {
     setSaving(u._id)
     try {
       const res = await fetch(`/api/users/${u._id}`, {
-        method:  "PATCH",
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ active: !u.active }),
+        body: JSON.stringify({ active: !u.active }),
       })
       if (!res.ok) { setError("Failed to update status."); return }
       setUsers(us => us.map(x => x._id === u._id ? { ...x, active: !u.active } : x))
@@ -294,9 +293,9 @@ export default function AdminUsersPage() {
     setSaving(pwdUser._id)
     try {
       const res = await fetch(`/api/users/${pwdUser._id}`, {
-        method:  "PATCH",
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ password: newPwd }),
+        body: JSON.stringify({ password: newPwd }),
       })
       if (!res.ok) { setError("Failed to reset password."); return }
       setNewPwd("")
@@ -310,9 +309,9 @@ export default function AdminUsersPage() {
 
   // ── Derived ───────────────────────────────────────────────────────────────────
 
-  const activeCount   = users.filter(u => u.active).length
+  const activeCount = users.filter(u => u.active).length
   const inactiveCount = users.filter(u => !u.active).length
-  const deleteTarget  = users.find(u => u._id === deleteId)
+  const deleteTarget = users.find(u => u._id === deleteId)
 
   // ── Render ────────────────────────────────────────────────────────────────────
 
@@ -348,9 +347,9 @@ export default function AdminUsersPage() {
       {/* Stats */}
       <div className="grid grid-cols-3 gap-3">
         {[
-          { label: "Total Users", value: users.length   },
-          { label: "Active",      value: activeCount    },
-          { label: "Inactive",    value: inactiveCount  },
+          { label: "Total Users", value: users.length },
+          { label: "Active", value: activeCount },
+          { label: "Inactive", value: inactiveCount },
         ].map(({ label, value }) => (
           <Card key={label}>
             <CardContent className="p-4">
@@ -375,134 +374,134 @@ export default function AdminUsersPage() {
             <div className="text-center py-16 text-sm text-muted-foreground">No users found.</div>
           ) : (
             <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow className="bg-muted/30">
-                  <TableHead className="pl-5 text-xs">User</TableHead>
-                  <TableHead className="text-xs">Role</TableHead>
-                  <TableHead className="text-xs hidden sm:table-cell">Permissions</TableHead>
-                  <TableHead className="text-xs hidden md:table-cell">Created</TableHead>
-                  <TableHead className="text-xs text-center">Status</TableHead>
-                  <TableHead className="text-xs pr-5 text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {users.map(u => {
-                  const RoleIcon = ROLE_ICON[u.role]
-                  const isSelf   = me.id === u._id
-                  const isBusy   = saving === u._id
-                  return (
-                    <TableRow key={u._id} className={`hover:bg-muted/20 transition-opacity ${isBusy ? "opacity-50" : ""}`}>
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-muted/30">
+                    <TableHead className="pl-5 text-xs">User</TableHead>
+                    <TableHead className="text-xs">Role</TableHead>
+                    <TableHead className="text-xs hidden sm:table-cell">Permissions</TableHead>
+                    <TableHead className="text-xs hidden md:table-cell">Created</TableHead>
+                    <TableHead className="text-xs text-center">Status</TableHead>
+                    <TableHead className="text-xs pr-5 text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {users.map(u => {
+                    const RoleIcon = ROLE_ICON[u.role]
+                    const isSelf = me.id === u._id
+                    const isBusy = saving === u._id
+                    return (
+                      <TableRow key={u._id} className={`hover:bg-muted/20 transition-opacity ${isBusy ? "opacity-50" : ""}`}>
 
-                      {/* User info */}
-                      <TableCell className="pl-5">
-                        <div className="flex items-center gap-3">
-                          <div className={`h-9 w-9 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${ROLE_COLOR[u.role]}`}>
-                            {initials(u.name)}
+                        {/* User info */}
+                        <TableCell className="pl-5">
+                          <div className="flex items-center gap-3">
+                            <div className={`h-9 w-9 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${ROLE_COLOR[u.role]}`}>
+                              {initials(u.name)}
+                            </div>
+                            <div>
+                              <p className="font-medium text-sm flex items-center gap-1.5">
+                                {u.name}
+                                {isSelf && (
+                                  <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-full border border-blue-200">you</span>
+                                )}
+                              </p>
+                              <p className="text-xs text-muted-foreground">{u.email}</p>
+                            </div>
                           </div>
-                          <div>
-                            <p className="font-medium text-sm flex items-center gap-1.5">
-                              {u.name}
-                              {isSelf && (
-                                <span className="text-[10px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-full border border-blue-200">you</span>
-                              )}
-                            </p>
-                            <p className="text-xs text-muted-foreground">{u.email}</p>
-                          </div>
-                        </div>
-                      </TableCell>
+                        </TableCell>
 
-                      {/* Role */}
-                      <TableCell>
-                        <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium ${ROLE_COLOR[u.role]}`}>
-                          <RoleIcon className="h-3 w-3" />
-                          {u.role.charAt(0).toUpperCase() + u.role.slice(1)}
-                        </span>
-                      </TableCell>
+                        {/* Role */}
+                        <TableCell>
+                          <span className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium ${ROLE_COLOR[u.role]}`}>
+                            <RoleIcon className="h-3 w-3" />
+                            {u.role.charAt(0).toUpperCase() + u.role.slice(1)}
+                          </span>
+                        </TableCell>
 
-                      {/* Permissions summary */}
-                      <TableCell className="text-xs text-muted-foreground hidden sm:table-cell">
-                        {permissionSummary(u.permissions, u.role)}
-                      </TableCell>
+                        {/* Permissions summary */}
+                        <TableCell className="text-xs text-muted-foreground hidden sm:table-cell">
+                          {permissionSummary(u.permissions, u.role)}
+                        </TableCell>
 
-                      {/* Created date */}
-                      <TableCell className="text-xs text-muted-foreground hidden md:table-cell">
-                        {new Date(u.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
-                      </TableCell>
+                        {/* Created date */}
+                        <TableCell className="text-xs text-muted-foreground hidden md:table-cell">
+                          {new Date(u.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}
+                        </TableCell>
 
-                      {/* Status */}
-                      <TableCell className="text-center">
-                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${u.active ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500"}`}>
-                          {u.active ? "Active" : "Inactive"}
-                        </span>
-                      </TableCell>
+                        {/* Status */}
+                        <TableCell className="text-center">
+                          <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${u.active ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500"}`}>
+                            {u.active ? "Active" : "Inactive"}
+                          </span>
+                        </TableCell>
 
-                      {/* Actions */}
-                      <TableCell className="text-right pr-5">
-                        {isBusy ? (
-                          <Loader2 className="h-4 w-4 animate-spin ml-auto text-muted-foreground" />
-                        ) : (
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon" className="h-8 w-8">
-                                <MoreHorizontal className="h-4 w-4" />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end" className="w-48">
+                        {/* Actions */}
+                        <TableCell className="text-right pr-5">
+                          {isBusy ? (
+                            <Loader2 className="h-4 w-4 animate-spin ml-auto text-muted-foreground" />
+                          ) : (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="icon" className="h-8 w-8">
+                                  <MoreHorizontal className="h-4 w-4" />
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="w-48">
 
-                              {u.role !== "admin" && (
-                                <DropdownMenuItem
-                                  className="flex items-center gap-2 cursor-pointer"
-                                  onClick={() => setEditUser({ ...u })}
-                                >
-                                  <Pencil className="h-3.5 w-3.5" />
-                                  Edit Permissions
-                                </DropdownMenuItem>
-                              )}
-
-                              <DropdownMenuItem
-                                className="flex items-center gap-2 cursor-pointer"
-                                onClick={() => setPwdUser(u)}
-                              >
-                                <KeyRound className="h-3.5 w-3.5" />
-                                Reset Password
-                              </DropdownMenuItem>
-
-                              {!isSelf && (
-                                <DropdownMenuItem
-                                  className="flex items-center gap-2 cursor-pointer"
-                                  onClick={() => handleToggleActive(u)}
-                                >
-                                  {u.active
-                                    ? <><ToggleLeft  className="h-3.5 w-3.5" />Deactivate</>
-                                    : <><ToggleRight className="h-3.5 w-3.5" />Activate</>
-                                  }
-                                </DropdownMenuItem>
-                              )}
-
-                              {u.role !== "admin" && !isSelf && (
-                                <>
-                                  <DropdownMenuSeparator />
+                                {u.role !== "admin" && (
                                   <DropdownMenuItem
-                                    className="flex items-center gap-2 text-destructive focus:text-destructive cursor-pointer"
-                                    onClick={() => setDeleteId(u._id)}
+                                    className="flex items-center gap-2 cursor-pointer"
+                                    onClick={() => setEditUser({ ...u })}
                                   >
-                                    <Trash2 className="h-3.5 w-3.5" />
-                                    Delete User
+                                    <Pencil className="h-3.5 w-3.5" />
+                                    Edit Permissions
                                   </DropdownMenuItem>
-                                </>
-                              )}
+                                )}
 
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        )}
-                      </TableCell>
+                                <DropdownMenuItem
+                                  className="flex items-center gap-2 cursor-pointer"
+                                  onClick={() => setPwdUser(u)}
+                                >
+                                  <KeyRound className="h-3.5 w-3.5" />
+                                  Reset Password
+                                </DropdownMenuItem>
 
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
+                                {!isSelf && (
+                                  <DropdownMenuItem
+                                    className="flex items-center gap-2 cursor-pointer"
+                                    onClick={() => handleToggleActive(u)}
+                                  >
+                                    {u.active
+                                      ? <><ToggleLeft className="h-3.5 w-3.5" />Deactivate</>
+                                      : <><ToggleRight className="h-3.5 w-3.5" />Activate</>
+                                    }
+                                  </DropdownMenuItem>
+                                )}
+
+                                {u.role !== "admin" && !isSelf && (
+                                  <>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem
+                                      className="flex items-center gap-2 text-destructive focus:text-destructive cursor-pointer"
+                                      onClick={() => setDeleteId(u._id)}
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                      Delete User
+                                    </DropdownMenuItem>
+                                  </>
+                                )}
+
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
+                        </TableCell>
+
+                      </TableRow>
+                    )
+                  })}
+                </TableBody>
+              </Table>
             </div>
           )}
         </CardContent>
@@ -571,11 +570,10 @@ export default function AdminUsersPage() {
                       key={r}
                       type="button"
                       onClick={() => { setForm(f => ({ ...f, role: r })); setNewPerms(ROLE_DEFAULTS[r]) }}
-                      className={`flex flex-col items-center gap-1.5 rounded-xl border p-3 text-center transition-all ${
-                        form.role === r
+                      className={`flex flex-col items-center gap-1.5 rounded-xl border p-3 text-center transition-all ${form.role === r
                           ? `${ROLE_COLOR[r]} ring-2 ring-offset-1 ring-blue-400`
                           : "border-slate-200 text-slate-600 hover:border-slate-300"
-                      }`}
+                        }`}
                     >
                       <Icon className="h-4 w-4" />
                       <p className="text-xs font-bold capitalize">{r}</p>
