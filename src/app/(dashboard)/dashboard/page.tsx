@@ -220,7 +220,11 @@ function DoctorDashboard({ name, patients, loading }: { name: string; patients: 
                             <Link href={buildFillHref(p, "edit")}><ClipboardEdit className="h-3 w-3" />Edit</Link>
                           </Button>
                           <Button size="sm" className="h-7 text-xs gap-1 bg-green-600 hover:bg-green-700"
-                            onClick={() => window.open(`https://wa.me/91${p.contact}?text=Dear+${encodeURIComponent(p.name)},+your+report+is+ready+at+Aarya+Diagnostics+Center.`)}>
+                            onClick={() => {
+                              const pdfUrl = p.reportSlug ? `${window.location.origin}/${p.reportSlug}/pdf` : `${window.location.origin}/api/patients/${p._id}/pdf`
+                              const msg = `Dear ${p.name},\n\nYour *${p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
+                              window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
+                            }}>
                             <MessageCircle className="h-3 w-3" />Share
                           </Button>
                         </div>

@@ -33,6 +33,7 @@ interface PatientDoc {
   study: string
   reportStatus: "pending" | "in_progress" | "completed"
   reportDocx?: string
+  reportSlug?: string
   createdAt: string
 }
 
@@ -436,7 +437,11 @@ export default function ReportsPage() {
                             Print
                           </Button>
                           <Button size="sm" className="h-7 text-xs gap-1 bg-green-600 hover:bg-green-700"
-                            onClick={() => window.open(`https://wa.me/91${p.contact}?text=Dear+${encodeURIComponent(p.name)},+your+report+is+ready+at+Aarya+Diagnostics.`)}>
+                            onClick={() => {
+                              const pdfUrl = p.reportSlug ? `${window.location.origin}/${p.reportSlug}/pdf` : `${window.location.origin}/api/patients/${p._id}/pdf`
+                              const msg = `Dear ${p.name},\n\nYour *${p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
+                              window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
+                            }}>
                             <Share2 className="h-3 w-3" />
                           </Button>
                         </>
@@ -479,7 +484,11 @@ export default function ReportsPage() {
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem className="flex items-center gap-2 text-green-700"
-                              onClick={() => window.open(`https://wa.me/91${p.contact}?text=Your+report+from+Aarya+Diagnostics+is+ready.`)}>
+                              onClick={() => {
+                                const pdfUrl = p.reportSlug ? `${window.location.origin}/${p.reportSlug}/pdf` : `${window.location.origin}/api/patients/${p._id}/pdf`
+                                const msg = `Dear ${p.name},\n\nYour *${p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
+                                window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
+                              }}>
                               <Share2 className="h-3.5 w-3.5" />Share on WhatsApp
                             </DropdownMenuItem>
                           </DropdownMenuContent>
@@ -516,7 +525,11 @@ export default function ReportsPage() {
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem className="flex items-center gap-2 text-green-700"
-                              onClick={() => window.open(`https://wa.me/91${p.contact}?text=Your+report+is+ready.`)}>
+                              onClick={() => {
+                                const pdfUrl = p.reportSlug ? `${window.location.origin}/${p.reportSlug}/pdf` : `${window.location.origin}/api/patients/${p._id}/pdf`
+                                const msg = `Dear ${p.name},\n\nYour *${p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
+                                window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
+                              }}>
                               <Share2 className="h-3.5 w-3.5" />Share on WhatsApp
                             </DropdownMenuItem>
                           </DropdownMenuContent>
