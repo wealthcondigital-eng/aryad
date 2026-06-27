@@ -236,10 +236,12 @@ export interface ReportViewerProps {
   date?: string
   reportContent?: Record<string, string>
   reportingDoctor?: string
+  patientId?: string
+  reportSlug?: string
 }
 
 export function ReportDocViewer(props: ReportViewerProps) {
-  const { open, onClose, name, age, gender, contact, referredBy, study, date, srNo } = props
+  const { open, onClose, name, age, gender, contact, referredBy, study, date, srNo, patientId, reportSlug } = props
   const fields  = getFields(study)
   const content = props.reportContent ?? getSampleContent(study)
   const today   = date ?? new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
@@ -253,14 +255,22 @@ export function ReportDocViewer(props: ReportViewerProps) {
     ["SR. NO",  `#${srNo}`],
   ]
 
+  const pdfUrl = reportSlug
+    ? `${typeof window !== "undefined" ? window.location.origin : "https://aaryad.com"}/${reportSlug}/pdf`
+    : patientId
+    ? `${typeof window !== "undefined" ? window.location.origin : "https://aaryad.com"}/api/patients/${patientId}/pdf`
+    : null
+
   const shareToPatient = () => {
-    const msg = `*Aarya Diagnostics Center*%0A*Report Ready*%0A%0APatient: ${name}%0ADate: ${today}%0AStudy: ${study}%0A%0AYour diagnostic report is ready. Please visit the center or contact us at 9876543210.%0A%0AThank you.`
-    window.open(`https://wa.me/91${contact.replace(/\D/g, "")}?text=${msg}`, "_blank")
+    const base = `Dear ${name},\n\nYour *${study}* report from *Aarya Diagnostics Center* is ready.`
+    const msg  = pdfUrl ? `${base}\n\n📄 Download your report:\n${pdfUrl}` : base
+    window.open(`https://wa.me/91${contact.replace(/\D/g, "")}?text=${encodeURIComponent(msg)}`, "_blank")
   }
 
   const shareToDoctor = () => {
-    const msg = `*Aarya Diagnostics Center*%0A*Report for Review*%0A%0APatient: ${name} (${age}Y / ${gender})%0ADate: ${today}%0AStudy: ${study}%0ARef. By: ${referredBy}%0A%0AReport is ready. Please review at your convenience.`
-    window.open(`https://wa.me/?text=${msg}`, "_blank")
+    const base = `*Aarya Diagnostics Center*\nReport: *${name}* — *${study}*\nDate: ${today}`
+    const msg  = pdfUrl ? `${base}\n\n📄 Download PDF:\n${pdfUrl}` : base
+    window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank")
   }
 
   return (

@@ -36,6 +36,7 @@ interface PatientDoc {
   discount: number
   paymentMode: string
   billId?: string
+  reportSlug?: string
   createdAt: string
 }
 
@@ -423,6 +424,7 @@ function ReceptionistDashboard({ name, patients, loading }: { name: string; pati
           srNo={viewReport.srNo} name={viewReport.name} age={viewReport.age}
           gender={viewReport.gender} contact={viewReport.contact}
           referredBy={viewReport.referredBy} study={viewReport.study}
+          patientId={viewReport._id} reportSlug={viewReport.reportSlug}
         />
       )}
       {viewBill && (
