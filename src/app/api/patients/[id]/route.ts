@@ -27,6 +27,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     const { editHistoryEntry, registrationEditHistoryEntry, ...regularFields } = body
 
+    // Auto-generate pretty slug when PDF is first saved
+    if (regularFields.reportPdf) {
+      const cur = await Patient.findById(id).select("name srNo reportSlug")
+      if (cur && !cur.reportSlug) {
+        const base = cur.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+        let slug = `${base}-report`
+        const taken = await Patient.findOne({ reportSlug: slug, _id: { $ne: id } }).select("_id")
+        if (taken) slug = `${base}-${cur.srNo}-report`
+        regularFields.reportSlug = slug
+      }
+    }
+
     // Build update: $set for regular fields, $push to front of stack for history
     const mongoUpdate: Record<string, unknown> = {}
     if (Object.keys(regularFields).length > 0) {

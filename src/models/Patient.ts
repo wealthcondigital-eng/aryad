@@ -26,6 +26,7 @@ export interface IPatient extends Document {
   reportBody: string          // latest submitted HTML (with report-edited attribution spans)
   reportDocx: string          // base64-encoded DOCX of the latest submission
   reportPdf:  string          // base64-encoded PDF for public link sharing
+  reportSlug: string          // pretty URL slug e.g. "sagar-dutta-report"
   editHistory: IEditHistoryEntry[]  // stack: index 0 = most recent edit
   registrationEditHistory: IRegistrationEditEntry[]  // stack: index 0 = most recent registration edit
   charges: number
@@ -70,6 +71,7 @@ const PatientSchema = new Schema<IPatient>(
     reportBody:              { type: String, default: "" },
     reportDocx:              { type: String, default: "" },
     reportPdf:               { type: String, default: "" },
+    reportSlug:              { type: String, default: "", sparse: true },
     editHistory:             { type: [EditHistorySchema],             default: [] },
     registrationEditHistory: { type: [RegistrationEditHistorySchema], default: [] },
     charges:                 { type: Number, default: 0 },

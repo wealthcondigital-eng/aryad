@@ -85,11 +85,7 @@ export function ReportViewModal({
     const stripEditMarks = (html: string) =>
       html.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
     const bodyHtml  = stripEditMarks(bodyRef.current?.innerHTML || reportBody)
-    const nameSlug  = patient.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
-    const pdfUrl    = `${window.location.origin}/api/report/${nameSlug}-${patient._id}/pdf`
-    const num       = patient.contact?.replace(/\D/g, "") ?? ""
-    const msg       = `Dear ${patient.name},\n\nYour *${patient.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
-    const waUrl     = num ? `https://wa.me/91${num}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`
+    const num = patient.contact?.replace(/\D/g, "") ?? ""
 
     try {
       const { jsPDF } = await import("jspdf")
@@ -148,15 +144,24 @@ export function ReportViewModal({
       let binary = ""; bytes.forEach((b) => (binary += String.fromCharCode(b)))
       const base64    = btoa(binary)
 
-      await fetch(`/api/patients/${patient._id}`, {
+      const res  = await fetch(`/api/patients/${patient._id}`, {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ reportPdf: base64 }),
       })
+      const data = await res.json()
+      const slug = data?.patient?.reportSlug
+      const pdfUrl = slug
+        ? `${window.location.origin}/${slug}/pdf`
+        : `${window.location.origin}/api/patients/${patient._id}/pdf`
+      const msg  = `Dear ${patient.name},\n\nYour *${patient.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
+      const waUrl = num ? `https://wa.me/91${num}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`
+      setShareLoading(false)
+      window.open(waUrl, "_blank")
+      return
     } catch {}
 
     setShareLoading(false)
-    window.open(waUrl, "_blank")
   }
 
   const handlePrint = () => {

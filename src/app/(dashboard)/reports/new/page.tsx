@@ -960,35 +960,40 @@ function ReportEditorInner() {
     setShareLoading(true)
 
     const cleanHtml = stripEditedSpans(bodyRef.current?.innerHTML ?? "")
-    const nameSlug  = patient.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
-    const pdfUrl    = `${window.location.origin}/api/report/${nameSlug}-${paramId}/pdf`
+    const num       = to === "patient" ? contact.replace(/\D/g, "") : ""
 
-    const msg = to === "patient"
-      ? `Dear ${patient},\n\nYour *${study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
-      : `*Aarya Diagnostics Center*\nReport: *${patient}* — *${study}*\nDate: ${date}\n\n📄 Download PDF:\n${pdfUrl}`
-
-    const num   = to === "patient" ? contact.replace(/\D/g, "") : ""
-    const waUrl = num
-      ? `https://wa.me/91${num}?text=${encodeURIComponent(msg)}`
-      : `https://wa.me/?text=${encodeURIComponent(msg)}`
-
-    // Generate PDF and upload to server so the link works
     try {
-      const pdfBlob   = await buildPdfBlob(cleanHtml)
-      const arrayBuf  = await pdfBlob.arrayBuffer()
-      const bytes     = new Uint8Array(arrayBuf)
+      const pdfBlob  = await buildPdfBlob(cleanHtml)
+      const arrayBuf = await pdfBlob.arrayBuffer()
+      const bytes    = new Uint8Array(arrayBuf)
       let binary = ""; bytes.forEach((b) => (binary += String.fromCharCode(b)))
-      const base64    = btoa(binary)
+      const base64   = btoa(binary)
 
-      await fetch(`/api/patients/${paramId}`, {
+      const res  = await fetch(`/api/patients/${paramId}`, {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ reportPdf: base64 }),
       })
+      const data   = await res.json()
+      const slug   = data?.patient?.reportSlug
+      const pdfUrl = slug
+        ? `${window.location.origin}/${slug}/pdf`
+        : `${window.location.origin}/api/patients/${paramId}/pdf`
+
+      const msg = to === "patient"
+        ? `Dear ${patient},\n\nYour *${study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
+        : `*Aarya Diagnostics Center*\nReport: *${patient}* — *${study}*\nDate: ${date}\n\n📄 Download PDF:\n${pdfUrl}`
+
+      const waUrl = num
+        ? `https://wa.me/91${num}?text=${encodeURIComponent(msg)}`
+        : `https://wa.me/?text=${encodeURIComponent(msg)}`
+
+      setShareLoading(false)
+      window.open(waUrl, "_blank")
+      return
     } catch {}
 
     setShareLoading(false)
-    window.open(waUrl, "_blank")
   }
 
   // ── Decode base64 and trigger browser download ──────────────────────────────
