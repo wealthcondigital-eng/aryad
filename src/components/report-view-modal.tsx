@@ -85,9 +85,10 @@ export function ReportViewModal({
     const stripEditMarks = (html: string) =>
       html.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
     const bodyHtml  = stripEditMarks(bodyRef.current?.innerHTML || reportBody)
-    const pdfUrl    = `${window.location.origin}/api/patients/${patient._id}/pdf`
+    const nameSlug  = patient.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+    const pdfUrl    = `${window.location.origin}/api/report/${nameSlug}-${patient._id}/pdf`
     const num       = patient.contact?.replace(/\D/g, "") ?? ""
-    const msg       = `Dear ${patient.name},\n\nYour *${patient.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}\n\nAarya Diagnostics Center\nTel: 9819022444`
+    const msg       = `Dear ${patient.name},\n\nYour *${patient.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
     const waUrl     = num ? `https://wa.me/91${num}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`
 
     try {
@@ -131,10 +132,8 @@ export function ReportViewModal({
       doc.setDrawColor(0); doc.setLineWidth(0.3); doc.line((W - sw) / 2, y + 1, (W + sw) / 2, y + 1)
       y += ln(12) + 5
 
-      doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(50)
-      const plainText = new DOMParser().parseFromString(bodyHtml, "text/html").body.textContent ?? ""
-      const wrappedLines = doc.splitTextToSize(plainText, CW)
-      for (const line of wrappedLines) { checkPage(5.5); doc.text(line, M, y); y += 5.5 }
+      const { renderHtmlToPdf } = await import("@/lib/pdf-html-renderer")
+      y = renderHtmlToPdf(doc, bodyHtml, M, CW, y, checkPage, 5.5)
 
       checkPage(24); y += 10
       doc.setDrawColor(180); doc.setLineWidth(0.3); doc.line(M, y, M + 60, y); y += 4

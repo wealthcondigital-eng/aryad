@@ -939,13 +939,9 @@ function ReportEditorInner() {
     doc.line((W - sw) / 2, y + 1, (W + sw) / 2, y + 1)
     y += ln(12) + 5
 
-    // ── Report body (word-wrapped plain text) ──
-    doc.setFont("helvetica", "normal"); doc.setFontSize(10); doc.setTextColor(50)
-    const plainText = new DOMParser().parseFromString(bodyHtml, "text/html").body.textContent ?? ""
-    const wrappedLines = doc.splitTextToSize(plainText, CW)
-    for (const line of wrappedLines) {
-      checkPage(5.5); doc.text(line, M, y); y += 5.5
-    }
+    // ── Report body (HTML-aware, preserves bold labels) ──
+    const { renderHtmlToPdf } = await import("@/lib/pdf-html-renderer")
+    y = renderHtmlToPdf(doc, bodyHtml, M, CW, y, checkPage, 5.5)
 
     // ── Signature ──
     checkPage(24); y += 10
@@ -964,11 +960,12 @@ function ReportEditorInner() {
     setShareLoading(true)
 
     const cleanHtml = stripEditedSpans(bodyRef.current?.innerHTML ?? "")
-    const pdfUrl    = `${window.location.origin}/api/patients/${paramId}/pdf`
+    const nameSlug  = patient.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+    const pdfUrl    = `${window.location.origin}/api/report/${nameSlug}-${paramId}/pdf`
 
     const msg = to === "patient"
-      ? `Dear ${patient},\n\nYour *${study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}\n\nAarya Diagnostics Center\nTel: 9819022444`
-      : `*Aarya Diagnostics Center*\nReport: *${patient}* — *${study}*\nDate: ${date}\n\n📄 Download PDF:\n${pdfUrl}\n\nAarya Diagnostics Center\nTel: 9819022444`
+      ? `Dear ${patient},\n\nYour *${study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
+      : `*Aarya Diagnostics Center*\nReport: *${patient}* — *${study}*\nDate: ${date}\n\n📄 Download PDF:\n${pdfUrl}`
 
     const num   = to === "patient" ? contact.replace(/\D/g, "") : ""
     const waUrl = num
