@@ -631,7 +631,7 @@ function YearView({ patients, bills, ranges }: { patients: PatientRow[]; bills: 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <KpiCard label={`${year} YTD`} value={String(yearPts.length)} sub="Total patients" icon={Users} accent="border-l-blue-500" />
         <KpiCard label="Revenue YTD" value={fmtRev(yearRev)} sub="Year to date" icon={IndianRupee} accent="border-l-green-500" />
-        <KpiCard label="Best Month" value={bestMonth?.month ?? "—"} sub={`${maxPts} patients`} icon={TrendingUp} accent="border-l-orange-500" />
+        <KpiCard label="Best Month" value={bestMonth?.label ?? "—"} sub={`${maxPts} patients`} icon={TrendingUp} accent="border-l-orange-500" />
         <KpiCard label="Outstanding" value={fmtRev(outstanding)} sub="Total uncollected" icon={CreditCard} accent="border-l-red-400" />
       </div>
 

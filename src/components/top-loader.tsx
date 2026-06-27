@@ -13,10 +13,10 @@ function TopLoaderBar() {
   const [progress, setProgress] = useState(0)
 
   const prevKeyRef   = useRef(pathname + searchParams.toString())
-  const t1Ref = useRef<ReturnType<typeof setTimeout>>()
-  const t2Ref = useRef<ReturnType<typeof setTimeout>>()
-  const t3Ref = useRef<ReturnType<typeof setTimeout>>()
-  const doneRef = useRef<ReturnType<typeof setTimeout>>()
+  const t1Ref   = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const t2Ref   = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const t3Ref   = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const doneRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   // Intercept internal link clicks → start the bar
   useEffect(() => {

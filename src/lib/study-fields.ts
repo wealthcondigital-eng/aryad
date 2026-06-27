@@ -333,10 +333,8 @@ export const CATEGORY_FALLBACK: Record<string, FieldDef[]> = {
   Cardiology: [{ label: "FINDINGS", key: "findings", rows: 4 }],
 }
 
-import { ALL_STUDIES } from "@/components/combo-input"
-
-export function getCategory(studyName: string): string {
-  return ALL_STUDIES.find((s) => s.name === studyName)?.category ?? ""
+export function getCategory(_studyName: string): string {
+  return ""
 }
 
 export function getReportFields(studyName: string): FieldDef[] {

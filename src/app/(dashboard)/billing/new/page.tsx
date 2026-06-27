@@ -384,9 +384,10 @@ function NewBillingForm() {
       setBillNo(savedNo)
 
       const newEditEntry: EditEntry = {
-        editor:        "Receptionist",
-        editedAt:      new Date().toISOString(),
-        changedFields: Array.from(liveChangedFields),
+        editor:         "Receptionist",
+        editedAt:       new Date().toISOString(),
+        changedFields:  Array.from(liveChangedFields),
+        previousValues: {},
       }
 
       const snapData: SavedBillData = {
