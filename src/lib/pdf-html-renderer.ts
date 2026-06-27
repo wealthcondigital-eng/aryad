@@ -1,22 +1,27 @@
-// Browser-only: renders HTML with inline bold/normal into a jsPDF document
+// Browser-only: renders HTML (any structure) with inline bold into a jsPDF document
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function renderHtmlToPdf(doc: any, html: string, M: number, CW: number, startY: number, checkPage: (n: number) => void, lineH: number): number {
   let y = startY
+  if (!html?.trim()) return y
 
   type Run = { text: string; bold: boolean }
+  const BLOCK = new Set(["p","div","li","h1","h2","h3","h4","h5","h6","blockquote","pre","ul","ol"])
 
-  function getRunsFromNode(node: Node, parentBold: boolean): Run[] {
+  // Collect text runs from any node, tracking bold through strong/b/style
+  function getRuns(node: Node, bold: boolean): Run[] {
     if (node.nodeType === Node.TEXT_NODE) {
-      const t = (node.textContent ?? "").replace(/[\r\n]+/g, " ")
-      return t ? [{ text: t, bold: parentBold }] : []
+      const t = (node.textContent ?? "").replace(/\r?\n/g, " ")
+      return t ? [{ text: t, bold }] : []
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return []
     const el = node as Element
     const tag = el.tagName.toLowerCase()
     if (tag === "br") return [{ text: "\n", bold: false }]
-    const isBold = parentBold || tag === "strong" || tag === "b"
-    return Array.from(el.childNodes).flatMap(c => getRunsFromNode(c, isBold))
+    const inlineStyle = (el.getAttribute("style") ?? "").replace(/\s/g, "")
+    const isBold = bold || tag === "strong" || tag === "b"
+      || inlineStyle.includes("font-weight:bold") || inlineStyle.includes("font-weight:700")
+    return Array.from(el.childNodes).flatMap(c => getRuns(c, isBold))
   }
 
   function spaceW(): number {
@@ -24,74 +29,90 @@ export function renderHtmlToPdf(doc: any, html: string, M: number, CW: number, s
     return doc.getTextWidth(" ")
   }
 
-  function measureWord(word: string, bold: boolean): number {
-    doc.setFont("helvetica", bold ? "bold" : "normal"); doc.setFontSize(10)
-    return doc.getTextWidth(word)
-  }
-
+  // Render a list of runs as word-wrapped lines
   function renderRuns(runs: Run[]) {
-    type Token = { word: string; bold: boolean; isBreak: boolean }
+    type Token = { word: string; bold: boolean; br: boolean }
     const tokens: Token[] = []
 
     for (const run of runs) {
-      if (run.text === "\n") { tokens.push({ word: "\n", bold: false, isBreak: true }); continue }
+      if (run.text === "\n") { tokens.push({ word: "\n", bold: false, br: true }); continue }
       for (const part of run.text.split(/(\s+)/)) {
         if (!part) continue
         tokens.push(/^\s+$/.test(part)
-          ? { word: " ", bold: false, isBreak: false }
-          : { word: part, bold: run.bold, isBreak: false })
+          ? { word: " ", bold: false, br: false }
+          : { word: part, bold: run.bold, br: false })
       }
     }
 
-    let lineTokens: Token[] = []
-    let lineW = 0
+    let line: Token[] = [], lineW = 0
 
-    const flushLine = () => {
-      while (lineTokens.length && lineTokens[lineTokens.length - 1].word === " ") lineTokens.pop()
-      if (!lineTokens.length) return
+    const flush = () => {
+      while (line.length && line[line.length - 1].word === " ") line.pop()
+      if (!line.length) return
       checkPage(lineH)
       doc.setFontSize(10); doc.setTextColor(50)
       let x = M
-      for (const tok of lineTokens) {
+      for (const tok of line) {
         if (tok.word === " ") { x += spaceW(); continue }
         doc.setFont("helvetica", tok.bold ? "bold" : "normal")
         doc.text(tok.word, x, y)
         x += doc.getTextWidth(tok.word)
       }
-      y += lineH; lineTokens = []; lineW = 0
+      y += lineH; line = []; lineW = 0
     }
 
     for (const tok of tokens) {
-      if (tok.isBreak) { flushLine(); continue }
+      if (tok.br) { flush(); continue }
       if (tok.word === " ") {
-        if (lineTokens.length && lineTokens[lineTokens.length - 1].word !== " ") {
-          lineTokens.push(tok); lineW += spaceW()
-        }
+        if (line.length && line[line.length - 1].word !== " ") { line.push(tok); lineW += spaceW() }
         continue
       }
-      const ww = measureWord(tok.word, tok.bold)
-      if (lineW + ww > CW && lineTokens.some(t => t.word !== " ")) flushLine()
-      lineTokens.push(tok); lineW += ww
+      doc.setFont("helvetica", tok.bold ? "bold" : "normal"); doc.setFontSize(10)
+      const ww = doc.getTextWidth(tok.word)
+      if (lineW + ww > CW && line.some(t => t.word !== " ")) flush()
+      line.push(tok); lineW += ww
     }
-    while (lineTokens.length && lineTokens[lineTokens.length - 1].word === " ") lineTokens.pop()
-    flushLine()
+    flush()
   }
 
-  function walkNode(node: Node) {
-    if (node.nodeType === Node.ELEMENT_NODE) {
-      const el = node as Element
-      const tag = el.tagName.toLowerCase()
-      if (["p", "div", "li", "h1", "h2", "h3", "h4"].includes(tag)) {
-        const runs = Array.from(el.childNodes).flatMap(c => getRunsFromNode(c, false))
-        if (runs.some(r => r.text.trim())) { renderRuns(runs); y += 2 }
-        return
-      }
-    }
-    for (const child of Array.from(node.childNodes ?? [])) walkNode(child)
+  const body = new DOMParser().parseFromString(html, "text/html").body
+
+  // Accumulates inline/text runs at the top level between block elements
+  let pending: Run[] = []
+  const flushPending = () => {
+    if (pending.some(r => r.text.trim())) { renderRuns(pending); y += 2 }
+    pending = []
   }
 
-  for (const child of Array.from(new DOMParser().parseFromString(html, "text/html").body.childNodes))
-    walkNode(child)
+  function walk(node: Node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const t = (node.textContent ?? "").replace(/\r?\n/g, " ")
+      if (t.trim()) pending.push({ text: t, bold: false })
+      return
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return
+    const el = node as Element
+    const tag = el.tagName.toLowerCase()
+
+    if (tag === "br") {
+      // Treat <br> as a paragraph separator
+      flushPending()
+      return
+    }
+
+    if (BLOCK.has(tag)) {
+      flushPending()
+      const runs = Array.from(el.childNodes).flatMap(c => getRuns(c, false))
+      if (runs.some(r => r.text.trim())) { renderRuns(runs); y += 2 }
+      return
+    }
+
+    // Inline element — collect runs into pending buffer
+    pending.push(...getRuns(el, false))
+  }
+
+  for (const child of Array.from(body.childNodes)) walk(child)
+  flushPending()
 
   return y
 }

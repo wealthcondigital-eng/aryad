@@ -12,14 +12,15 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ id:
       return NextResponse.json({ error: "PDF not available" }, { status: 404 })
     }
 
-    const buffer = Buffer.from(patient.reportPdf, "base64")
-    const fileName = `Report_${(patient.name || "Patient").replace(/\s+/g, "_")}_${(patient.study || "Report").replace(/\s+/g, "_")}.pdf`
+    const buffer   = Buffer.from(patient.reportPdf, "base64")
+    const safeName = (patient.name || "Patient").replace(/\s+/g, "_").replace(/[^A-Za-z0-9_]/g, "")
+    const fileName = `${safeName}_Report.pdf`
 
     return new NextResponse(buffer, {
       headers: {
-        "Content-Type": "application/pdf",
+        "Content-Type":        "application/pdf",
         "Content-Disposition": `inline; filename="${fileName}"`,
-        "Cache-Control": "no-store",
+        "Cache-Control":       "no-store",
       },
     })
   } catch {
