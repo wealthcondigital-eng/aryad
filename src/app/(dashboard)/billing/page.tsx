@@ -2,8 +2,8 @@
 
 import { useState, useEffect, useCallback } from "react"
 import Link from "next/link"
-import { Plus, Search, Filter, MoreHorizontal, Printer, Pencil, History, X, Clock, Check, Eye } from "lucide-react"
-import { BillDocViewer } from "@/components/bill-doc-viewer"
+import { Plus, Search, Filter, MoreHorizontal, Printer, Pencil, History, X, Clock, Check, Eye, Share2 } from "lucide-react"
+import { BillDocViewer, shareBillOnWhatsApp } from "@/components/bill-doc-viewer"
 import { useRole } from "@/lib/role-context"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
@@ -274,6 +274,27 @@ function printBillReceipt(b: BillDoc, index: number) {
   setTimeout(() => win.print(), 600)
 }
 
+// Quick-share from the row menu: same flow as the receipt modal's WhatsApp button
+function shareBillReceipt(b: BillDoc, index: number) {
+  shareBillOnWhatsApp({
+    id:          b._id,
+    srNo:        b.srNo,
+    name:        b.patientName,
+    age:         b.age ?? "—",
+    gender:      b.gender || "—",
+    contact:     b.contact || "",
+    referredBy:  b.referredBy,
+    study:       b.items.map((i) => i.study).join(", "),
+    items:       b.items,
+    billNo:      billNo(b, index),
+    charges:     b.charges,
+    discount:    b.discount,
+    paid:        b.paid,
+    paymentMode: b.paymentMode,
+    date:        (b.billDate || b.createdAt)?.split("T")[0],
+  }).catch((e) => console.error(e))
+}
+
 const statusBadgeClass: Record<string, string> = {
   paid:    "bg-green-100 text-green-700",
   partial: "bg-yellow-100 text-yellow-700",
@@ -377,6 +398,10 @@ function BillsTable({
                           <Printer className="h-3.5 w-3.5 mr-2" />
                           Print Receipt
                         </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => shareBillReceipt(b, origIdx >= 0 ? origIdx : 0)}>
+                          <Share2 className="h-3.5 w-3.5 mr-2 text-green-600" />
+                          Share WhatsApp
+                        </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem asChild>
                           <Link href={`/billing/new?billId=${b._id}`}>Edit Bill</Link>
@@ -445,6 +470,10 @@ function BillsTable({
                       <DropdownMenuItem onClick={() => printBillReceipt(b, origIdx >= 0 ? origIdx : 0)}>
                         <Printer className="h-3.5 w-3.5 mr-2" />
                         Print Receipt
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => shareBillReceipt(b, origIdx >= 0 ? origIdx : 0)}>
+                        <Share2 className="h-3.5 w-3.5 mr-2 text-green-600" />
+                        Share WhatsApp
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem asChild>

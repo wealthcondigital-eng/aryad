@@ -13,10 +13,8 @@ const FIELD_LABELS: Record<string, string> = {
   referredBy: "Referred By", billDate: "Bill Date", patientName: "Patient Name",
 }
 
-export interface BillViewerProps {
+export interface BillShareData {
   id?: string
-  open: boolean
-  onClose: () => void
   srNo: number | string
   name: string
   age: number | string
@@ -34,8 +32,13 @@ export interface BillViewerProps {
   editHistory?: EditEntry[]
 }
 
+export interface BillViewerProps extends BillShareData {
+  open: boolean
+  onClose: () => void
+}
+
 // One table row per bill item; single-study callers fall back to one row
-function billRows(p: BillViewerProps): { study: string; amount: number }[] {
+function billRows(p: BillShareData): { study: string; amount: number }[] {
   if (p.items?.length) {
     return p.items.map((i) => ({ study: i.study, amount: (i.price ?? 0) * (i.quantity ?? 1) }))
   }
@@ -165,7 +168,7 @@ function printBill(props: BillViewerProps) {
 // Draws the same layout as the on-screen preview / print HTML:
 // title between two thick rules, patient-info grid, fully bordered table
 // with shaded header and total rows, then the Date / Payment Method / Receipt footer.
-const generateBillPdfBlob = async (p: BillViewerProps): Promise<Blob> => {
+const generateBillPdfBlob = async (p: BillShareData): Promise<Blob> => {
   const { jsPDF } = await import("jspdf")
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" })
   const W = 210, M = 20
@@ -284,8 +287,62 @@ const generateBillPdfBlob = async (p: BillViewerProps): Promise<Blob> => {
   return doc.output("blob")
 }
 
+// Shared by the receipt modal and the billing page row menu: generates the
+// receipt PDF, stores it on the bill (minting the pretty /name-receipt/pdf
+// slug), then opens WhatsApp with the download link.
+export async function shareBillOnWhatsApp(p: BillShareData): Promise<void> {
+  const pdfBlob = await generateBillPdfBlob(p)
+
+  // 1. Mobile Share (Direct PDF attachment)
+  if (navigator.share && navigator.canShare) {
+    const file = new File([pdfBlob], `Receipt_${p.name.replace(/\s+/g, "_")}.pdf`, { type: "application/pdf" })
+    if (navigator.canShare({ files: [file] })) {
+      await navigator.share({
+        files: [file],
+        title: `Payment Receipt - ${p.name}`,
+        text: `Dear ${p.name}, here is your payment receipt from Aarya Diagnostic Center.`,
+      })
+      return
+    }
+  }
+
+  const num = (p.contact || "").replace(/\D/g, "")
+
+  // 2. Desktop Share (Web Link via wa.me)
+  if (p.id) {
+    const arrayBuf = await pdfBlob.arrayBuffer()
+    const bytes    = new Uint8Array(arrayBuf)
+    let binary = ""; bytes.forEach((b) => (binary += String.fromCharCode(b)))
+    const base64   = btoa(binary)
+
+    const res = await fetch(`/api/billing/${p.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ billPdf: base64, editor: "System" }),
+    })
+
+    // Prefer the pretty public link (/sagar-dutta-receipt/pdf); fall back to the id URL
+    let pdfUrl = `${window.location.origin}/api/billing/${p.id}/pdf`
+    try {
+      const data = await res.json()
+      if (data?.bill?.billSlug) pdfUrl = `${window.location.origin}/${data.bill.billSlug}/pdf`
+    } catch { /* keep fallback URL */ }
+
+    const msg = `Dear ${p.name},\n\nYour payment receipt for *${p.study}* from *Aarya Diagnostic Center* is ready.\n\n📄 Download Receipt:\n${pdfUrl}`
+    const waUrl = num
+      ? `https://wa.me/91${num}?text=${encodeURIComponent(msg)}`
+      : `https://wa.me/?text=${encodeURIComponent(msg)}`
+    window.open(waUrl, "_blank")
+  } else {
+    const receiptNo = p.billNo ?? String(p.srNo)
+    const dateStr   = formatDate(p.date)
+    const msg = `*Aarya Diagnostic Center*%0APayment Receipt No. ${receiptNo}%0A%0APatient: ${p.name}%0AStudy: ${p.study}%0ADate: ${dateStr}%0ACharges: ₹${p.charges}%0APaid: ₹${p.paid}%0APayment: ${p.paymentMode || "Cash"}%0A%0AThank you for visiting Aarya Diagnostic Center!`
+    window.open(`https://wa.me/91${num}?text=${msg}`, "_blank")
+  }
+}
+
 export function BillDocViewer(props: BillViewerProps) {
-  const { open, onClose, srNo, name, age, gender, contact, referredBy, study, charges, paid, paymentMode } = props
+  const { open, onClose, srNo, name, age, gender, contact, referredBy, charges, paid, paymentMode } = props
   const discount    = props.discount ?? 0
   const editHistory = props.editHistory ?? []
   const dateStr     = formatDate(props.date)
@@ -298,47 +355,7 @@ export function BillDocViewer(props: BillViewerProps) {
     if (sharing) return
     setSharing(true)
     try {
-      const pdfBlob = await generateBillPdfBlob(props)
-
-      // 1. Mobile Share (Direct PDF attachment)
-      if (navigator.share && navigator.canShare) {
-        const file = new File([pdfBlob], `Receipt_${name.replace(/\s+/g, "_")}.pdf`, { type: "application/pdf" })
-        if (navigator.canShare({ files: [file] })) {
-          await navigator.share({
-            files: [file],
-            title: `Payment Receipt - ${name}`,
-            text: `Dear ${name}, here is your payment receipt from Aarya Diagnostic Center.`,
-          })
-          setSharing(false)
-          return
-        }
-      }
-
-      // 2. Desktop Share (Web Link via wa.me)
-      if (props.id) {
-        const arrayBuf = await pdfBlob.arrayBuffer()
-        const bytes    = new Uint8Array(arrayBuf)
-        let binary = ""; bytes.forEach((b) => (binary += String.fromCharCode(b)))
-        const base64   = btoa(binary)
-
-        const res = await fetch(`/api/billing/${props.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ billPdf: base64, editor: "System" }),
-        })
-
-        // Prefer the pretty public link (/sagar-dutta-receipt/pdf); fall back to the id URL
-        let pdfUrl = `${window.location.origin}/api/billing/${props.id}/pdf`
-        try {
-          const data = await res.json()
-          if (data?.bill?.billSlug) pdfUrl = `${window.location.origin}/${data.bill.billSlug}/pdf`
-        } catch { /* keep fallback URL */ }
-        const msg = `Dear ${name},\n\nYour payment receipt for *${study}* from *Aarya Diagnostic Center* is ready.\n\n📄 Download Receipt:\n${pdfUrl}`
-        window.open(`https://wa.me/91${contact.replace(/\D/g, "")}?text=${encodeURIComponent(msg)}`, "_blank")
-      } else {
-        const msg = `*Aarya Diagnostic Center*%0APayment Receipt No. ${receiptNo}%0A%0APatient: ${name}%0AStudy: ${study}%0ADate: ${dateStr}%0ACharges: ₹${charges}%0APaid: ₹${paid}%0APayment: ${paymentMode || "Cash"}%0A%0AThank you for visiting Aarya Diagnostic Center!`
-        window.open(`https://wa.me/91${contact.replace(/\D/g, "")}?text=${msg}`, "_blank")
-      }
+      await shareBillOnWhatsApp(props)
     } catch (e) {
       console.error(e)
     }
