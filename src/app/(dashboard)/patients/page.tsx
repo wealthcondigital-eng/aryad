@@ -157,7 +157,8 @@ function sharePdfUrl(p: PatientDoc, sidx = 0) {
 function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
   const entry = studiesOf(p)[sidx]
   const msg = `Dear ${p.name},\n\nYour *${entry?.name ?? p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${sharePdfUrl(p, sidx)}`
-  window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
+  // Open WhatsApp Web on the logged-in account; sender picks the recipient
+  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank")
 }
 
 // Shared column template so rows stay aligned across separate patient cards

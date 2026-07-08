@@ -67,7 +67,8 @@ function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
     ? `${window.location.origin}/${p.reportSlug}/pdf`
     : `${window.location.origin}/api/patients/${p._id}/pdf?sidx=${sidx}`
   const msg = `Dear ${p.name},\n\nYour *${entry?.name ?? p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
-  window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
+  // Open WhatsApp Web on the logged-in account; sender picks the recipient
+  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank")
 }
 
 function dateOf(d: string) {

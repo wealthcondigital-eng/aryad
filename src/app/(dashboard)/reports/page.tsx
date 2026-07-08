@@ -105,7 +105,8 @@ function pdfUrlFor(r: ReportRow) {
 
 function whatsAppShare(r: ReportRow) {
   const msg = `Dear ${r.p.name},\n\nYour *${r.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrlFor(r)}`
-  window.open(`https://wa.me/91${r.p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
+  // Open WhatsApp Web on the logged-in account; sender picks the recipient
+  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank")
 }
 
 function StatusBadge({ status }: { status: string }) {
