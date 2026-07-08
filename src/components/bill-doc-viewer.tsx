@@ -162,130 +162,124 @@ function printBill(props: BillViewerProps) {
   setTimeout(() => win.print(), 600)
 }
 
+// Draws the same layout as the on-screen preview / print HTML:
+// title between two thick rules, patient-info grid, fully bordered table
+// with shaded header and total rows, then the Date / Payment Method / Receipt footer.
 const generateBillPdfBlob = async (p: BillViewerProps): Promise<Blob> => {
   const { jsPDF } = await import("jspdf")
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" })
-  const W = 210, M = 20, CW = W - M * 2
-  let y = 18
+  const W = 210, M = 20
 
-  const ln = (pt: number) => pt * 0.352778 * 1.4
-
-  // Draw title
-  doc.setFont("helvetica", "bold")
-  doc.setFontSize(14)
-  doc.text("PAYMENT RECEIPT", W / 2, y, { align: "center" })
-  y += 8
-
-  // Draw line
-  doc.setLineWidth(0.5)
-  doc.line(M, y, W - M, y)
-  y += 6
-
-  // Draw Patient Info Grid
-  doc.setFont("helvetica", "normal")
-  doc.setFontSize(10)
-  
-  const col1X = M
-  const col2X = W / 2 + 5
-  const rowH = 6
-
-  const dateStr = formatDate(p.date)
+  const dateStr   = formatDate(p.date)
   const receiptNo = p.billNo || String(p.srNo)
+  const rows      = billRows(p)
+  const discount  = p.discount ?? 0
 
-  // Row 1
-  doc.setFont("helvetica", "bold"); doc.text("NAME:", col1X, y); doc.setFont("helvetica", "normal"); doc.text(p.name.toUpperCase(), col1X + 16, y)
-  doc.setFont("helvetica", "bold"); doc.text("DATE:", col2X, y); doc.setFont("helvetica", "normal"); doc.text(dateStr, col2X + 16, y)
-  y += rowH
+  let y = 22
+  doc.setDrawColor(17, 17, 17)
+  doc.setTextColor(17, 17, 17)
 
-  // Row 2
-  doc.setFont("helvetica", "bold"); doc.text("AGE/SEX:", col1X, y); doc.setFont("helvetica", "normal"); doc.text(`${p.age} YRS / ${p.gender.toUpperCase()}`, col1X + 18, y)
-  doc.setFont("helvetica", "bold"); doc.text("MOBILE:", col2X, y); doc.setFont("helvetica", "normal"); doc.text(p.contact, col2X + 18, y)
-  y += rowH
-
-  // Row 3
-  doc.setFont("helvetica", "bold"); doc.text("REF. BY:", col1X, y); doc.setFont("helvetica", "normal"); doc.text((p.referredBy || "Self").toUpperCase(), col1X + 18, y)
-  doc.setFont("helvetica", "bold"); doc.text("SR. NO:", col2X, y); doc.setFont("helvetica", "normal"); doc.text(`#${p.srNo}`, col2X + 16, y)
-  y += rowH + 2
-
-  // Draw line
+  // ── Title between two thick rules ──
+  doc.setLineWidth(0.7)
   doc.line(M, y, W - M, y)
-  y += 8
-
-  // Draw Items Table
-  const cols = [
-    { name: "Sr.", w: 12, align: "center" },
-    { name: "Investigation of Patient", w: 83, align: "left" },
-    { name: "Charges", w: 25, align: "center" },
-    { name: "Discount", w: 25, align: "center" },
-    { name: "Paid", w: 25, align: "center" }
-  ]
-
-  // Draw table header
   doc.setFont("helvetica", "bold")
-  let curX = M
-  cols.forEach(col => {
-    doc.text(col.name, curX + (col.align === "center" ? col.w / 2 : 0), y, { align: col.align as any })
-    curX += col.w
-  })
-  y += 4
+  doc.setFontSize(11.5)
+  doc.text("PAYMENT RECEIPT", W / 2, y + 5.7, { align: "center", charSpace: 0.5 })
+  doc.line(M, y + 8.2, W - M, y + 8.2)
+  y += 17
+
+  // ── Patient info grid (two columns, bold labels) ──
+  doc.setFontSize(9.5)
+  const col1X = M, col2X = W / 2 + 4, infoRowH = 5.5, labelW = 22
+  const info = (label: string, value: string, x: number) => {
+    doc.setFont("helvetica", "bold");   doc.text(label, x, y)
+    doc.setFont("helvetica", "normal"); doc.text(value, x + labelW, y)
+  }
+  info("NAME:", p.name.toUpperCase(), col1X)
+  info("DATE:", dateStr, col2X)
+  y += infoRowH
+  info("AGE / SEX:", `${p.age} YRS / ${p.gender.toUpperCase()}`, col1X)
+  info("MOBILE:", p.contact, col2X)
+  y += infoRowH
+  info("REF. BY:", (p.referredBy || "Self").toUpperCase(), col1X)
+  info("SR. NO:", `#${p.srNo}`, col2X)
+  y += 3.5
+
+  doc.setLineWidth(0.4)
   doc.line(M, y, W - M, y)
   y += 6
 
-  // Draw table rows
-  doc.setFont("helvetica", "normal")
-  const rows = billRows(p)
-  const discount = p.discount ?? 0
+  // ── Bordered table matching the print layout ──
+  const colW  = [14, 81, 25, 25, 25] // sums to the 170mm content width
+  const rowH  = 8
+  const cellX = (i: number) => M + colW.slice(0, i).reduce((a, b) => a + b, 0)
+
+  type Cell = { text: string; span?: number; align?: "center" | "left" }
+  const drawTableRow = (cells: Cell[], opts: { bold?: boolean; fillGray?: number } = {}) => {
+    doc.setFont("helvetica", opts.bold ? "bold" : "normal")
+    let ci = 0
+    for (const cell of cells) {
+      const span = cell.span ?? 1
+      const x = cellX(ci)
+      const w = colW.slice(ci, ci + span).reduce((a, b) => a + b, 0)
+      if (opts.fillGray !== undefined) {
+        doc.setFillColor(opts.fillGray, opts.fillGray, opts.fillGray)
+        doc.rect(x, y, w, rowH, "FD")
+      } else {
+        doc.rect(x, y, w, rowH, "S")
+      }
+      const ty = y + rowH / 2 + 1.3
+      if ((cell.align ?? "center") === "center") {
+        doc.text(cell.text, x + w / 2, ty, { align: "center" })
+      } else {
+        doc.text(cell.text, x + 2.5, ty)
+      }
+      ci += span
+    }
+    y += rowH
+  }
+
+  doc.setLineWidth(0.25)
+  doc.setFontSize(9)
+  drawTableRow([
+    { text: "SR. NO." },
+    { text: "INVESTIGATION OF PATIENT" },
+    { text: "CHARGES" },
+    { text: "DISCOUNT" },
+    { text: "PAID" },
+  ], { bold: true, fillGray: 240 })
 
   rows.forEach((r, i) => {
-    curX = M
-    // Sr No
-    doc.text(`${i + 1}`, curX + cols[0].w / 2, y, { align: "center" })
-    curX += cols[0].w
-
-    // Investigation
-    doc.text(r.study.toUpperCase(), curX, y)
-    curX += cols[1].w
-
-    // Charges
-    doc.text(`${r.amount}`, curX + cols[2].w / 2, y, { align: "center" })
-    curX += cols[2].w
-
-    // Discount
-    doc.text(`${i === 0 ? discount : 0}`, curX + cols[3].w / 2, y, { align: "center" })
-    curX += cols[3].w
-
-    // Paid
-    doc.text(`${i === 0 ? p.paid : 0}`, curX + cols[4].w / 2, y, { align: "center" })
-    y += rowH
+    drawTableRow([
+      { text: `${i + 1}.` },
+      { text: r.study.toUpperCase(), align: "left" },
+      { text: `${r.amount}` },
+      { text: `${i === 0 ? discount : 0}` },
+      { text: `${i === 0 ? p.paid : 0}` },
+    ])
   })
 
-  doc.line(M, y, W - M, y)
-  y += 6
-
-  // Draw Total Row
-  doc.setFont("helvetica", "bold")
-  curX = M + cols[0].w
-  doc.text("Total", curX, y)
-  curX += cols[1].w
-
-  doc.text(`${p.charges}`, curX + cols[2].w / 2, y, { align: "center" })
-  curX += cols[2].w
-
-  doc.text(`${discount}`, curX + cols[3].w / 2, y, { align: "center" })
-  curX += cols[3].w
-
-  doc.text(`${p.paid}`, curX + cols[4].w / 2, y, { align: "center" })
-  y += rowH + 2
-
-  doc.line(M, y, W - M, y)
+  drawTableRow([
+    { text: "Total", span: 2 },
+    { text: `${p.charges}` },
+    { text: `${discount}` },
+    { text: `${p.paid}` },
+  ], { bold: true, fillGray: 249 })
   y += 8
 
-  // Draw Footer
-  doc.setFont("helvetica", "normal")
-  doc.setFontSize(9)
-  doc.text(`Payment Method: ${(p.paymentMode || "Cash").toUpperCase()}`, M, y)
-  y += 5
-  doc.text(`Receipt Number: ${receiptNo}`, M, y)
+  // ── Footer ──
+  doc.setFontSize(9.5)
+  const footer = (label: string, value: string) => {
+    doc.setFont("helvetica", "bold")
+    doc.text(label, M, y)
+    const lw = doc.getTextWidth(label)
+    doc.setFont("helvetica", "normal")
+    doc.text(value, M + lw + 1.5, y)
+    y += 5
+  }
+  footer("Date:", dateStr)
+  footer("Payment Method -", (p.paymentMode || "Cash").toUpperCase())
+  footer("Payment Receipt.", receiptNo)
 
   return doc.output("blob")
 }
@@ -327,13 +321,18 @@ export function BillDocViewer(props: BillViewerProps) {
         let binary = ""; bytes.forEach((b) => (binary += String.fromCharCode(b)))
         const base64   = btoa(binary)
 
-        await fetch(`/api/billing/${props.id}`, {
+        const res = await fetch(`/api/billing/${props.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ billPdf: base64, editor: "System" }),
         })
 
-        const pdfUrl = `${window.location.origin}/api/billing/${props.id}/pdf`
+        // Prefer the pretty public link (/sagar-dutta-receipt/pdf); fall back to the id URL
+        let pdfUrl = `${window.location.origin}/api/billing/${props.id}/pdf`
+        try {
+          const data = await res.json()
+          if (data?.bill?.billSlug) pdfUrl = `${window.location.origin}/${data.bill.billSlug}/pdf`
+        } catch { /* keep fallback URL */ }
         const msg = `Dear ${name},\n\nYour payment receipt for *${study}* from *Aarya Diagnostic Center* is ready.\n\n📄 Download Receipt:\n${pdfUrl}`
         window.open(`https://wa.me/91${contact.replace(/\D/g, "")}?text=${encodeURIComponent(msg)}`, "_blank")
       } else {

@@ -30,6 +30,7 @@ export interface IBill extends Document {
   billDate: string
   notes?: string
   billPdf?: string
+  billSlug?: string
   editHistory: IBillEditEntry[]
   createdAt: Date
   updatedAt: Date
@@ -69,6 +70,7 @@ const BillSchema = new Schema<IBill>(
     billDate:    { type: String },
     notes:       { type: String, default: "" },
     billPdf:     { type: String, default: "" },
+    billSlug:    { type: String, sparse: true },
     editHistory: { type: [BillEditHistorySchema], default: [] },
   },
   { timestamps: true }

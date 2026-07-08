@@ -47,6 +47,21 @@ function syncLegacyMirror(patient: any) {
     "pending"
 }
 
+// Pretty public slug for the receipt PDF, e.g. "sagar-dutta-receipt" → /sagar-dutta-receipt/pdf
+async function generateBillSlug(bill: any): Promise<string> {
+  const nameBase = String(bill.patientName || "patient")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+  let slug = `${nameBase}-receipt`
+  const taken = await Bill.findOne({ _id: { $ne: bill._id }, billSlug: slug }).select("_id")
+  if (taken) slug = `${nameBase}-${bill.srNo}-receipt`
+  let candidate = slug
+  let n = 2
+  while (await Bill.findOne({ _id: { $ne: bill._id }, billSlug: candidate }).select("_id")) {
+    candidate = `${slug}-${n++}`
+  }
+  return candidate
+}
+
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   await connectDB()
@@ -85,6 +100,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
   const updateObj: any = {
     $set: { ...updatedFields, balance, charges, discount, paid, paymentMode }
+  }
+  // Lazily mint the pretty receipt slug the first time a PDF is stored
+  if (updatedFields.billPdf && !current.billSlug) {
+    updateObj.$set.billSlug = await generateBillSlug(current)
   }
   if (changedFields.length > 0) {
     updateObj.$push = { editHistory: { $each: [editEntry], $position: 0 } }
