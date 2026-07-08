@@ -290,11 +290,12 @@ const generateBillPdfBlob = async (p: BillShareData): Promise<Blob> => {
 // Shared by the receipt modal and the billing page row menu: generates the
 // receipt PDF, stores it on the bill (minting the pretty /name-receipt/pdf
 // slug), then opens WhatsApp with the download link.
-export async function shareBillOnWhatsApp(p: BillShareData): Promise<void> {
+export async function shareBillOnWhatsApp(p: BillShareData, opts: { forceLink?: boolean } = {}): Promise<void> {
   const pdfBlob = await generateBillPdfBlob(p)
 
-  // 1. Mobile Share (Direct PDF attachment)
-  if (navigator.share && navigator.canShare) {
+  // 1. Native Share (Direct PDF attachment) — skipped when the caller
+  // wants the wa.me link flow (e.g. the billing row quick-share)
+  if (!opts.forceLink && navigator.share && navigator.canShare) {
     const file = new File([pdfBlob], `Receipt_${p.name.replace(/\s+/g, "_")}.pdf`, { type: "application/pdf" })
     if (navigator.canShare({ files: [file] })) {
       await navigator.share({

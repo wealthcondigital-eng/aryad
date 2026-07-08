@@ -292,7 +292,7 @@ function shareBillReceipt(b: BillDoc, index: number) {
     paid:        b.paid,
     paymentMode: b.paymentMode,
     date:        (b.billDate || b.createdAt)?.split("T")[0],
-  }).catch((e) => console.error(e))
+  }, { forceLink: true }).catch((e) => console.error(e))
 }
 
 const statusBadgeClass: Record<string, string> = {
