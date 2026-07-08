@@ -330,7 +330,9 @@ export async function shareBillOnWhatsApp(p: BillShareData, opts: { forceLink?: 
     } catch { /* keep fallback URL */ }
 
     const msg = `Dear ${p.name},\n\nYour payment receipt for *${p.study}* from *Aarya Diagnostic Center* is ready.\n\n📄 Download Receipt:\n${pdfUrl}`
-    const waUrl = num
+    // forceLink (billing row quick-share): open WhatsApp Web on the logged-in
+    // account with the message ready, letting the sender pick the recipient
+    const waUrl = !opts.forceLink && num
       ? `https://wa.me/91${num}?text=${encodeURIComponent(msg)}`
       : `https://wa.me/?text=${encodeURIComponent(msg)}`
     window.open(waUrl, "_blank")
