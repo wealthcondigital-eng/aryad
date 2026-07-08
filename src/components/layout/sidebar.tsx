@@ -23,10 +23,11 @@ const NAV_BY_ROLE: Record<Role, { href: string; label: string; icon: React.Eleme
     { href: "/admin/users",  label: "User Management", icon: ShieldCheck },
   ],
   doctor: [
-    { href: "/dashboard",    label: "Today's Queue",   icon: LayoutDashboard },
-    { href: "/patients",     label: "Patient History", icon: Users },
-    { href: "/reports",      label: "My Reports",      icon: FileText },
-    { href: "/studies",      label: "Studies & Tests", icon: FlaskConical },
+    { href: "/dashboard",    label: "Dashboard",       icon: LayoutDashboard },
+    { href: "/patients/new", label: "New Patient",     icon: UserPlus,       highlight: true },
+    { href: "/patients",     label: "All Patients",    icon: Users },
+    { href: "/billing",      label: "Billing",         icon: Receipt },
+    { href: "/reports",      label: "Reports",         icon: FileText },
   ],
   receptionist: [
     { href: "/dashboard",    label: "Dashboard",       icon: LayoutDashboard },

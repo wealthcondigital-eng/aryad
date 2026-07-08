@@ -1,8 +1,9 @@
 "use client"
 
-import { Printer, Share2 } from "lucide-react"
+import { Printer, Share2, Loader2 } from "lucide-react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
+import { useState } from "react"
 
 interface EditEntry { editor: string; editedAt: string; changedFields: string[] }
 
@@ -13,6 +14,7 @@ const FIELD_LABELS: Record<string, string> = {
 }
 
 export interface BillViewerProps {
+  id?: string
   open: boolean
   onClose: () => void
   srNo: number | string
@@ -22,6 +24,8 @@ export interface BillViewerProps {
   contact: string
   referredBy?: string
   study: string
+  items?: { study: string; quantity?: number; price?: number }[]  // multi-item bills
+  billNo?: string                                                  // receipt number (falls back to srNo)
   charges: number
   discount?: number
   paid: number
@@ -30,33 +34,13 @@ export interface BillViewerProps {
   editHistory?: EditEntry[]
 }
 
-const ADC_LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="90" height="90">
-  <circle cx="60" cy="60" r="57" fill="white" stroke="#1a1a2e" stroke-width="2.5"/>
-  <circle cx="60" cy="60" r="52" fill="none" stroke="#1a1a2e" stroke-width="1"/>
-  <path id="topArc" d="M 10,60 A 50,50 0 0,1 110,60" fill="none"/>
-  <text font-family="Arial, sans-serif" font-size="7.5" font-weight="bold" fill="#1a1a2e" letter-spacing="1.2">
-    <textPath href="#topArc" startOffset="3%">AARYA DIAGNOSTIC CENTRE</textPath>
-  </text>
-  <path id="botArc" d="M 16,68 A 50,50 0 0,0 104,68" fill="none"/>
-  <text font-family="Arial, sans-serif" font-size="6" fill="#1a1a2e" letter-spacing="0.8">
-    <textPath href="#botArc" startOffset="12%">GHATKOPAR (W), MUMBAI</textPath>
-  </text>
-  <g transform="translate(60,57)">
-    <ellipse cx="0" cy="-16" rx="3.5" ry="9" fill="#1a1a2e" opacity="0.85" transform="rotate(0)"/>
-    <ellipse cx="0" cy="-16" rx="3.5" ry="9" fill="#1a1a2e" opacity="0.85" transform="rotate(45)"/>
-    <ellipse cx="0" cy="-16" rx="3.5" ry="9" fill="#1a1a2e" opacity="0.85" transform="rotate(90)"/>
-    <ellipse cx="0" cy="-16" rx="3.5" ry="9" fill="#1a1a2e" opacity="0.85" transform="rotate(135)"/>
-    <ellipse cx="0" cy="-16" rx="3.5" ry="9" fill="#1a1a2e" opacity="0.85" transform="rotate(180)"/>
-    <ellipse cx="0" cy="-16" rx="3.5" ry="9" fill="#1a1a2e" opacity="0.85" transform="rotate(225)"/>
-    <ellipse cx="0" cy="-16" rx="3.5" ry="9" fill="#1a1a2e" opacity="0.85" transform="rotate(270)"/>
-    <ellipse cx="0" cy="-16" rx="3.5" ry="9" fill="#1a1a2e" opacity="0.85" transform="rotate(315)"/>
-    <circle cx="0" cy="0" r="8" fill="white"/>
-    <circle cx="0" cy="0" r="3" fill="#1a1a2e"/>
-  </g>
-  <text x="60" y="82" font-family="Arial, sans-serif" font-size="11" font-weight="bold" text-anchor="middle" fill="#1a1a2e" letter-spacing="2">ADC</text>
-  <line x1="28" y1="74" x2="47" y2="74" stroke="#1a1a2e" stroke-width="0.8"/>
-  <line x1="73" y1="74" x2="92" y2="74" stroke="#1a1a2e" stroke-width="0.8"/>
-</svg>`
+// One table row per bill item; single-study callers fall back to one row
+function billRows(p: BillViewerProps): { study: string; amount: number }[] {
+  if (p.items?.length) {
+    return p.items.map((i) => ({ study: i.study, amount: (i.price ?? 0) * (i.quantity ?? 1) }))
+  }
+  return [{ study: p.study, amount: p.charges }]
+}
 
 function formatDate(d?: string) {
   if (!d) {
@@ -80,8 +64,18 @@ function formatEditDate(iso: string) {
 
 function buildBillPrintHtml(p: BillViewerProps): string {
   const discount    = p.discount ?? 0
-  const editHistory = p.editHistory ?? []
   const dateStr     = formatDate(p.date)
+  const receiptNo   = p.billNo ?? String(p.srNo)
+  const rows        = billRows(p)
+
+  const itemRowsHtml = rows.map((r, i) => `
+      <tr>
+        <td>${i + 1}.</td>
+        <td>${r.study.toUpperCase()}</td>
+        <td>${r.amount}</td>
+        <td>${i === 0 ? discount : 0}</td>
+        <td>${i === 0 ? p.paid : 0}</td>
+      </tr>`).join("")
 
   return `<!DOCTYPE html>
 <html>
@@ -92,16 +86,11 @@ function buildBillPrintHtml(p: BillViewerProps): string {
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #111; padding: 10mm 14mm; max-width: 160mm; margin: 0 auto; }
 
-    .header { text-align: center; margin-bottom: 10px; }
-    .header svg { display: block; margin: 0 auto 6px; }
-    .header h1 { font-size: 15pt; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 4px; }
-    .header .addr { font-size: 8.5pt; color: #333; line-height: 1.6; }
-
     .divider-thick { border-top: 2.5px solid #111; border-bottom: 2.5px solid #111; padding: 2px 0; text-align: center; font-weight: bold; font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1px; margin: 8px 0; }
 
-    .patient-info { margin-bottom: 8px; font-size: 9.5pt; }
-    .patient-info p { margin-bottom: 2px; }
-    .patient-info strong { text-transform: uppercase; }
+    .patient-info { margin-bottom: 8px; font-size: 8.5pt; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; border-bottom: 1.5px solid #111; padding-bottom: 6px; }
+    .patient-info div { margin-bottom: 1px; }
+    .patient-info strong { font-weight: bold; }
 
     table { width: 100%; border-collapse: collapse; font-size: 9.5pt; margin-bottom: 8px; }
     table th, table td { border: 1px solid #111; padding: 4px 6px; }
@@ -121,20 +110,16 @@ function buildBillPrintHtml(p: BillViewerProps): string {
 </head>
 <body>
 
-  <div class="header">
-    <img src="/logo.jpeg" alt="Aarya" style="width:72px;height:72px;border-radius:50%;object-fit:cover;margin:0 auto 6px;" />
-    <h1>Aarya Diagnostic Center</h1>
-    <div class="addr">
-      Shop no - 5, K. K. Smruti Building, New Maneklal Estate, S.N. Mehta Road, Ghatkopar (W) 400086<br>
-      Contact no - 9819022444 &nbsp;&nbsp;&nbsp; Email ID: - aaryadiagnosticsmumbai@gmail.com
-    </div>
-  </div>
-
+  <!-- No clinic letterhead — receipts print on pre-printed stationery -->
   <div class="divider-thick">Payment Receipt</div>
 
   <div class="patient-info">
-    <p><strong>Name: ${p.name.toUpperCase()}</strong></p>
-    <p>Age: ${p.age} Yrs &nbsp;/&nbsp; Sex: ${p.gender.toUpperCase()}</p>
+    <div><strong>NAME:</strong> ${p.name.toUpperCase()}</div>
+    <div><strong>DATE:</strong> ${dateStr}</div>
+    <div><strong>AGE / SEX:</strong> ${p.age} YRS &nbsp;/&nbsp; ${p.gender.toUpperCase()}</div>
+    <div><strong>MOBILE:</strong> ${p.contact}</div>
+    <div><strong>REF. BY:</strong> ${(p.referredBy || "Self").toUpperCase()}</div>
+    <div><strong>SR. NO:</strong> #${p.srNo}</div>
   </div>
 
   <table>
@@ -147,14 +132,7 @@ function buildBillPrintHtml(p: BillViewerProps): string {
         <th>Paid</th>
       </tr>
     </thead>
-    <tbody>
-      <tr>
-        <td>1.</td>
-        <td>${p.study.toUpperCase()}</td>
-        <td>${p.charges}</td>
-        <td>${discount}</td>
-        <td>${p.paid}</td>
-      </tr>
+    <tbody>${itemRowsHtml}
       <tr class="total-row">
         <td colspan="2" style="text-align:center;">Total</td>
         <td>${p.charges}</td>
@@ -167,7 +145,7 @@ function buildBillPrintHtml(p: BillViewerProps): string {
   <div class="footer">
     <p><strong>Date:</strong> ${dateStr}</p>
     <p><strong>Payment Method</strong> - ${(p.paymentMode || "Cash").toUpperCase()}</p>
-    <p><strong>Payment Receipt.</strong> ${p.srNo}</p>
+    <p><strong>Payment Receipt.</strong> ${receiptNo}</p>
   </div>
 
 
@@ -176,13 +154,140 @@ function buildBillPrintHtml(p: BillViewerProps): string {
 }
 
 function printBill(props: BillViewerProps) {
-  const html = buildBillPrintHtml(props).replace('src="/logo.jpeg"', `src="${window.location.origin}/logo.jpeg"`)
+  const html = buildBillPrintHtml(props)
   const blob = new Blob([html], { type: "text/html" })
   const url  = URL.createObjectURL(blob)
   const win  = window.open(url, "_blank", "width=620,height=800")
   if (!win) { alert("Please allow pop-ups to print."); URL.revokeObjectURL(url); return }
-  win.onafterprint = () => { win.close(); URL.revokeObjectURL(url) }
   setTimeout(() => win.print(), 600)
+}
+
+const generateBillPdfBlob = async (p: BillViewerProps): Promise<Blob> => {
+  const { jsPDF } = await import("jspdf")
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" })
+  const W = 210, M = 20, CW = W - M * 2
+  let y = 18
+
+  const ln = (pt: number) => pt * 0.352778 * 1.4
+
+  // Draw title
+  doc.setFont("helvetica", "bold")
+  doc.setFontSize(14)
+  doc.text("PAYMENT RECEIPT", W / 2, y, { align: "center" })
+  y += 8
+
+  // Draw line
+  doc.setLineWidth(0.5)
+  doc.line(M, y, W - M, y)
+  y += 6
+
+  // Draw Patient Info Grid
+  doc.setFont("helvetica", "normal")
+  doc.setFontSize(10)
+  
+  const col1X = M
+  const col2X = W / 2 + 5
+  const rowH = 6
+
+  const dateStr = formatDate(p.date)
+  const receiptNo = p.billNo || String(p.srNo)
+
+  // Row 1
+  doc.setFont("helvetica", "bold"); doc.text("NAME:", col1X, y); doc.setFont("helvetica", "normal"); doc.text(p.name.toUpperCase(), col1X + 16, y)
+  doc.setFont("helvetica", "bold"); doc.text("DATE:", col2X, y); doc.setFont("helvetica", "normal"); doc.text(dateStr, col2X + 16, y)
+  y += rowH
+
+  // Row 2
+  doc.setFont("helvetica", "bold"); doc.text("AGE/SEX:", col1X, y); doc.setFont("helvetica", "normal"); doc.text(`${p.age} YRS / ${p.gender.toUpperCase()}`, col1X + 18, y)
+  doc.setFont("helvetica", "bold"); doc.text("MOBILE:", col2X, y); doc.setFont("helvetica", "normal"); doc.text(p.contact, col2X + 18, y)
+  y += rowH
+
+  // Row 3
+  doc.setFont("helvetica", "bold"); doc.text("REF. BY:", col1X, y); doc.setFont("helvetica", "normal"); doc.text((p.referredBy || "Self").toUpperCase(), col1X + 18, y)
+  doc.setFont("helvetica", "bold"); doc.text("SR. NO:", col2X, y); doc.setFont("helvetica", "normal"); doc.text(`#${p.srNo}`, col2X + 16, y)
+  y += rowH + 2
+
+  // Draw line
+  doc.line(M, y, W - M, y)
+  y += 8
+
+  // Draw Items Table
+  const cols = [
+    { name: "Sr.", w: 12, align: "center" },
+    { name: "Investigation of Patient", w: 83, align: "left" },
+    { name: "Charges", w: 25, align: "center" },
+    { name: "Discount", w: 25, align: "center" },
+    { name: "Paid", w: 25, align: "center" }
+  ]
+
+  // Draw table header
+  doc.setFont("helvetica", "bold")
+  let curX = M
+  cols.forEach(col => {
+    doc.text(col.name, curX + (col.align === "center" ? col.w / 2 : 0), y, { align: col.align as any })
+    curX += col.w
+  })
+  y += 4
+  doc.line(M, y, W - M, y)
+  y += 6
+
+  // Draw table rows
+  doc.setFont("helvetica", "normal")
+  const rows = billRows(p)
+  const discount = p.discount ?? 0
+
+  rows.forEach((r, i) => {
+    curX = M
+    // Sr No
+    doc.text(`${i + 1}`, curX + cols[0].w / 2, y, { align: "center" })
+    curX += cols[0].w
+
+    // Investigation
+    doc.text(r.study.toUpperCase(), curX, y)
+    curX += cols[1].w
+
+    // Charges
+    doc.text(`${r.amount}`, curX + cols[2].w / 2, y, { align: "center" })
+    curX += cols[2].w
+
+    // Discount
+    doc.text(`${i === 0 ? discount : 0}`, curX + cols[3].w / 2, y, { align: "center" })
+    curX += cols[3].w
+
+    // Paid
+    doc.text(`${i === 0 ? p.paid : 0}`, curX + cols[4].w / 2, y, { align: "center" })
+    y += rowH
+  })
+
+  doc.line(M, y, W - M, y)
+  y += 6
+
+  // Draw Total Row
+  doc.setFont("helvetica", "bold")
+  curX = M + cols[0].w
+  doc.text("Total", curX, y)
+  curX += cols[1].w
+
+  doc.text(`${p.charges}`, curX + cols[2].w / 2, y, { align: "center" })
+  curX += cols[2].w
+
+  doc.text(`${discount}`, curX + cols[3].w / 2, y, { align: "center" })
+  curX += cols[3].w
+
+  doc.text(`${p.paid}`, curX + cols[4].w / 2, y, { align: "center" })
+  y += rowH + 2
+
+  doc.line(M, y, W - M, y)
+  y += 8
+
+  // Draw Footer
+  doc.setFont("helvetica", "normal")
+  doc.setFontSize(9)
+  doc.text(`Payment Method: ${(p.paymentMode || "Cash").toUpperCase()}`, M, y)
+  y += 5
+  doc.text(`Receipt Number: ${receiptNo}`, M, y)
+
+  return doc.output("blob")
 }
 
 export function BillDocViewer(props: BillViewerProps) {
@@ -190,16 +295,61 @@ export function BillDocViewer(props: BillViewerProps) {
   const discount    = props.discount ?? 0
   const editHistory = props.editHistory ?? []
   const dateStr     = formatDate(props.date)
+  const receiptNo   = props.billNo ?? String(srNo)
+  const rows        = billRows(props)
 
-  const shareOnWhatsApp = () => {
-    const msg = `*Aarya Diagnostic Center*%0APayment Receipt No. ${srNo}%0A%0APatient: ${name}%0AStudy: ${study}%0ADate: ${dateStr}%0ACharges: ₹${charges}%0APaid: ₹${paid}%0APayment: ${paymentMode || "Cash"}%0A%0AThank you for visiting Aarya Diagnostic Center!`
-    window.open(`https://wa.me/91${contact.replace(/\D/g, "")}?text=${msg}`, "_blank")
+  const [sharing, setSharing] = useState(false)
+
+  const shareOnWhatsApp = async () => {
+    if (sharing) return
+    setSharing(true)
+    try {
+      const pdfBlob = await generateBillPdfBlob(props)
+
+      // 1. Mobile Share (Direct PDF attachment)
+      if (navigator.share && navigator.canShare) {
+        const file = new File([pdfBlob], `Receipt_${name.replace(/\s+/g, "_")}.pdf`, { type: "application/pdf" })
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({
+            files: [file],
+            title: `Payment Receipt - ${name}`,
+            text: `Dear ${name}, here is your payment receipt from Aarya Diagnostic Center.`,
+          })
+          setSharing(false)
+          return
+        }
+      }
+
+      // 2. Desktop Share (Web Link via wa.me)
+      if (props.id) {
+        const arrayBuf = await pdfBlob.arrayBuffer()
+        const bytes    = new Uint8Array(arrayBuf)
+        let binary = ""; bytes.forEach((b) => (binary += String.fromCharCode(b)))
+        const base64   = btoa(binary)
+
+        await fetch(`/api/billing/${props.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ billPdf: base64, editor: "System" }),
+        })
+
+        const pdfUrl = `${window.location.origin}/api/billing/${props.id}/pdf`
+        const msg = `Dear ${name},\n\nYour payment receipt for *${study}* from *Aarya Diagnostic Center* is ready.\n\n📄 Download Receipt:\n${pdfUrl}`
+        window.open(`https://wa.me/91${contact.replace(/\D/g, "")}?text=${encodeURIComponent(msg)}`, "_blank")
+      } else {
+        const msg = `*Aarya Diagnostic Center*%0APayment Receipt No. ${receiptNo}%0A%0APatient: ${name}%0AStudy: ${study}%0ADate: ${dateStr}%0ACharges: ₹${charges}%0APaid: ₹${paid}%0APayment: ${paymentMode || "Cash"}%0A%0AThank you for visiting Aarya Diagnostic Center!`
+        window.open(`https://wa.me/91${contact.replace(/\D/g, "")}?text=${msg}`, "_blank")
+      }
+    } catch (e) {
+      console.error(e)
+    }
+    setSharing(false)
   }
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="w-full max-w-md max-h-[90vh] overflow-hidden flex flex-col p-0 mx-2 sm:mx-auto">
-        <DialogHeader className="px-5 pt-4 pb-3 border-b shrink-0">
+        <DialogHeader className="pl-5 pr-12 pt-4 pb-3 border-b shrink-0">
           <div className="flex items-center justify-between">
             <div>
               <DialogTitle className="text-base">Payment Receipt</DialogTitle>
@@ -209,8 +359,9 @@ export function BillDocViewer(props: BillViewerProps) {
               <Button variant="outline" size="sm" className="gap-1.5 text-xs h-8" onClick={() => printBill(props)}>
                 <Printer className="h-3.5 w-3.5" />Print
               </Button>
-              <Button size="sm" className="gap-1.5 text-xs h-8 bg-green-600 hover:bg-green-700" onClick={shareOnWhatsApp}>
-                <Share2 className="h-3.5 w-3.5" />WhatsApp
+              <Button size="sm" className="gap-1.5 text-xs h-8 bg-green-600 hover:bg-green-700" onClick={shareOnWhatsApp} disabled={sharing}>
+                {sharing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Share2 className="h-3.5 w-3.5" />}
+                {sharing ? "Sharing..." : "WhatsApp"}
               </Button>
             </div>
           </div>
@@ -220,29 +371,20 @@ export function BillDocViewer(props: BillViewerProps) {
           {/* Preview matching exact print layout */}
           <div className="border border-slate-200 rounded-lg p-4 bg-white text-[11px] font-[Arial,sans-serif]">
 
-            {/* Header */}
-            <div className="text-center mb-3">
-              <div className="flex justify-center mb-2">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src="/logo.jpeg" alt="Aarya Logo" className="h-16 w-16 rounded-full object-cover" />
-              </div>
-              <p className="font-bold text-sm uppercase tracking-widest">Aarya Diagnostic Center</p>
-              <p className="text-[10px] text-slate-500 leading-relaxed mt-0.5">
-                Shop no - 5, K. K. Smruti Building, New Maneklal Estate,<br />
-                S.N. Mehta Road, Ghatkopar (W) 400086<br />
-                Contact no - 9819022444 &nbsp;·&nbsp; aaryadiagnosticsmumbai@gmail.com
-              </p>
-            </div>
-
+            {/* No clinic letterhead — receipts print on pre-printed stationery */}
             {/* PAYMENT RECEIPT label */}
             <div className="border-t-2 border-b-2 border-slate-800 py-0.5 text-center font-bold uppercase tracking-wider text-[11px] mb-3">
               Payment Receipt
             </div>
 
             {/* Patient info */}
-            <div className="mb-3 space-y-0.5">
-              <p><strong>Name:</strong> {name.toUpperCase()}</p>
-              <p><strong>Age:</strong> {age} Yrs &nbsp;/&nbsp; <strong>Sex:</strong> {gender.toUpperCase()}</p>
+            <div className="mb-3 grid grid-cols-2 gap-x-4 gap-y-1 text-slate-800 border-b border-slate-200 pb-3" style={{ fontSize: "10px" }}>
+              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">NAME:</span><span className="text-slate-700">{name.toUpperCase()}</span></div>
+              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">DATE:</span><span className="text-slate-700">{dateStr}</span></div>
+              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">AGE / SEX:</span><span className="text-slate-700">{age} YRS / {gender.toUpperCase()}</span></div>
+              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">MOBILE:</span><span className="text-slate-700">{contact}</span></div>
+              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">REF. BY:</span><span className="text-slate-700">{(referredBy || "Self").toUpperCase()}</span></div>
+              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">SR. NO:</span><span className="text-slate-700">#{srNo}</span></div>
             </div>
 
             {/* Table */}
@@ -257,13 +399,15 @@ export function BillDocViewer(props: BillViewerProps) {
                 </tr>
               </thead>
               <tbody>
-                <tr>
-                  <td className="border border-slate-400 px-1.5 py-1 text-center">1.</td>
-                  <td className="border border-slate-400 px-1.5 py-1 uppercase">{study}</td>
-                  <td className="border border-slate-400 px-1.5 py-1 text-center">{charges}</td>
-                  <td className="border border-slate-400 px-1.5 py-1 text-center">{discount}</td>
-                  <td className="border border-slate-400 px-1.5 py-1 text-center">{paid}</td>
-                </tr>
+                {rows.map((r, i) => (
+                  <tr key={i}>
+                    <td className="border border-slate-400 px-1.5 py-1 text-center">{i + 1}.</td>
+                    <td className="border border-slate-400 px-1.5 py-1 uppercase">{r.study}</td>
+                    <td className="border border-slate-400 px-1.5 py-1 text-center">{r.amount}</td>
+                    <td className="border border-slate-400 px-1.5 py-1 text-center">{i === 0 ? discount : 0}</td>
+                    <td className="border border-slate-400 px-1.5 py-1 text-center">{i === 0 ? paid : 0}</td>
+                  </tr>
+                ))}
                 <tr className="font-bold bg-slate-50">
                   <td className="border border-slate-400 px-1.5 py-1 text-center" colSpan={2}>Total</td>
                   <td className="border border-slate-400 px-1.5 py-1 text-center">{charges}</td>
@@ -277,7 +421,7 @@ export function BillDocViewer(props: BillViewerProps) {
             <div className="space-y-0.5">
               <p><strong>Date:</strong> {dateStr}</p>
               <p><strong>Payment Method</strong> - {(paymentMode || "Cash").toUpperCase()}</p>
-              <p><strong>Payment Receipt.</strong> {srNo}</p>
+              <p><strong>Payment Receipt.</strong> {receiptNo}</p>
             </div>
 
             {/* Edit History */}

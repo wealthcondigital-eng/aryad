@@ -54,6 +54,9 @@ interface BillDoc {
   _id: string
   srNo: number
   patientName: string
+  age?: number
+  gender?: string
+  contact?: string
   referredBy: string
   items: { study: string; quantity: number; price: number }[]
   charges: number
@@ -90,17 +93,22 @@ body { font-family: Arial, sans-serif; font-size: 10pt; line-height: 1.5; color:
 table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
 th { background: #f0f0f0; font-weight: bold; text-transform: uppercase; text-align: center; border: 1px solid #111; padding: 4px 6px; }
 .total-row td { font-weight: bold; background: #f9f9f9; }
+.patient-info { margin-bottom: 8px; font-size: 8.5pt; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; border-bottom: 1.5px solid #111; padding-bottom: 6px; }
+.patient-info div { margin-bottom: 1px; }
+.patient-info strong { font-weight: bold; }
 </style></head><body>
 <div style="text-align:center;margin-bottom:10px;">
   <img src="${baseUrl}/logo.jpeg" style="width:72px;height:72px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" />
   <h1 style="font-size:15pt;font-weight:bold;text-transform:uppercase;letter-spacing:2px;">Aarya Diagnostic Center</h1>
   <p style="font-size:8.5pt;color:#333;line-height:1.6;">Shop no - 5, K. K. Smruti Building, New Maneklal Estate, S.N. Mehta Road, Ghatkopar (W) 400086<br>Contact no - 9819022444 &nbsp;&nbsp; aaryadiagnosticsmumbai@gmail.com</p>
 </div>
-<div style="border-top:2.5px solid #111;border-bottom:2.5px solid #111;padding:2px 0;text-align:center;font-weight:bold;font-size:9.5pt;text-transform:uppercase;letter-spacing:1px;margin:8px 0;">Payment Receipt</div>
-<div style="margin-bottom:8px;font-size:9.5pt;">
-  <p><strong>Name: ${b.patientName.toUpperCase()}</strong></p>
-  ${b.srNo ? `<p>SR No: #${b.srNo}</p>` : ""}
-  ${b.referredBy ? `<p>Referred By: ${b.referredBy}</p>` : ""}
+<div class="patient-info">
+  <div><strong>NAME:</strong> ${b.patientName.toUpperCase()}</div>
+  <div><strong>DATE:</strong> ${dateStr}</div>
+  <div><strong>AGE / SEX:</strong> ${b.age || "—"} YRS &nbsp;/&nbsp; ${(b.gender || "—").toUpperCase()}</div>
+  <div><strong>MOBILE:</strong> ${b.contact || "—"}</div>
+  <div><strong>REF. BY:</strong> ${(b.referredBy || "Self").toUpperCase()}</div>
+  <div><strong>SR. NO:</strong> #${b.srNo || "—"}</div>
 </div>
 <table style="margin-bottom:8px;">
   <thead><tr>
@@ -152,21 +160,12 @@ function buildReportHtml(p: PatientRef, baseUrl: string): string {
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5; padding: 15mm 20mm; color: #111; }
-.header { text-align: center; padding-bottom: 10px; border-bottom: 2px solid #111; margin-bottom: 14px; }
-.header h1 { font-size: 15pt; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; }
-.header p { font-size: 9pt; color: #555; margin-top: 4px; }
 .info-row { display: flex; gap: 30px; margin-bottom: 3px; }
 .info-cell { display: flex; flex: 1; gap: 6px; font-size: 9pt; }
 .ilbl { font-weight: bold; min-width: 56px; }
 .info-block { border-bottom: 1px solid #aaa; padding-bottom: 10px; margin-bottom: 12px; }
 .study { text-align: center; font-weight: bold; font-size: 12pt; text-transform: uppercase; text-decoration: underline; margin: 12px 0 14px; }
 </style></head><body>
-<div class="header">
-  <img src="${baseUrl}/logo.jpeg" style="width:60px;height:60px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" />
-  <h1>Aarya Diagnostics Center</h1>
-  <p>Shop No. 5, K. K. Smruti Building, S.N. Mehta Road, Ghatkopar (W) 400086</p>
-  <p>Tel: 9819022444 &nbsp;·&nbsp; aaryadiagnosticsmumbai@gmail.com</p>
-</div>
 <div class="info-block">${infoHtml}</div>
 <div class="study">${p.study}</div>
 <div style="font-size:10pt;line-height:1.6;">${p.reportBody ?? ""}</div>

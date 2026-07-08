@@ -29,6 +29,7 @@ export interface IBill extends Document {
   paymentMode: string
   billDate: string
   notes?: string
+  billPdf?: string
   editHistory: IBillEditEntry[]
   createdAt: Date
   updatedAt: Date
@@ -67,6 +68,7 @@ const BillSchema = new Schema<IBill>(
     paymentMode: { type: String, default: "Cash" },
     billDate:    { type: String },
     notes:       { type: String, default: "" },
+    billPdf:     { type: String, default: "" },
     editHistory: { type: [BillEditHistorySchema], default: [] },
   },
   { timestamps: true }

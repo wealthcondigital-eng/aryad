@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react"
 import Link from "next/link"
-import { ArrowLeft, CheckCircle2, AlertCircle } from "lucide-react"
+import { ArrowLeft, CheckCircle2, AlertCircle, Plus, Trash2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -13,6 +13,8 @@ import {
 import { ComboInput, StudyComboInput, INITIAL_DOCTORS, getSavedDoctors, saveDoctor, StudyOption } from "@/components/combo-input"
 import { autoCategory } from "@/lib/study-catalogue"
 
+interface StudyRow { id: number; name: string; category: string }
+
 export default function NewPatientPage() {
   const [name,         setName]         = useState("")
   const [age,          setAge]          = useState("")
@@ -20,8 +22,7 @@ export default function NewPatientPage() {
   const [contact,      setContact]      = useState("")
   const [address,      setAddress]      = useState("")
   const [refDoctor,    setRefDoctor]    = useState("")
-  const [study,        setStudy]        = useState("")
-  const [studyCategory, setStudyCategory] = useState("")
+  const [studyRows,    setStudyRows]    = useState<StudyRow[]>([{ id: 1, name: "", category: "" }])
   const [saved,        setSaved]        = useState(false)
   const [loading,      setLoading]      = useState(false)
   const [error,        setError]        = useState("")
@@ -46,6 +47,21 @@ export default function NewPatientPage() {
       .catch(() => {})
   }, [])
 
+  const validStudies = studyRows
+    .map((r) => ({ name: r.name.trim(), category: r.category || autoCategory(r.name.trim()) }))
+    .filter((r) => r.name)
+
+  const addStudyRow = () =>
+    setStudyRows((prev) => [...prev, { id: Date.now(), name: "", category: "" }])
+
+  const removeStudyRow = (id: number) =>
+    setStudyRows((prev) => (prev.length === 1 ? prev : prev.filter((r) => r.id !== id)))
+
+  const updateStudyRow = (id: number, name: string, category?: string) =>
+    setStudyRows((prev) => prev.map((r) =>
+      r.id === id ? { ...r, name, category: category ?? (name.trim() ? autoCategory(name.trim()) : "") } : r
+    ))
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
@@ -63,8 +79,7 @@ export default function NewPatientPage() {
           contact:       contact.trim(),
           address:       address.trim(),
           referredBy:    refDoctor.trim() || "Self",
-          study,
-          studyCategory: studyCategory || autoCategory(study.trim()),
+          studies:       validStudies,
           reportStatus:  "pending",
           charges: 0,
           paid:    0,
@@ -101,7 +116,7 @@ export default function NewPatientPage() {
         <div className="flex gap-3 justify-center pt-2">
           <Button variant="outline" onClick={() => {
             setName(""); setAge(""); setGender(""); setContact(""); setAddress("")
-            setRefDoctor(""); setStudy(""); setSaved(false); setSavedSrNo(null)
+            setRefDoctor(""); setStudyRows([{ id: 1, name: "", category: "" }]); setSaved(false); setSavedSrNo(null)
           }}>
             Register Another
           </Button>
@@ -189,19 +204,42 @@ export default function NewPatientPage() {
             </div>
 
             <div className="space-y-1.5">
-              <Label>Study / Test <span className="text-red-500">*</span></Label>
-              <StudyComboInput
-                value={study}
-                dbStudies={dbStudies}
-                onChange={(v) => {
-                  setStudy(v)
-                  setStudyCategory(v.trim() ? autoCategory(v.trim()) : "")
-                }}
-                onSelect={(name, _price, cat) => {
-                  setStudy(name)
-                  setStudyCategory(cat)
-                }}
-              />
+              <div className="flex items-center justify-between">
+                <Label>Studies / Tests <span className="text-red-500">*</span></Label>
+                <button
+                  type="button"
+                  onClick={addStudyRow}
+                  className="flex items-center gap-1 text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors"
+                >
+                  <Plus className="h-3.5 w-3.5" />Add another study
+                </button>
+              </div>
+              <div className="space-y-2">
+                {studyRows.map((row, i) => (
+                  <div key={row.id} className="flex items-start gap-2">
+                    <span className="text-xs text-muted-foreground font-mono pt-2.5 w-4 shrink-0">{i + 1}.</span>
+                    <div className="flex-1">
+                      <StudyComboInput
+                        value={row.name}
+                        dbStudies={dbStudies}
+                        onChange={(v) => updateStudyRow(row.id, v)}
+                        onSelect={(name, _price, cat) => updateStudyRow(row.id, name, cat)}
+                      />
+                    </div>
+                    <Button
+                      type="button" variant="ghost" size="icon"
+                      className="h-9 w-9 text-muted-foreground hover:text-destructive shrink-0"
+                      onClick={() => removeStudyRow(row.id)}
+                      disabled={studyRows.length === 1}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                A patient can have multiple studies (X-Ray, Sonography, Pathology) — each gets its own separate report.
+              </p>
             </div>
 
             <div className="space-y-1.5">
@@ -228,7 +266,7 @@ export default function NewPatientPage() {
             <div className="flex justify-end pt-2">
               <Button
                 type="submit"
-                disabled={!name || !age || !gender || !contact || !study || loading}
+                disabled={!name || !age || !gender || !contact || validStudies.length === 0 || loading}
                 className="bg-blue-600 hover:bg-blue-700 px-6"
               >
                 {loading ? (

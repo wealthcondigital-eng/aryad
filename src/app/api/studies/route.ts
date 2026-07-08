@@ -1,7 +1,8 @@
-import { NextResponse } from "next/server"
+import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import Study from "@/models/Study"
 import Patient from "@/models/Patient"
+import { STUDY_CATEGORIES, autoCategory } from "@/lib/study-catalogue"
 
 export async function GET() {
   try {
@@ -25,6 +26,32 @@ export async function GET() {
       studies,
       stats: { total: studies.length, categories, testsToday, avgRevenue },
     })
+  } catch (err) {
+    console.error(err)
+    return NextResponse.json({ error: "Server error" }, { status: 500 })
+  }
+}
+
+// POST /api/studies — add a study to the catalogue (receptionist / doctor / admin)
+export async function POST(req: NextRequest) {
+  try {
+    await connectDB()
+    const body = await req.json()
+
+    const name = String(body.name ?? "").trim()
+    if (!name) return NextResponse.json({ error: "Study name is required" }, { status: 400 })
+
+    const category = (STUDY_CATEGORIES as readonly string[]).includes(body.category)
+      ? body.category
+      : autoCategory(name)
+
+    const price = Math.max(0, Number(body.price) || 0)
+
+    const existing = await Study.findOne({ name: { $regex: `^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" } })
+    if (existing) return NextResponse.json({ error: "This study already exists" }, { status: 409 })
+
+    const study = await Study.create({ name, category, price, fromCatalogue: false, firstSeenAt: new Date() })
+    return NextResponse.json({ study }, { status: 201 })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: "Server error" }, { status: 500 })

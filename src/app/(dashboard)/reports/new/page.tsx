@@ -6,7 +6,7 @@ import Link from "next/link"
 import {
   ArrowLeft, Download, CheckCircle2, Loader2,
   Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
-  List, Share2, Pencil, LayoutTemplate, Minus, Plus, ChevronDown,
+  List, Share2, Pencil, LayoutTemplate, Minus, Plus, ChevronDown, ChevronUp,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -17,6 +17,8 @@ import {
 import { ComboInput, StudyComboInput, getSavedDoctors, saveDoctor } from "@/components/combo-input"
 import { useRole } from "@/lib/role-context"
 import { motion, AnimatePresence } from "framer-motion"
+import { REPORT_TEMPLATES, ReportTemplate, TemplateCategory } from "@/lib/report-templates"
+import { reportHeaderHtml, reportTitleHtml, drawPdfReportHeader, drawPdfReportTitle } from "@/lib/report-layout"
 
 const SAMPLE_PATIENTS = [
   "Ramesh Kumar (P-1046)", "Priya Sharma (P-1045)", "Arjun Patel (P-1044)",
@@ -113,376 +115,48 @@ function markChanges(originalHtml: string, newHtml: string, editorName?: string,
 
 // ── Build print/PDF HTML ──────────────────────────────────────────────────────
 
+// The print output matches the clinic's printed report design: a
+// double-bordered patient info box (NAME / REF. BY | DATE / AGE / SEX),
+// then the bordered underlined study heading, body and signatures.
 function buildPrintHtml(opts: {
-  patient: string; study: string; date: string; age: string
-  gender: string; srNo: string; contact: string; refBy: string
-  body: string
+  patient: string; study: string; body: string; age?: string; gender?: string; contact?: string; refBy?: string; date?: string; srNo?: string
 }): string {
-  const { patient, study, date, age, gender, srNo, contact, refBy, body } = opts
-
-  const infoRows: [string, string][] = [
-    ["NAME",    patient.toUpperCase()],
-    ["DATE",    date],
-  ]
-  if (age)     infoRows.push(["AGE",    `${age} YRS`])
-  if (contact) infoRows.push(["MOBILE", contact])
-  infoRows.push(["REF. BY", (refBy || "SELF").toUpperCase()])
-  if (gender)  infoRows.push(["SEX",    gender.toUpperCase()])
-  if (srNo)    infoRows.push(["SR. NO", `#${srNo}`])
-
-  const infoHtml = infoRows.reduce<[string, string][][]>((rows, item, i) => {
-    if (i % 2 === 0) rows.push([item])
-    else rows[rows.length - 1].push(item)
-    return rows
-  }, []).map((pair) => `
-    <div class="info-row">
-      ${pair.map(([l, v]) => `<div class="info-cell"><span class="ilbl">${l}:</span><span>${v}</span></div>`).join("")}
-    </div>`).join("")
+  const { patient, study, body, age, gender, refBy, date, srNo } = opts
+  const displayDate = date || new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Report – ${patient}</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5; padding: 15mm 20mm; color: #111; }
-.header { text-align: center; padding-bottom: 10px; border-bottom: 2px solid #111; margin-bottom: 14px; }
-.header h1 { font-size: 15pt; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; }
-.header p { font-size: 9pt; color: #555; margin-top: 4px; }
-.info-row { display: flex; gap: 30px; margin-bottom: 3px; }
-.info-cell { display: flex; flex: 1; gap: 6px; font-size: 9pt; }
-.ilbl { font-weight: bold; min-width: 56px; }
-.info-block { border-bottom: 1px solid #aaa; padding-bottom: 10px; margin-bottom: 12px; }
-.study { text-align: center; font-weight: bold; font-size: 12pt; text-transform: uppercase; text-decoration: underline; margin: 12px 0 14px; }
-.field { margin-bottom: 12px; }
-.flbl { font-weight: bold; text-transform: uppercase; font-size: 9.5pt; }
-.fval { margin-top: 3px; padding-left: 10px; font-size: 9pt; white-space: pre-line; color: #333; }
-.impression { border: 1px solid #aaa; padding: 8px 12px; background: #f7f7f7; margin: 14px 0; }
-.imp-lbl { font-weight: bold; text-transform: uppercase; font-size: 9.5pt; }
-.imp-val { margin-top: 3px; font-size: 9pt; }
-.sigs { display: flex; gap: 30px; margin-top: 35px; border-top: 1px dashed #aaa; padding-top: 18px; }
-.sig { flex: 1; text-align: center; }
-.sig-line { border-bottom: 1px solid #888; height: 30px; margin: 0 20px 6px; }
-.sig-name { font-weight: bold; font-size: 9pt; text-transform: uppercase; }
-.sig-title { font-size: 8pt; color: #666; margin-top: 2px; }
+.sigs { display: flex; gap: 30px; margin-top: 80px; }
+.sig { flex: 1; }
+.sig-name { font-weight: bold; font-size: 10pt; text-transform: uppercase; }
+.sig-title { font-size: 8pt; color: #333; margin-top: 2px; text-transform: uppercase; }
 @media print { body { padding: 8mm 12mm; } }
 </style></head><body>
-<div class="header"><img src="/logo.jpeg" style="width:60px;height:60px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" /><h1>Aarya Diagnostics Center</h1><p>Shop No. 5, K. K. Smruti Building, S.N. Mehta Road, Ghatkopar (W) 400086</p><p>Tel: 9819022444 &nbsp;·&nbsp; aaryadiagnosticsmumbai@gmail.com</p></div>
-<div class="info-block">${infoHtml}</div>
-<div class="study">${study}</div>
+${reportHeaderHtml({ name: patient, refBy, date: displayDate, age, gender, srNo })}
+${reportTitleHtml(study)}
 <div class="body" style="font-size:10pt;line-height:1.6;">${body}</div>
+<div class="sigs">
+  <div class="sig">
+    <div style="height: 55px;"></div>
+    <p class="sig-name">DR. PRADNYA GORE</p>
+    <p class="sig-title">Consultant Radiologist</p>
+  </div>
+  <div class="sig">
+    <div style="height: 55px;"></div>
+    <p class="sig-name">DR. RAMNATH GHUTE</p>
+    <p class="sig-title">Consultant Radiologist</p>
+    <p class="sig-title">M.D. Radiology</p>
+  </div>
+</div>
 </body></html>`
 }
 
-// ── Report templates ─────────────────────────────────────────────────────────
-
-type TemplateCategory = "usg" | "doppler" | "xray" | "pathology"
-
-interface ReportTemplate { id: string; name: string; preview: string; body: string }
-
-const REPORT_TEMPLATES: Record<TemplateCategory, ReportTemplate[]> = {
-  usg: [
-    {
-      id: "usg-abd-pelvis-male",
-      name: "USG Abd & Pelvis – Male (Normal)",
-      preview: "Liver normal. GB normal. Kidneys bilateral normal. Bladder normal. Prostate normal. No free fluid.",
-      body: `<b>LIVER:</b> Both lobes of liver show normal echotexture. Liver is normal in size. Right liver span measures ___ cm. No focal mass lesion seen. CBD is normal. No IHBR dilatation seen. Portal vein appears normal.<br><br><b>GALL BLADDER:</b> Is well distended and appears normal. Wall thickness appears normal. No calculus is seen.<br><br><b>PANCREAS:</b> Appears normal in size & shape & shows normal echogenicity & echotexture. No focal mass lesion seen.<br><br><b>SPLEEN:</b> Appears normal in ___ cm size & shape & shows normal echogenicity & echotexture. No focal mass lesion seen.<br><br><b>KIDNEYS:</b> Both kidneys are normal in size, shape and position. Right kidney measures ___ cm. Left kidney measures ___ cm. Both kidneys show normal echogenicity & echotexture. Corticomedullary differentiation appears normal. No evidence of hydronephrosis or hydroureter is seen. No evidence of calculi or focal mass lesion seen.<br><br><b>URINARY BLADDER:</b> The urinary bladder is well distended. No evidence of calculus is seen. No evidence of mass or diverticulum is noted.<br><br><b>PROSTATE:</b> Is normal in size. No obvious focal lesion is seen. Measures ___ cm (approx. weight – ___ gm).<br><br><b>FREE FLUID:</b> No evidence of free fluid is noted in abdomen. No obvious lymphadenopathy is seen.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "usg-abd-pelvis-female",
-      name: "USG Abd & Pelvis – Female (Normal)",
-      preview: "Liver, GB, Kidneys normal. Uterus anteverted normal size. Both ovaries normal. No free fluid.",
-      body: `<b>LIVER:</b> Both lobes of liver show normal echotexture. Liver is normal in size. Right liver span measures ___ cm. No focal mass lesion seen. CBD is normal. No IHBR dilatation seen. Portal vein appears normal.<br><br><b>GALL BLADDER:</b> Is well distended and appears normal. Wall thickness appears normal. No calculus is seen.<br><br><b>PANCREAS:</b> Appears normal in size & shape & shows normal echogenicity & echotexture. No focal mass lesion seen.<br><br><b>SPLEEN:</b> Appears normal in ___ cm size & shape & shows normal echogenicity & echotexture. No focal mass lesion seen.<br><br><b>KIDNEYS:</b> Both kidneys are normal in size, shape and position. Right kidney measures ___ cm. Left kidney measures ___ cm. Both kidneys show normal echogenicity & echotexture. Corticomedullary differentiation appears normal. No evidence of hydronephrosis or hydroureter is seen. No evidence of calculi or focal mass lesion seen.<br><br><b>URINARY BLADDER:</b> The urinary bladder is well distended. No evidence of calculus is seen. No evidence of mass or diverticulum is noted.<br><br><b>UTERUS:</b> The uterus is anteverted. Uterus is normal in size and measures ___ cm. The uterine margins are smooth. The uterine myometrium shows normal echotexture. No solid or cystic mass lesion is noted. The endometrial thickness is ___ mm.<br><br><b>BOTH OVARIES:</b> Right ovary measures ___ × ___ cm. Left ovary measures ___ × ___ cm. Both ovaries are normal in size and echotexture. Bilateral adnexa are normal.<br><br><b>FREE FLUID:</b> No free fluid is noted in abdomen. No evidence of lymphadenopathy is seen.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "usg-abdomen-normal",
-      name: "USG Abdomen – Normal",
-      preview: "Liver: Normal size & echotexture. GB: thin walled. Kidneys: bilateral normal. No free fluid.",
-      body: `<b>LIVER:</b> Normal in size and echotexture. No focal lesion seen. No intrahepatic biliary radicle dilatation.<br><br><b>GALL BLADDER:</b> Well distended, thin walled. No calculus or sludge seen.<br><br><b>COMMON BILE DUCT:</b> Normal calibre. Not dilated.<br><br><b>PANCREAS:</b> Normal in size and echotexture. No peripancreatic fluid collection seen.<br><br><b>SPLEEN:</b> Normal in size and echotexture. No focal lesion seen.<br><br><b>RIGHT KIDNEY:</b> Normal in size (approx. 10.5 cm), shape and echotexture. Corticomedullary differentiation well maintained. No hydronephrosis or calculus seen.<br><br><b>LEFT KIDNEY:</b> Normal in size (approx. 10.2 cm), shape and echotexture. Corticomedullary differentiation well maintained. No hydronephrosis or calculus seen.<br><br><b>URINARY BLADDER:</b> Adequately distended, thin walled. No intraluminal calculus or mass lesion seen. Post-void residue: nil.<br><br><b>FREE FLUID:</b> No free fluid seen in peritoneal cavity.<br><br><b>IMPRESSION:</b><br>Normal USG study of the abdomen. No significant abnormality detected.`,
-    },
-    {
-      id: "usg-upper-abdomen",
-      name: "USG Upper Abdomen – Normal",
-      preview: "Liver, GB, Pancreas, Spleen, Kidneys all normal. No mass or free fluid.",
-      body: `<b>LIVER:</b> Both lobes of liver show normal echotexture. Right lobe of liver is normal in ___ cm size. No focal mass lesion seen. CBD is normal. No IHBR dilatation seen. Portal vein appears normal.<br><br><b>GALL BLADDER:</b> Is well distended and appears normal. Wall thickness appears normal. No calculus is seen.<br><br><b>PANCREAS:</b> Appears normal in size & shape & shows normal echogenicity & echotexture. No focal mass lesion seen.<br><br><b>SPLEEN:</b> Appears normal in ___ cm size & shape & shows normal echogenicity & echotexture. No focal mass lesion seen.<br><br><b>KIDNEYS:</b> Both kidneys are normal in size, shape and position. Right kidney measures ___ cm. Left kidney measures ___ cm. Both kidneys show normal echogenicity & echotexture. Corticomedullary differentiation appears normal. No evidence of hydronephrosis or hydroureter is seen. No evidence of calculi or focal mass lesion seen.<br><br><b>IMPRESSION:</b><br>No obvious abnormality is detected in this study.`,
-    },
-    {
-      id: "usg-abdomen-fatty-liver",
-      name: "USG Abdomen – Fatty Liver",
-      preview: "Liver: Mildly enlarged, increased echogenicity, fatty infiltration Grade I–II. Rest normal.",
-      body: `<b>LIVER:</b> Mildly enlarged. Increased echogenicity of liver parenchyma with loss of normal vascular markings suggestive of fatty infiltration (Grade I–II). No focal lesion seen.<br><br><b>GALL BLADDER:</b> Well distended, thin walled. No calculus or sludge seen.<br><br><b>COMMON BILE DUCT:</b> Normal calibre. Not dilated.<br><br><b>PANCREAS:</b> Normal in size and echotexture.<br><br><b>SPLEEN:</b> Normal in size and echotexture.<br><br><b>RIGHT KIDNEY:</b> Normal in size, shape and echotexture. No hydronephrosis or calculus seen.<br><br><b>LEFT KIDNEY:</b> Normal in size, shape and echotexture. No hydronephrosis or calculus seen.<br><br><b>URINARY BLADDER:</b> Adequately distended, thin walled. No intraluminal calculus or mass lesion seen.<br><br><b>FREE FLUID:</b> No free fluid seen in peritoneal cavity.<br><br><b>IMPRESSION:</b><br>USG findings suggestive of fatty liver (Grade I–II). Clinical correlation advised.`,
-    },
-    {
-      id: "usg-pelvis-ta-tvs",
-      name: "USG Pelvis – Normal (TA + TVS)",
-      preview: "Transabdominal + transvaginal. Uterus normal. Both ovaries normal. No POD fluid.",
-      body: `<b>TECHNIQUE:</b> Transabdominal & transvaginal ultrasound is performed.<br><br><b>URINARY BLADDER:</b> The urinary bladder is well distended. No evidence of calculus is seen. No evidence of mass or diverticulum is noted.<br><br><b>UTERUS:</b> The uterus is anteverted. It measures ___ cm. The uterine margins are smooth. The uterine myometrium shows homogeneous echotexture. No solid or cystic mass lesion is noted. The endometrial thickness is ___ mm. No obvious polyp is seen in this study.<br><br><b>BOTH OVARIES:</b> Both ovaries are normal in size and echotexture. Right ovary measures ___ cm, volume ___ cc. Left ovary measures ___ cm, volume ___ cc. Bilateral adnexa are normal.<br><br><b>POUCH OF DOUGLAS:</b> No fluid is noted in the cul-de-sac.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study.`,
-    },
-    {
-      id: "usg-pelvis-normal",
-      name: "USG Pelvis – Normal (F)",
-      preview: "Uterus: normal size & position. Both ovaries: normal. POD: no free fluid. Bladder: clear.",
-      body: `<b>UTERUS:</b> Normal in size, shape and position. Endometrial thickness: ___ mm (appropriate for phase of cycle). Myometrium uniform in echotexture. No fibroid or focal lesion seen.<br><br><b>RIGHT OVARY:</b> Normal in size and echotexture. No follicular cyst or mass lesion seen. Size: approx. ___ × ___ cm.<br><br><b>LEFT OVARY:</b> Normal in size and echotexture. No follicular cyst or mass lesion seen. Size: approx. ___ × ___ cm.<br><br><b>POUCH OF DOUGLAS (POD):</b> No free fluid seen.<br><br><b>URINARY BLADDER:</b> Adequately distended, thin walled. No intraluminal calculus or mass lesion seen.<br><br><b>IMPRESSION:</b><br>Normal USG study of the pelvis. No significant abnormality detected.`,
-    },
-    {
-      id: "usg-kub-male",
-      name: "USG KUB – Male (Normal)",
-      preview: "Bilateral kidneys normal. Bladder normal. Prostate normal in size. No calculus.",
-      body: `<b>KIDNEYS:</b> Both kidneys are normal in size, shape and position. Right kidney measures ___ cm. Left kidney measures ___ cm. Both kidneys show normal echogenicity & echotexture. Corticomedullary differentiation appears normal. No evidence of hydronephrosis or hydroureter is seen. No evidence of calculi or focal mass lesion seen.<br><br><b>URINARY BLADDER:</b> The urinary bladder is well distended. No evidence of calculus is seen. No evidence of mass or diverticulum is noted.<br><br><b>PROSTATE:</b> Is normal in size. No obvious focal lesion is seen. Measures ___ cm (approx. weight – ___ gm).<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "usg-kub-female",
-      name: "USG KUB – Female (Normal)",
-      preview: "Both kidneys normal size & echotexture. Bladder normal. No calculi. No hydronephrosis.",
-      body: `<b>KIDNEYS:</b> Both kidneys are normal in size, shape and position. Right kidney measures ___ cm. Left kidney measures ___ cm. Both kidneys show normal echogenicity & echotexture. Corticomedullary differentiation appears normal. No evidence of hydronephrosis or hydroureter is seen. No evidence of calculi or focal mass lesion seen.<br><br><b>URINARY BLADDER:</b> The urinary bladder is well distended. No evidence of calculus is seen. No evidence of mass or diverticulum is noted.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "usg-kub-normal",
-      name: "USG KUB – Normal (with Ureters)",
-      preview: "Both kidneys: normal size & echotexture. Bladder: thin walled. No calculi or hydronephrosis.",
-      body: `<b>RIGHT KIDNEY:</b> Normal in size (approx. 10.5 cm), shape and echotexture. Corticomedullary differentiation well maintained. No hydronephrosis, calculus or mass lesion seen.<br><br><b>LEFT KIDNEY:</b> Normal in size (approx. 10.2 cm), shape and echotexture. Corticomedullary differentiation well maintained. No hydronephrosis, calculus or mass lesion seen.<br><br><b>URINARY BLADDER:</b> Adequately distended, thin walled. No intraluminal calculus or mass lesion seen. Post-void residue: nil.<br><br><b>URETERS:</b> Not dilated bilaterally. No obstructive calculi seen at VUJ bilaterally.<br><br><b>IMPRESSION:</b><br>Normal USG study of KUB region. No evidence of urolithiasis or obstructive uropathy.`,
-    },
-    {
-      id: "usg-thyroid-normal",
-      name: "USG Thyroid – Normal",
-      preview: "Both lobes: normal size & echotexture. No nodule. Isthmus normal. No lymphadenopathy.",
-      body: `<b>RIGHT LOBE OF THYROID:</b> Measures ___ × ___ × ___ cm. Normal in size and echotexture. No focal nodule or cyst seen.<br><br><b>LEFT LOBE OF THYROID:</b> Measures ___ × ___ × ___ cm. Normal in size and echotexture. No focal nodule or cyst seen.<br><br><b>ISTHMUS:</b> Measures ___ cm. Normal. No focal lesion seen.<br><br><b>NECK VESSELS:</b> Unremarkable on both sides.<br><br><b>SUBMANDIBULAR GLANDS:</b> Both submandibular glands are normal.<br><br><b>LYMPH NODES:</b> No significant cervical lymphadenopathy seen bilaterally.<br><br><b>IMPRESSION:</b><br>Normal USG study of thyroid gland. No focal lesion or lymphadenopathy identified.`,
-    },
-    {
-      id: "usg-scrotum-normal",
-      name: "USG Scrotum – Normal",
-      preview: "Both testes normal size & echotexture. Epididymis normal. No varicocele. No hydrocele.",
-      body: `<b>RIGHT TESTIS:</b> The right testis is normal in size and measures ___ cm. It shows normal echotexture. Normal vascularity is seen. Right epididymis is normal in size. The head of epididymis shows normal echotexture. No focal lesion is seen in the epididymis. There is no fluid in the tunica vaginalis.<br><br><b>LEFT TESTIS:</b> The left testis is normal in size and measures ___ cm. It shows normal and homogeneous echotexture. No focal lesion is seen. Left epididymis is normal in size. The head of epididymis shows normal echotexture. No focal lesion is seen in the epididymis. There is no fluid in the tunica vaginalis.<br><br><b>DOPPLER EXAMINATION:</b> Diameter of right sided vein in resting state is ___ mm and in valsalva it is ___ mm. Diameter of left sided vein in resting state is ___ mm and in valsalva it is ___ mm.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "usg-breast-mammo",
-      name: "Sono-Mamography – Normal",
-      preview: "Both breasts: fibroglandular parenchyma. No solid/cystic mass. No axillary lymphadenopathy. BI-RADS 1.",
-      body: `<b>TECHNIQUE:</b> Real time, B mode sonography of both breasts done with 12 MHz linear probe.<br><br><b>FINDINGS:</b> The breast on both sides shows fibrofatty / fibroglandular parenchyma. The ducts are normal in caliber. No evidence of solid or cystic mass is seen in both breasts. No evidence of enlarged axillary lymphadenopathy is seen on both sides.<br><br><b>BI-RADS CLASSIFICATION:</b><br>0 – Needs supplementary / additional imaging.<br>1 – Negative – no findings.<br>2 – Benign findings.<br>3 – Probably benign – short term follow up suggested.<br>4A – Low suspicious of malignancy but needs intervention. 4B – Intermediate suspicious. 4C – High suspicious.<br>5 – Highly suggestive of malignancy.<br>6 – Biopsy proven case of malignancy.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study. BI-RADS Category 1.`,
-    },
-    {
-      id: "usg-chest-no-effusion",
-      name: "USG Chest – No Effusion",
-      preview: "No pleural effusion bilaterally. Bilateral pleura normal. Diaphragm normal movement.",
-      body: `<b>FINDINGS:</b> No pleural effusion seen on either side. Bilateral pleura appears normal. No evidence of pleural thickening is seen. Bilateral domes of diaphragm reveal normal movement with respiration.<br><br><b>IMPRESSION:</b><br>No pleural effusion seen bilaterally.`,
-    },
-    {
-      id: "usg-axilla",
-      name: "USG Axilla",
-      preview: "Sub-centimeter non-necrotic lymph nodes bilaterally. Axillary vessels normal.",
-      body: `<b>FINDINGS:</b> Multiple sub-centimeter sized non-necrotic lymph nodes are seen in both axillary regions. Axillary vessels are normal.<br><br><b>IMPRESSION:</b><br>No significant axillary lymphadenopathy detected.`,
-    },
-    {
-      id: "usg-follicular",
-      name: "Follicular Study",
-      preview: "LMP noted. Follicular monitoring table with date, day of cycle, follicle sizes, endometrium.",
-      body: `<b>LMP:</b> ___<br><br><b>FOLLICULAR MONITORING:</b><br><br>DATE &nbsp;·&nbsp; DAY OF CYCLE &nbsp;·&nbsp; RT OVARY FOLLICLE (mm) &nbsp;·&nbsp; LT OVARY FOLLICLE (mm) &nbsp;·&nbsp; ENDOMETRIUM (mm) &nbsp;·&nbsp; FREE FLUID<br>_____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____<br>_____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____<br>_____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____ &nbsp;·&nbsp; _____<br><br><b>IMPRESSION:</b><br>`,
-    },
-  ],
-  doppler: [
-    {
-      id: "doppler-carotid-normal",
-      name: "Carotid Doppler – Normal",
-      preview: "Both CCA, ICA, ECA, Vertebral arteries patent with normal flow. No plaque. No stenosis.",
-      body: `<b>TECHNIQUE:</b> Real-time B-mode and colour Doppler study of bilateral carotid arteries performed.<br><br><b>COMMON CAROTID ARTERY (CCA):</b><br>Right: Patent, with normal flow and spectral pattern. IMT ___ mm. PSV ___ cm/s.<br>Left: Patent, with normal flow and spectral pattern. IMT ___ mm. PSV ___ cm/s.<br><br><b>INTERNAL CAROTID ARTERY (ICA):</b><br>Right: Patent with normal flow and spectral pattern. PSV ___ cm/s.<br>Left: Patent with normal flow and spectral pattern. PSV ___ cm/s.<br><br><b>EXTERNAL CAROTID ARTERY (ECA):</b><br>Right: Normal flow, triphasic. PSV ___ cm/s.<br>Left: Normal flow, triphasic. PSV ___ cm/s.<br><br><b>VERTEBRAL ARTERY:</b><br>Right: Normal flow. PSV ___ cm/s.<br>Left: Normal flow. PSV ___ cm/s.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen on this study.`,
-    },
-    {
-      id: "doppler-ll-venous-normal",
-      name: "Lower Limb Venous Doppler – Normal",
-      preview: "Bilateral deep veins patent with normal color flow. No DVT. GSV normal caliber bilaterally.",
-      body: `<b>TECHNIQUE:</b> Real time, B mode ultrasound of both lower limbs was performed with high frequency linear transducer.<br><br><b>RIGHT LOWER LIMB – DEEP VEINS:</b> The deep veins of the right lower extremity including the common femoral, superficial femoral, popliteal, calf veins (anterior & posterior tibial veins) reveal clear lumen with normal color flow. No evidence of deep vein thrombosis. Right GSV is normal in caliber.<br><br><b>LEFT LOWER LIMB – DEEP VEINS:</b> The deep veins of the left lower extremity including the common femoral, superficial femoral, popliteal, calf veins (anterior & posterior tibial veins) reveal clear lumen with normal color flow. No evidence of deep vein thrombosis. Left GSV is normal in caliber.<br><br><b>IMPRESSION:</b><br>No evidence of deep venous thrombosis in bilateral lower limbs.`,
-    },
-    {
-      id: "doppler-ll-arterial-normal",
-      name: "Lower Limb Arterial Doppler – Normal",
-      preview: "Bilateral CFA, SFA, Popliteal, Tibial, Dorsalis Pedis show normal triphasic/biphasic flow.",
-      body: `<b>TECHNIQUE:</b> Real time, B mode sonography of lower limbs performed with high frequency linear transducer. Examination of CFA, SFA, popliteal artery, anterior & posterior tibial artery, dorsalis pedis artery performed bilaterally.<br><br><b>RIGHT LOWER LIMB ARTERIES:</b><br>Common Femoral – Triphasic, PSV ___ cm/s<br>Proximal Superficial Femoral – Triphasic, PSV ___ cm/s<br>Deep Femoral Artery – Triphasic, PSV ___ cm/s<br>Popliteal – Triphasic, PSV ___ cm/s<br>Proximal Anterior Tibial – Biphasic, PSV ___ cm/s<br>Posterior Tibial – Biphasic, PSV ___ cm/s<br>Dorsalis Pedis – Biphasic, PSV ___ cm/s<br><br><b>LEFT LOWER LIMB ARTERIES:</b><br>Common Femoral – Triphasic, PSV ___ cm/s<br>Proximal Superficial Femoral – Triphasic, PSV ___ cm/s<br>Deep Femoral Artery – Triphasic, PSV ___ cm/s<br>Popliteal – Triphasic, PSV ___ cm/s<br>Proximal Anterior Tibial – Biphasic, PSV ___ cm/s<br>Posterior Tibial – Biphasic, PSV ___ cm/s<br>Dorsalis Pedis – Biphasic, PSV ___ cm/s<br><br><b>IMPRESSION:</b><br>`,
-    },
-    {
-      id: "doppler-portal-normal",
-      name: "Portal Vein Doppler – Normal",
-      preview: "Portal vein 9 mm, hepatopetal flow. Hepatic veins normal hepatofugal. No thrombosis.",
-      body: `<b>PORTAL VEIN:</b> Portal vein is normal in caliber and measures 9 mm & shows hepatopetal flow. Flow velocity is normal. No evidence of thrombosis is seen.<br><br><b>HEPATIC VEINS:</b> All three hepatic veins show normal hepatofugal flow.<br><br><b>SPLENIC VEIN:</b> Splenic vein measures 8 mm & shows normal flow.<br><br><b>IMPRESSION:</b><br>No thrombosis seen in portal, splenic & hepatic veins. Normal portal Doppler study.`,
-    },
-    {
-      id: "doppler-renal",
-      name: "Renal Artery Doppler",
-      preview: "Both kidneys normal. Intrarenal vessels show normal spectral waveform. No significant stenosis.",
-      body: `<b>GRAY SCALE EXAMINATION:</b> Right kidney measures ___ cm. Left kidney measures ___ cm. Both kidneys are normal in size, shape, position and echotexture. Renal margins are smooth. Corticomedullary differentiation is normal. No evidence of hydronephrosis or calculus. No perinephric collection noted.<br><br><b>COLOUR DOPPLER & SPECTRAL EXAMINATION:</b> Color Doppler examination of intrarenal vessels (segmental artery – upper, mid & lower pole) & main renal artery at the hilum performed bilaterally.<br><br><b>RIGHT RENAL ARTERY:</b><br>PSV at origin: ___ cm/s &nbsp;&nbsp; PSV at hilum: ___ cm/s<br>Intrarenal upper pole RI: ___ &nbsp;&nbsp; Mid pole RI: ___<br><br><b>LEFT RENAL ARTERY:</b><br>PSV at origin: ___ cm/s &nbsp;&nbsp; PSV at hilum: ___ cm/s<br>Intrarenal upper pole RI: ___ &nbsp;&nbsp; Mid pole RI: ___<br><br><b>IMPRESSION:</b><br>No evidence of significant renal arterial stenosis.`,
-    },
-  ],
-  xray: [
-    {
-      id: "xray-chest-pa-normal",
-      name: "Chest PA – Normal",
-      preview: "Both lung fields clear. Hila normal. CP angles clear. Cardiac silhouette normal. Bony thorax normal.",
-      body: `<b>FINDINGS:</b><br><br>Both the lung fields are clear. No abnormal radio-opaque or radiolucent lesion is seen. Both hila appear normal. Both costo-phrenic angles are clear. Both domes of diaphragm are normal. Cardiac silhouette is normal. Bony thorax appears normal.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "xray-chest-pa-lat",
-      name: "Chest PA + LAT – Normal",
-      preview: "Both lung fields clear. Hila normal. CP angles clear. Cardiac normal. Bony thorax normal.",
-      body: `<b>FINDINGS:</b><br><br>Both the lung fields are clear. No abnormal radio-opaque or radiolucent lesion is seen. Both hila appear normal. Both costo-phrenic angles are clear. Both domes of diaphragm are normal. Cardiac silhouette is normal. Bony thorax appears normal.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "xray-chest-pleural-effusion",
-      name: "Chest PA – Pleural Effusion",
-      preview: "Haziness lower zone, blunting of costophrenic angle. Tracheal shift. Pleural effusion.",
-      body: `<b>FINDINGS:</b><br><br>Trachea: Shifted to the contralateral side.<br><br>Lung fields: Haziness noted at the right / left lower zone with blunting of costophrenic angle suggestive of pleural effusion. Underlying lung parenchyma partially obscured.<br><br>Hilum: Obscured on the affected side.<br><br>Heart: Cardiac silhouette partially obscured on the affected side. Mediastinal shift noted to the opposite side.<br><br>Diaphragm: Right / left dome of diaphragm not clearly visualised.<br><br>Bones: No bony abnormality.<br><br><b>IMPRESSION:</b><br>X-Ray findings suggestive of right / left pleural effusion. USG chest recommended for guided aspiration.`,
-    },
-    {
-      id: "xray-knee-normal",
-      name: "Knee – Normal",
-      preview: "Tibio-femoral & patello-femoral joints normal. Joint spaces normal. No fracture.",
-      body: `<b>FINDINGS:</b><br><br>Tibio-femoral and patello-femoral joints show normal alignment. Joint spaces are normal. No abnormal soft tissue calcification is noted. No focal bone lesion or fracture is noted.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study.`,
-    },
-    {
-      id: "xray-lumbar-normal",
-      name: "Lumbar Spine – Normal",
-      preview: "Lumbar vertebrae normal alignment. Disc spaces well maintained. No lysis/listhesis.",
-      body: `<b>FINDINGS:</b><br><br>The lumbar vertebrae are normal in alignment. The vertebral bodies reveal normal architecture. All the intervertebral disc spaces are well maintained. No abnormal pre/paravertebral soft tissue shadow is seen. No evidence of lysis / listhesis / displaced fracture of vertebrae is noted.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study.`,
-    },
-    {
-      id: "xray-lumbar-degenerative",
-      name: "Lumbar Spine – Degenerative",
-      preview: "Reduced disc space L4-L5, L5-S1. Marginal osteophytes. Facet arthrosis. No listhesis.",
-      body: `<b>FINDINGS:</b><br><br>Vertebral bodies: Maintained height. Mild loss of disc space height noted at L4-L5 and L5-S1 levels.<br><br>Intervertebral disc spaces: Reduced at L4-L5 and L5-S1 levels suggestive of degenerative disc disease.<br><br>Alignment: Normal lumbar lordosis maintained. No spondylolisthesis or spondylolysis seen.<br><br>Facet joints: Facet joint arthrosis noted at lower lumbar levels.<br><br>Osteophytes: Marginal osteophytic lipping noted at L4-L5 and L5-S1 vertebral bodies.<br><br>Sacroiliac joints: Normal.<br><br>Bones: No fracture or lytic/sclerotic lesion.<br><br><b>IMPRESSION:</b><br>Degenerative disc disease at L4-L5 and L5-S1 with facet arthrosis. MRI lumbar spine recommended for further evaluation.`,
-    },
-    {
-      id: "xray-cervical-normal",
-      name: "Cervical Spine – Normal",
-      preview: "Vertebrae normal alignment & curvature. Disc spaces normal. No spondylolysis.",
-      body: `<b>FINDINGS:</b><br><br>The vertebrae are normal in alignment and curvature. The vertebral bodies are normal in architecture. Intervertebral disc spaces are normal. No spondylolysis or spondylolisthesis is noted. No abnormal pre/paravertebral soft tissue shadow is seen.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study.`,
-    },
-    {
-      id: "xray-dorsal-normal",
-      name: "Dorsal Spine – Normal",
-      preview: "Vertebrae normal alignment. Vertebral bodies normal architecture. Disc spaces normal.",
-      body: `<b>FINDINGS:</b><br><br>The vertebrae are normal in alignment and curvature. The vertebral bodies are normal in architecture. Visualized intervertebral disc spaces appear normal. No spondylolysis or spondylolisthesis is noted. No abnormal pre/paravertebral soft tissue shadow is seen.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "xray-hip-normal",
-      name: "Hip – Normal",
-      preview: "Femoral head smooth. Acetabulum normal. Joint space normal. No fracture or loose bodies.",
-      body: `<b>FINDINGS:</b><br><br>Femoral head appears smooth and regular. Articular surface of acetabulum appears normal. The alignment appears normal. Joint space appears normal. No evidence of fracture is seen. No evidence of loose bodies. No evidence of abnormal soft tissue calcification.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "xray-shoulder-normal",
-      name: "Shoulder – Normal",
-      preview: "Bones normal alignment. Joint space normal. No fracture. AC joint normal. Ribs normal.",
-      body: `<b>FINDINGS:</b><br><br>The bones of the shoulder joint show normal alignment. No focal bone lesion is seen. No evidence of fracture is noted. The joint space and articular margins are normal. There is no abnormal soft tissue calcification. The visualized ribs and scapulae are normal. The acromio-clavicular joints show no significant abnormality.<br><br><b>IMPRESSION:</b><br>No significant abnormality is noted in shoulder joint.`,
-    },
-    {
-      id: "xray-wrist-normal",
-      name: "Wrist – Normal",
-      preview: "Bones of wrist normal alignment. Joint space & articular margins normal. No fracture.",
-      body: `<b>FINDINGS:</b><br><br>The bones of the wrist joint show normal alignment. No focal bone lesion is seen. No evidence of fracture is noted. The joint space and articular margins are normal. There is no abnormal soft tissue calcification.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study.`,
-    },
-    {
-      id: "xray-hand-normal",
-      name: "Hand – Normal",
-      preview: "Bones normal mineralization. No fracture/dislocation. Carpal-phalangeal joints normal.",
-      body: `<b>FINDINGS:</b><br><br>The bones of the hand appear normal in mineralization pattern. No evidence of any fracture / dislocation is seen. The surrounding soft tissue appears normal. The carpal-metacarpal, metacarpal-phalangeal, and the inter-phalangeal joints show no abnormality.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "xray-elbow-normal",
-      name: "Elbow – Normal",
-      preview: "Joint space normal. Bones normal alignment. No fracture. No soft tissue calcification.",
-      body: `<b>FINDINGS:</b><br><br>The joint space of the elbow joint appears normal. The bones of the elbow joint show normal alignment. No focal bone lesion is seen. No evidence of fracture is noted. There is no abnormal soft tissue calcification.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "xray-forearm-normal",
-      name: "Forearm – Normal",
-      preview: "Bones of forearm normal alignment. No fracture. No soft tissue calcification.",
-      body: `<b>FINDINGS:</b><br><br>Bones of forearm show normal alignment. No focal bone lesion is seen. No evidence of fracture is noted. There is no abnormal soft tissue calcification.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study.`,
-    },
-    {
-      id: "xray-foot-normal",
-      name: "Foot – Normal",
-      preview: "Bones of foot normal. No fracture. Bone mineralization normal. Joint spaces normal.",
-      body: `<b>FINDINGS:</b><br><br>Bones of foot appear normal. No evidence of fracture is noted in foot. Bone mineralization appears normal. The surrounding soft tissue fat planes appear normal. Joint spaces are normal.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study.`,
-    },
-    {
-      id: "xray-ankle-normal",
-      name: "Ankle – Normal",
-      preview: "Bones of ankle normal. No fracture. Bone mineralization normal. Joint spaces normal.",
-      body: `<b>FINDINGS:</b><br><br>Bones of ankle joint appear normal. No evidence of fracture is noted in ankle joint. Bone mineralization appears normal. The surrounding soft tissue fat planes appear normal. Joint spaces are normal.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study.`,
-    },
-    {
-      id: "xray-calcaneum-normal",
-      name: "Calcaneum – Normal",
-      preview: "Calcaneum appears normal. Joint spaces normal. No fracture or focal bone lesion.",
-      body: `<b>FINDINGS:</b><br><br>Bilateral calcaneum appears normal. Joint spaces are normal. No focal bone lesion or fracture is noted.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study.`,
-    },
-    {
-      id: "xray-skull-normal",
-      name: "Skull AP + LAT – Normal",
-      preview: "Vault bones normal. Pituitary fossa normal. No fracture or intracranial calcification.",
-      body: `<b>FINDINGS:</b><br><br>The bones of the vault of the skull show normal alignment and normal architecture. No focal bone lesion is seen. The pituitary fossa is normal. No abnormal intracranial calcification is seen. The sutures and vascular markings are normal. No soft-tissue abnormality is seen. There is no obvious evidence of fracture.<br><br><b>IMPRESSION:</b><br>No significant abnormality is seen in this study.`,
-    },
-    {
-      id: "xray-pns-normal",
-      name: "PNS – Normal",
-      preview: "Bilateral maxillary & frontal sinuses normal. Nasal septum midline. No bony erosion.",
-      body: `<b>FINDINGS:</b><br><br>Bilateral maxillary and frontal sinuses appear normal. Nasal septum appears in midline. Anterior walls & zygomatic process appear normal. No convincing bony erosion noted.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "xray-nasal-bones-normal",
-      name: "Nasal Bones – Normal",
-      preview: "Visualized bones normal. No fracture. No foreign body. Soft tissue planes normal.",
-      body: `<b>FINDINGS:</b><br><br>Visualized bones are normal. No evidence of fracture is noted. No evidence of foreign body is seen. Soft tissue planes appear normal.<br><br><b>IMPRESSION:</b><br>Bilateral nasal bones are normal. No evidence of fracture is seen on both sides.`,
-    },
-    {
-      id: "xray-mastoid-normal",
-      name: "Mastoid – Normal",
-      preview: "Normal pneumatisation. No sclerosis. Dural & sinus plates normal. TM joints normal.",
-      body: `<b>FINDINGS:</b><br><br>The mastoid shows normal pneumatisation. No evidence of any sclerosis is noted. The dural and sinus plates appear normal. The visualized temporal-mandibular joints grossly appear normal.<br><br><b>IMPRESSION:</b><br>No abnormality is seen in the mastoid.`,
-    },
-    {
-      id: "xray-mandible-normal",
-      name: "Mandible – Normal",
-      preview: "Mandible grossly normal. No displaced fracture. Bone mineralization normal.",
-      body: `<b>FINDINGS:</b><br><br>Mandible appears grossly normal. No evidence of displaced fracture is seen. Bone mineralization appears normal.<br><br><b>IMPRESSION:</b><br>No significant abnormality is detected in this study.`,
-    },
-    {
-      id: "xray-kub-normal",
-      name: "X-Ray KUB – Normal",
-      preview: "No radio-opaque calculus bilaterally. Psoas shadows normal. Vertebrae normal.",
-      body: `<b>FINDINGS:</b><br><br>No evidence of radio opaque calculus is seen in bilateral renal area and pelvis. Vertebral bodies appear normal in AP view. Psoas shadows appear normal. Bilateral SI joints appear normal.<br><br><b>IMPRESSION:</b><br>No evidence of radio opaque calculus is seen in bilateral renal area and pelvis. (Please note: radiolucent calculi will not be visible on plain radiograph.)`,
-    },
-    {
-      id: "xray-abdomen-erect-normal",
-      name: "Abdomen Erect – Normal",
-      preview: "No air under diaphragm. No air-fluid levels. No abnormal radio-opacity. Bones normal.",
-      body: `<b>FINDINGS:</b><br><br>No air under diaphragm is visualized. No evidence of multiple air fluid levels are seen. No abnormal radio opacity is visualized in the abdominal region. Visualized bones reveal normal density and grossly appear normal.<br><br><b>IMPRESSION:</b><br>No air under diaphragm is visualized. No evidence of multiple air fluid levels are seen.`,
-    },
-  ],
-  pathology: [
-    {
-      id: "path-cbc-normal",
-      name: "CBC – Normal",
-      preview: "Hb normal, WBC normal differential, Platelets normal, PCV/MCV/MCH/MCHC within range.",
-      body: `<b>COMPLETE BLOOD COUNT (CBC)</b><br><br><b>Haemoglobin (Hb):</b> ___ g/dL &nbsp;&nbsp;(Normal: M: 13–17 | F: 12–15)<br><b>Total WBC Count:</b> ___ × 10³/µL &nbsp;&nbsp;(Normal: 4.0–11.0)<br><b>Differential Count:</b><br>&nbsp;&nbsp;Neutrophils: ___%  (Normal: 50–70%)<br>&nbsp;&nbsp;Lymphocytes: ___% (Normal: 20–40%)<br>&nbsp;&nbsp;Monocytes: ___% (Normal: 2–8%)<br>&nbsp;&nbsp;Eosinophils: ___% (Normal: 1–4%)<br>&nbsp;&nbsp;Basophils: ___% (Normal: 0–1%)<br><b>Platelet Count:</b> ___ × 10³/µL &nbsp;&nbsp;(Normal: 150–400)<br><b>PCV (Haematocrit):</b> ___% &nbsp;&nbsp;(Normal: M: 40–52% | F: 37–47%)<br><b>MCV:</b> ___ fL &nbsp;&nbsp;(Normal: 80–100)<br><b>MCH:</b> ___ pg &nbsp;&nbsp;(Normal: 27–33)<br><b>MCHC:</b> ___ g/dL &nbsp;&nbsp;(Normal: 32–36)<br><br><b>IMPRESSION:</b><br>CBC within normal limits. No significant haematological abnormality detected.`,
-    },
-    {
-      id: "path-lft-normal",
-      name: "LFT – Normal",
-      preview: "Bilirubin, SGOT, SGPT, ALP, Total Protein, Albumin all within normal limits.",
-      body: `<b>LIVER FUNCTION TEST (LFT)</b><br><br><b>Total Bilirubin:</b> ___ mg/dL &nbsp;&nbsp;(Normal: 0.2–1.2)<br><b>Direct Bilirubin:</b> ___ mg/dL &nbsp;&nbsp;(Normal: 0.0–0.3)<br><b>Indirect Bilirubin:</b> ___ mg/dL &nbsp;&nbsp;(Normal: 0.2–0.9)<br><b>SGOT (AST):</b> ___ U/L &nbsp;&nbsp;(Normal: 10–40)<br><b>SGPT (ALT):</b> ___ U/L &nbsp;&nbsp;(Normal: 7–56)<br><b>Alkaline Phosphatase (ALP):</b> ___ U/L &nbsp;&nbsp;(Normal: 44–147)<br><b>GGT (Gamma GT):</b> ___ U/L &nbsp;&nbsp;(Normal: 9–48)<br><b>Total Protein:</b> ___ g/dL &nbsp;&nbsp;(Normal: 6.0–8.3)<br><b>Albumin:</b> ___ g/dL &nbsp;&nbsp;(Normal: 3.5–5.0)<br><b>Globulin:</b> ___ g/dL &nbsp;&nbsp;(Normal: 2.0–3.5)<br><b>A:G Ratio:</b> ___<br><br><b>IMPRESSION:</b><br>Liver function tests within normal limits.`,
-    },
-    {
-      id: "path-kft-normal",
-      name: "KFT – Normal",
-      preview: "Urea, Creatinine, BUN, Uric Acid, Electrolytes, eGFR all within normal limits.",
-      body: `<b>KIDNEY FUNCTION TEST (KFT)</b><br><br><b>Blood Urea:</b> ___ mg/dL &nbsp;&nbsp;(Normal: 15–45)<br><b>Serum Creatinine:</b> ___ mg/dL &nbsp;&nbsp;(Normal: M: 0.7–1.3 | F: 0.6–1.1)<br><b>Blood Urea Nitrogen (BUN):</b> ___ mg/dL &nbsp;&nbsp;(Normal: 7–20)<br><b>Serum Uric Acid:</b> ___ mg/dL &nbsp;&nbsp;(Normal: M: 3.5–7.2 | F: 2.6–6.0)<br><b>Serum Sodium (Na⁺):</b> ___ mEq/L &nbsp;&nbsp;(Normal: 136–145)<br><b>Serum Potassium (K⁺):</b> ___ mEq/L &nbsp;&nbsp;(Normal: 3.5–5.1)<br><b>Serum Chloride (Cl⁻):</b> ___ mEq/L &nbsp;&nbsp;(Normal: 98–107)<br><b>eGFR:</b> ___ mL/min/1.73m² &nbsp;&nbsp;(Normal: &gt;60)<br><br><b>IMPRESSION:</b><br>Kidney function tests within normal limits. No evidence of renal impairment.`,
-    },
-    {
-      id: "path-thyroid-normal",
-      name: "Thyroid Profile – Normal",
-      preview: "T3, T4, TSH, Free T3, Free T4 all within normal limits. Euthyroid state.",
-      body: `<b>THYROID FUNCTION TEST</b><br><br><b>T3 (Triiodothyronine):</b> ___ ng/dL &nbsp;&nbsp;(Normal: 80–200)<br><b>T4 (Thyroxine):</b> ___ µg/dL &nbsp;&nbsp;(Normal: 5.1–14.1)<br><b>TSH (Thyroid Stimulating Hormone):</b> ___ µIU/mL &nbsp;&nbsp;(Normal: 0.4–4.0)<br><b>Free T3 (fT3):</b> ___ pg/mL &nbsp;&nbsp;(Normal: 2.3–4.2)<br><b>Free T4 (fT4):</b> ___ ng/dL &nbsp;&nbsp;(Normal: 0.89–1.76)<br><br><b>IMPRESSION:</b><br>Thyroid function tests within normal limits. Euthyroid state.`,
-    },
-  ],
-}
-
-const FONT_FAMILIES = ["Arial", "Times New Roman", "Courier New", "Georgia", "Verdana", "Calibri"]
+const FONT_FAMILIES = [
+  "Arial", "Times New Roman", "Courier New", "Georgia", "Verdana", "Calibri",
+  "Tahoma", "Trebuchet MS", "Garamond", "Bookman", "Palatino", "Impact"
+]
 
 // ── Formatting toolbar button ─────────────────────────────────────────────────
 
@@ -500,6 +174,16 @@ function FmtBtn({ cmd, label, title, value }: { cmd: string; label: React.ReactN
 
 function Sep() { return <span className="w-px h-4 bg-gray-300 mx-0.5" /> }
 
+const getDisplayTitle = (studyName: string) => {
+  if (!studyName) return ""
+  for (const cat of Object.keys(REPORT_TEMPLATES)) {
+    const list = REPORT_TEMPLATES[cat as keyof typeof REPORT_TEMPLATES]
+    const found = list.find(t => t.name.toLowerCase() === studyName.toLowerCase())
+    if (found) return found.heading
+  }
+  return studyName
+}
+
 // ── Main editor ───────────────────────────────────────────────────────────────
 
 function ReportEditorInner() {
@@ -515,6 +199,7 @@ function ReportEditorInner() {
   const paramSrNo    = sp.get("srNo")    ?? ""
   const paramContact = sp.get("contact") ?? ""
   const paramId      = sp.get("id")     ?? ""   // MongoDB _id of the patient
+  const paramSidx    = Math.max(0, parseInt(sp.get("sidx") ?? "0", 10) || 0)  // which study of the patient
   const paramLoad    = sp.get("load")  === "1"  // edit mode — loads + editable
   const paramView    = sp.get("view")  === "1"  // view mode — loads, read-only
   const isReadOnly   = paramView && !paramLoad
@@ -535,9 +220,17 @@ function ReportEditorInner() {
   // For patient with no study yet (came from registration without study)
   const [extraStudy,  setExtraStudy]  = useState("")
 
+  const [currentStudy, setCurrentStudy] = useState(() => paramStudy)
+
+  useEffect(() => {
+    if (paramStudy) {
+      setCurrentStudy(paramStudy)
+    }
+  }, [paramStudy])
+
   // Resolved values
   const patient = hasPatient ? paramPatient : selPatient
-  const study   = hasPatient ? (paramStudy || extraStudy) : selStudy
+  const study   = currentStudy || (hasPatient ? extraStudy : selStudy)
   const refBy   = hasPatient ? paramRefBy   : selRefBy
   const date    = hasPatient ? paramDate    : selDate
   const age     = hasPatient ? paramAge     : selAge
@@ -565,26 +258,45 @@ function ReportEditorInner() {
   const showDoc   = hasPatient || pickerDone
   const needStudy = showDoc && !study
 
-  // Refs for contenteditable body
   const bodyRef         = useRef<HTMLDivElement | null>(null)
+  const titleRef        = useRef<HTMLDivElement | null>(null)
   const originalBodyRef = useRef<string>("")
   const submittedRef    = useRef(false)
+
+  const paperRef        = useRef<HTMLDivElement | null>(null)
+  const [numPages, setNumPages] = useState(1)
+
+  useEffect(() => {
+    const el = paperRef.current
+    if (!el) return
+    const checkHeight = () => {
+      const h = el.scrollHeight
+      const pages = Math.ceil(h / 1122)
+      setNumPages(pages)
+    }
+    const observer = new ResizeObserver(checkHeight)
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [showDoc])
+
+  // Current heading text (falls back to the study name)
+  const getDocTitle = () => (titleRef.current?.innerText ?? "").trim() || getDisplayTitle(study).toUpperCase()
   const [docxLoading,        setDocxLoading]        = useState(false)
   const [submitting,         setSubmitting]          = useState(false)
   const [submitted,          setSubmitted]           = useState(false)
   const [submittedDocxBase64, setSubmittedDocxBase64] = useState("")
   const [shareLoading,       setShareLoading]        = useState(false)
 
-  // Storage key for this patient's report
-  const storageKey = `aarya_report_${srNo || patient.replace(/\s+/g, "_")}`
+  // Storage key for this patient's report (per study — a patient can have several)
+  const storageKey = `aarya_report_${srNo || patient.replace(/\s+/g, "_")}${paramSidx > 0 ? `_s${paramSidx}` : ""}`
 
-  // ── Set in_progress when doctor opens the form (not view/edit mode) ─────────
+  // ── Set in_progress when the form is opened (not view/edit mode) ─────────
   useEffect(() => {
     if (paramId && !paramView && !paramLoad) {
       fetch(`/api/patients/${paramId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reportStatus: "in_progress" }),
+        body: JSON.stringify({ reportStatus: "in_progress", studyIndex: paramSidx }),
       }).catch(() => {})
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -597,6 +309,7 @@ function ReportEditorInner() {
         try {
           localStorage.setItem(storageKey, JSON.stringify({
             body: bodyRef.current.innerHTML,
+            docTitle: titleRef.current?.innerText?.trim() || undefined,
             patient, study, date, age, gender, contact, srNo, refBy,
             savedAt: new Date().toISOString(),
           }))
@@ -606,21 +319,54 @@ function ReportEditorInner() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageKey, patient, study, date, age, gender, contact, srNo, refBy])
 
-  // ── Load saved draft whenever the document area is shown ────────────────────
+  // ── Load report body: localStorage draft first, then the submitted body from DB ──
   useEffect(() => {
     if (!showDoc) return
-    try {
-      const saved = JSON.parse(localStorage.getItem(storageKey) || "null")
-      if (!saved?.body) return
+
+    const setBody = (html: string, title?: string) => {
+      if (bodyRef.current) {
+        bodyRef.current.innerHTML = html
+        if (paramLoad || paramView) originalBodyRef.current = html
+      }
+      if (title && titleRef.current) titleRef.current.innerText = title
+    }
+
+    let draft: { body?: string; docTitle?: string; study?: string } | null = null
+    try { draft = JSON.parse(localStorage.getItem(storageKey) || "null") } catch {}
+
+    if (draft?.body) {
+      const d = draft
       setTimeout(() => {
-        if (bodyRef.current) {
-          bodyRef.current.innerHTML = saved.body
-          if (paramLoad) originalBodyRef.current = saved.body
-        }
+        setBody(d.body!, d.docTitle)
+        if (d.study) setCurrentStudy(d.study)
       }, 80)
-    } catch {}
+      return
+    }
+
+    // View / edit mode without a local draft — pull the submitted body for this study
+    if (paramId && (paramView || paramLoad)) {
+      fetch(`/api/patients/${paramId}`)
+        .then((r) => r.json())
+        .then((d) => {
+          const p = d.patient
+          if (!p) return
+          const entry = p.studies?.[paramSidx]
+          const html: string = entry?.reportBody || p.reportBody || ""
+          if (html) setTimeout(() => setBody(html), 80)
+          if (entry?.name) setCurrentStudy(entry.name)
+        })
+        .catch(() => {})
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showDoc])
+
+  // ── Seed the editable heading with the study name (drafts/templates override it) ──
+  useEffect(() => {
+    if (!showDoc || !study) return
+    if (titleRef.current && !titleRef.current.innerText.trim()) {
+      titleRef.current.innerText = getDisplayTitle(study).toUpperCase()
+    }
+  }, [showDoc, study])
 
   // ── Save draft on browser close / hard refresh (belt-and-suspenders) ─────────
   useEffect(() => {
@@ -630,7 +376,9 @@ function ReportEditorInner() {
       if (!html || html === "<br>") return
       try {
         localStorage.setItem(storageKey, JSON.stringify({
-          body: html, patient, study, date, age, gender, contact, srNo, refBy,
+          body: html,
+          docTitle: titleRef.current?.innerText?.trim() || undefined,
+          patient, study, date, age, gender, contact, srNo, refBy,
           savedAt: new Date().toISOString(),
         }))
       } catch {}
@@ -663,77 +411,113 @@ function ReportEditorInner() {
       return paras.length ? paras : [new Paragraph({ children: [new TextRun({ text: "", size })] })]
     }
 
-    const infoLines: [string, string][] = [["NAME", patient.toUpperCase()], ["DATE", date]]
-    if (age)         infoLines.push(["AGE",    `${age} YRS`])
-    if (contact)     infoLines.push(["MOBILE", contact])
-    infoLines.push(["REF. BY", (refBy || "SELF").toUpperCase()])
-    if (gender)      infoLines.push(["SEX",    gender.toUpperCase()])
-    if (localSrNo)   infoLines.push(["SR. NO", `#${localSrNo}`])
+    const { Table, TableRow, TableCell, WidthType } = await import("docx")
 
-    const doctorName = (user?.name || "Dr. Ramesh Mehta").toUpperCase()
+    const noBorder     = { style: BorderStyle.NONE,   size: 0, color: "ffffff" }
+    const doubleBorder = { style: BorderStyle.DOUBLE, size: 4, color: "333333" }
+    const boldLine = (text: string, spaceAfter = 0) =>
+      new Paragraph({ children: [new TextRun({ text, bold: true, size: 22 })], spacing: { after: spaceAfter } })
 
+    // The Word file matches the clinic's printed design: a double-bordered
+    // patient info box (NAME / REF. BY | DATE / AGE / SEX), then the
+    // bordered underlined (editable) study heading, body and signatures.
     const children = [
-      // ── Clinic letterhead ──
-      new Paragraph({
+      // ── Patient info box ──
+      new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        borders: {
+          top: doubleBorder, bottom: doubleBorder, left: doubleBorder, right: doubleBorder,
+          insideHorizontal: noBorder, insideVertical: noBorder,
+        },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 62, type: WidthType.PERCENTAGE },
+                margins: { top: 160, bottom: 160, left: 200, right: 200 },
+                children: [
+                  boldLine(`NAME - ${patient.toUpperCase()}`, 60),
+                  boldLine(`REF. BY - ${(refBy || "SELF").toUpperCase()}`, 60),
+                  ...(localSrNo || srNo ? [boldLine(`SR. NO - #${localSrNo || srNo}`)] : []),
+                ],
+              }),
+              new TableCell({
+                width: { size: 38, type: WidthType.PERCENTAGE },
+                margins: { top: 160, bottom: 160, left: 200, right: 200 },
+                children: [
+                  boldLine(`DATE - ${date || ""}`, 60),
+                  boldLine(`AGE - ${age ? `${age} YRS` : "—"}`, 60),
+                  boldLine(`SEX - ${(gender || "—").toUpperCase()}`),
+                ],
+              }),
+            ],
+          }),
+        ],
+      }),
+      new Paragraph({ children: [new TextRun({ text: "" })], spacing: { before: 120, after: 120 } }),
+      // ── Study heading (editable in the editor) — centered bordered box ──
+      new Table({
         alignment: AlignmentType.CENTER,
-        children: [new TextRun({ text: "AARYA DIAGNOSTICS CENTER", bold: true, size: 36 })],
-        spacing: { after: 60 },
+        borders: {
+          top: { style: BorderStyle.SINGLE, size: 6, color: "333333" },
+          bottom: { style: BorderStyle.SINGLE, size: 6, color: "333333" },
+          left: { style: BorderStyle.SINGLE, size: 6, color: "333333" },
+          right: { style: BorderStyle.SINGLE, size: 6, color: "333333" },
+          insideHorizontal: noBorder, insideVertical: noBorder,
+        },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({
+                margins: { top: 80, bottom: 80, left: 500, right: 500 },
+                children: [
+                  new Paragraph({
+                    alignment: AlignmentType.CENTER,
+                    children: [new TextRun({ text: getDocTitle().toUpperCase(), bold: true, size: 26, underline: {} })],
+                  }),
+                ],
+              }),
+            ],
+          }),
+        ],
       }),
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
-        children: [new TextRun({
-          text: "Shop No. 5, K. K. Smruti Building, S.N. Mehta Road, Ghatkopar (W) 400086",
-          size: 18, color: "666666",
-        })],
-        spacing: { after: 40 },
-      }),
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
-        children: [new TextRun({
-          text: "Tel: 9819022444   ·   aaryadiagnosticsmumbai@gmail.com",
-          size: 18, color: "666666",
-        })],
-        spacing: { after: 120 },
-        border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: "000000", space: 1 } },
-      }),
-      // ── Patient info ──
-      ...infoLines.map(([l, v]) =>
-        new Paragraph({
-          children: [
-            new TextRun({ text: `${l}: `, bold: true, size: 20 }),
-            new TextRun({ text: v, size: 20 }),
-          ],
-          spacing: { after: 60 },
-        })
-      ),
-      // Thin separator after patient info
-      new Paragraph({
-        children: [new TextRun({ text: "" })],
-        border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: "aaaaaa", space: 1 } },
-        spacing: { after: 160 },
-      }),
-      // ── Study title ──
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
-        children: [new TextRun({ text: study.toUpperCase(), bold: true, size: 26, underline: {} })],
-        spacing: { before: 120, after: 200 },
-      }),
+      new Paragraph({ children: [new TextRun({ text: "" })], spacing: { before: 120, after: 120 } }),
       // ── Report body ──
       ...makeParas(bodyHtml),
-      // ── Signature ──
-      new Paragraph({
-        children: [new TextRun({ text: "" })],
-        border: { top: { style: BorderStyle.DASHED, size: 4, color: "aaaaaa", space: 1 } },
-        spacing: { before: 560 },
-      }),
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
-        children: [new TextRun({ text: doctorName, bold: true, size: 20 })],
-        spacing: { before: 80, after: 40 },
-      }),
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
-        children: [new TextRun({ text: "Consultant Radiologist", size: 18, color: "666666" })],
+      // ── Spacer before signatures ──
+      new Paragraph({ children: [new TextRun({ text: "" })], spacing: { before: 1000 } }),
+      // ── Two-doctor signature block (as in the clinic's Word formats) ──
+      new Table({
+        width: { size: 100, type: WidthType.PERCENTAGE },
+        borders: {
+          top: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+          bottom: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+          left: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+          right: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+          insideHorizontal: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+          insideVertical: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+        },
+        rows: [
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                children: [
+                  new Paragraph({ children: [new TextRun({ text: "DR. PRADNYA GORE", bold: true, size: 20 })], spacing: { after: 40 } }),
+                  new Paragraph({ children: [new TextRun({ text: "CONSULTANT RADIOLOGIST", size: 16 })] }),
+                ],
+              }),
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                children: [
+                  new Paragraph({ children: [new TextRun({ text: "DR. RAMNATH GHUTE", bold: true, size: 20 })], spacing: { after: 40 } }),
+                  new Paragraph({ children: [new TextRun({ text: "CONSULTANT RADIOLOGIST", size: 16 })] }),
+                  new Paragraph({ children: [new TextRun({ text: "M.D. RADIOLOGY", size: 16 })] }),
+                ],
+              }),
+            ],
+          }),
+        ],
       }),
     ]
 
@@ -769,7 +553,9 @@ function ReportEditorInner() {
     // Save to localStorage
     try {
       localStorage.setItem(storageKey, JSON.stringify({
-        body: finalBody, patient, study, date, age, gender, contact, srNo, refBy,
+        body: finalBody,
+        docTitle: titleRef.current?.innerText?.trim() || undefined,
+        patient, study, date, age, gender, contact, srNo, refBy,
         savedAt: now.toISOString(),
       }))
     } catch {}
@@ -790,9 +576,11 @@ function ReportEditorInner() {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            studyIndex:   paramSidx,
             reportStatus: "completed",
             reportBody:   cleanBody,
             reportDocx,
+            studyName:    study,
             ...(localSrNo ? { srNo: Number(localSrNo) } : {}),
             editHistoryEntry: {
               editor:   editorName,
@@ -815,6 +603,19 @@ function ReportEditorInner() {
     const hasContent = bodyRef.current.innerHTML.trim() !== "" && bodyRef.current.innerHTML !== "<br>"
     if (hasContent && !confirm(`Replace current report content with "${tpl.name}"?`)) return
     bodyRef.current.innerHTML = tpl.body
+    // Update local study state
+    setCurrentStudy(tpl.name)
+    // Template always drives the heading (falls back to the study name)
+    if (titleRef.current) titleRef.current.textContent = tpl.heading || tpl.name.toUpperCase()
+    // Persist immediately so a stale draft can't bring the old heading back
+    try {
+      localStorage.setItem(storageKey, JSON.stringify({
+        body: tpl.body,
+        docTitle: tpl.heading || tpl.name.toUpperCase(),
+        patient, study: tpl.name, date, age, gender, contact, srNo, refBy,
+        savedAt: new Date().toISOString(),
+      }))
+    } catch {}
     setShowTemplates(false)
     bodyRef.current.focus()
   }
@@ -867,6 +668,7 @@ function ReportEditorInner() {
     try {
       localStorage.setItem(storageKey, JSON.stringify({
         body: bodyHtml,
+        docTitle: titleRef.current?.innerText?.trim() || undefined,
         patient, study, date, age, gender, contact, srNo, refBy,
         savedAt: new Date().toISOString(),
       }))
@@ -875,7 +677,17 @@ function ReportEditorInner() {
 
   // ── Print / PDF ──────────────────────────────────────────────────────────────
   const handlePrint = () => {
-    const html = buildPrintHtml({ patient, study, date, age, gender, srNo: localSrNo, contact, refBy, body: bodyRef.current?.innerHTML ?? "" })
+    const html = buildPrintHtml({
+      patient,
+      study: getDocTitle(),
+      body: bodyRef.current?.innerHTML ?? "",
+      age,
+      gender,
+      contact,
+      refBy,
+      date,
+      srNo: localSrNo || srNo,
+    })
     const win = window.open("", "_blank", "width=820,height=1000")
     if (!win) { alert("Please allow pop-ups."); return }
     win.document.write(html)
@@ -895,61 +707,24 @@ function ReportEditorInner() {
     const ln = (pt: number) => pt * 0.352778 * 1.4   // pt → mm with 1.4× leading
     const checkPage = (need = 8) => { if (y + need > 282) { doc.addPage(); y = 18 } }
 
-    // ── Letterhead ──
-    doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(0)
-    doc.text("AARYA DIAGNOSTICS CENTER", W / 2, y, { align: "center" }); y += ln(16)
-
-    doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(100)
-    doc.text("Shop No. 5, K. K. Smruti Building, S.N. Mehta Road, Ghatkopar (W) 400086", W / 2, y, { align: "center" }); y += ln(8)
-    doc.text("Tel: 9819022444   ·   aaryadiagnosticsmumbai@gmail.com", W / 2, y, { align: "center" }); y += ln(8) + 2
-
-    doc.setDrawColor(0); doc.setLineWidth(0.5); doc.line(M, y, W - M, y); y += 5
-
-    // ── Patient info (two-column layout) ──
-    doc.setTextColor(0)
-    const info: [string, string][] = [["NAME", patient.toUpperCase()], ["DATE", date]]
-    if (age)       info.push(["AGE",    `${age} YRS`])
-    if (contact)   info.push(["MOBILE", contact])
-    info.push(["REF. BY", (refBy || "SELF").toUpperCase()])
-    if (gender)    info.push(["SEX",    gender.toUpperCase()])
-    if (localSrNo) info.push(["SR. NO", `#${localSrNo}`])
-
-    for (let i = 0; i < info.length; i += 2) {
-      const [ll, lv] = info[i]
-      doc.setFont("helvetica", "bold"); doc.setFontSize(9)
-      doc.text(`${ll}:`, M, y)
-      doc.setFont("helvetica", "normal")
-      doc.text(lv, M + doc.getTextWidth(`${ll}:`) + 1.5, y)
-      if (info[i + 1]) {
-        const [rl, rv] = info[i + 1]
-        const rx = W / 2 + 5
-        doc.setFont("helvetica", "bold"); doc.text(`${rl}:`, rx, y)
-        doc.setFont("helvetica", "normal"); doc.text(rv, rx + doc.getTextWidth(`${rl}:`) + 1.5, y)
-      }
-      y += ln(9) + 0.4
-    }
-
-    y += 2; doc.setDrawColor(180); doc.setLineWidth(0.2); doc.line(M, y, W - M, y); y += 7
-
-    // ── Study title ──
-    doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(0)
-    doc.text(study.toUpperCase(), W / 2, y, { align: "center" })
-    const sw = doc.getTextWidth(study.toUpperCase())
-    doc.setDrawColor(0); doc.setLineWidth(0.3)
-    doc.line((W - sw) / 2, y + 1, (W + sw) / 2, y + 1)
-    y += ln(12) + 5
+    // The PDF matches the printed report design: double-bordered patient
+    // info box, then the bordered underlined study heading
+    y = drawPdfReportHeader(doc, { name: patient, refBy, date, age, gender, srNo: localSrNo || srNo })
+    y = drawPdfReportTitle(doc, getDocTitle(), y)
 
     // ── Report body (HTML-aware, preserves bold labels) ──
     const { renderHtmlToPdf } = await import("@/lib/pdf-html-renderer")
     y = renderHtmlToPdf(doc, bodyHtml, M, CW, y, checkPage, 5.5)
 
-    // ── Signature ──
-    checkPage(24); y += 10
-    doc.setDrawColor(180); doc.setLineWidth(0.3); doc.line(M, y, M + 60, y); y += 4
+    // ── Two-doctor signature block, matching the Word format ──
+    checkPage(28); y += 22
     doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(0)
-    doc.text((user?.name || "Dr. Ramesh Mehta").toUpperCase(), M, y); y += ln(9)
-    doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(100)
-    doc.text("Consultant Radiologist", M, y)
+    doc.text("DR. PRADNYA GORE", M, y)
+    doc.text("DR. RAMNATH GHUTE", W / 2 + 5, y); y += ln(9)
+    doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(60)
+    doc.text("CONSULTANT RADIOLOGIST", M, y)
+    doc.text("CONSULTANT RADIOLOGIST", W / 2 + 5, y); y += ln(7.5)
+    doc.text("M.D. RADIOLOGY", W / 2 + 5, y)
 
     return doc.output("blob")
   }
@@ -972,17 +747,33 @@ function ReportEditorInner() {
       const res  = await fetch(`/api/patients/${paramId}`, {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ reportPdf: base64 }),
+        body:    JSON.stringify({ reportPdf: base64, studyIndex: paramSidx }),
       })
       const data   = await res.json()
-      const slug   = data?.patient?.reportSlug
+      const slug   = data?.patient?.studies?.[paramSidx]?.reportSlug || data?.patient?.reportSlug
       const pdfUrl = slug
         ? `${window.location.origin}/${slug}/pdf`
-        : `${window.location.origin}/api/patients/${paramId}/pdf`
+        : `${window.location.origin}/api/patients/${paramId}/pdf?sidx=${paramSidx}`
 
       const msg = to === "patient"
         ? `Dear ${patient},\n\nYour *${study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
         : `*Aarya Diagnostics Center*\nReport: *${patient}* — *${study}*\nDate: ${date}\n\n📄 Download PDF:\n${pdfUrl}`
+
+      // Mobile Direct Share
+      if (navigator.share && navigator.canShare) {
+        const file = new File([pdfBlob], `Report_${patient.replace(/\s+/g, "_")}.pdf`, { type: "application/pdf" })
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({
+            files: [file],
+            title: `Report - ${patient}`,
+            text: to === "patient"
+              ? `Dear ${patient}, your ${study} report from Aarya Diagnostics Center is ready.`
+              : `Aarya Diagnostics Center: Report ${patient} — ${study}`,
+          })
+          setShareLoading(false)
+          return
+        }
+      }
 
       const waUrl = num
         ? `https://wa.me/91${num}?text=${encodeURIComponent(msg)}`
@@ -1014,7 +805,7 @@ function ReportEditorInner() {
     setDocxLoading(true)
     try {
       const base64 = await buildDocxBase64(bodyRef.current?.innerHTML ?? "")
-      downloadDocxFromBase64(base64, `Report_${patient.replace(/\s+/g, "_") || "Patient"}.docx`)
+      downloadDocxFromBase64(base64, `Report_${(patient || "Patient").replace(/\s+/g, "_")}${study ? `_${study.replace(/[^A-Za-z0-9]+/g, "_")}` : ""}.docx`)
     } finally { setDocxLoading(false) }
   }
 
@@ -1037,7 +828,7 @@ function ReportEditorInner() {
                 if (submittedDocxBase64) {
                   downloadDocxFromBase64(
                     submittedDocxBase64,
-                    `Report_${patient.replace(/\s+/g, "_") || "Patient"}.docx`
+                    `Report_${(patient || "Patient").replace(/\s+/g, "_")}${study ? `_${study.replace(/[^A-Za-z0-9]+/g, "_")}` : ""}.docx`
                   )
                 }
               }}
@@ -1118,23 +909,25 @@ function ReportEditorInner() {
             </select>
 
             {/* Font size */}
-            <div className="flex items-center border border-gray-200 rounded overflow-hidden mr-1">
+            <div className="flex items-center border border-gray-200 rounded overflow-hidden mr-1 bg-white">
               <button
                 type="button" title="Decrease font size"
                 onMouseDown={(e) => { e.preventDefault(); changeFontSize(-2) }}
-                className="h-7 w-6 flex items-center justify-center hover:bg-gray-100 text-gray-600"
+                className="h-7 px-2 flex items-center justify-center hover:bg-gray-100 text-gray-600 gap-0.5 border-r border-gray-200"
               >
-                <Minus className="h-3 w-3" />
+                <span className="text-[10px] font-bold">A</span>
+                <ChevronDown className="h-2.5 w-2.5 text-blue-500" />
               </button>
-              <span className="w-7 text-center text-[11px] font-medium text-gray-700 select-none border-x border-gray-200">
+              <span className="w-8 text-center text-[11px] font-medium text-gray-700 select-none">
                 {fontSize}
               </span>
               <button
                 type="button" title="Increase font size"
                 onMouseDown={(e) => { e.preventDefault(); changeFontSize(2) }}
-                className="h-7 w-6 flex items-center justify-center hover:bg-gray-100 text-gray-600"
+                className="h-7 px-2 flex items-center justify-center hover:bg-gray-100 text-gray-600 gap-0.5 border-l border-gray-200"
               >
-                <Plus className="h-3 w-3" />
+                <span className="text-xs font-bold text-gray-700">A</span>
+                <ChevronUp className="h-2.5 w-2.5 text-blue-500" />
               </button>
             </div>
 
@@ -1289,7 +1082,7 @@ function ReportEditorInner() {
           )}
         </AnimatePresence>
 
-        <div className="max-w-[794px] mx-auto bg-white shadow-xl rounded-sm px-14 py-12 min-h-[1100px]">
+        <div ref={paperRef} className="relative max-w-[794px] mx-auto bg-white shadow-xl rounded-sm px-4 sm:px-14 py-6 sm:py-12 min-h-[1122px]">
 
           {/* Patient picker — no URL params */}
           {!hasPatient && !pickerDone && (
@@ -1355,58 +1148,29 @@ function ReportEditorInner() {
           {/* ── Document body ── */}
           {showDoc && study && (
             <>
-              {/* Clinic letterhead */}
-              <div className="text-center pb-4 border-b-2 border-gray-900 mb-5 select-none">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src="/logo.jpeg" alt="Aarya" className="h-16 w-16 rounded-full object-cover mx-auto mb-2" />
-                <h1 className="text-xl font-bold uppercase tracking-widest text-gray-900">Aarya Diagnostics Center</h1>
-                <p className="text-xs text-gray-500 mt-1">
-                  Shop No. 5, K. K. Smruti Building, New Maneklal Estate, S.N. Mehta Road, Ghatkopar (W) 400086
-                </p>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  Tel: 9819022444 &nbsp;·&nbsp; aaryadiagnosticsmumbai@gmail.com
-                </p>
-              </div>
-
-              {/* Patient info — NON-EDITABLE */}
-              <div className="border-b border-gray-300 pb-3 mb-5 select-none">
-                <div className="grid grid-cols-2 gap-x-10 gap-y-1 text-xs text-gray-900">
-                  <div className="flex gap-2">
-                    <span className="font-bold w-16 shrink-0 text-gray-900">NAME:</span>
-                    <span className="text-gray-900">{patient.toUpperCase()}</span>
-                  </div>
-                  <div className="flex gap-2">
-                    <span className="font-bold w-16 shrink-0 text-gray-900">DATE:</span>
-                    <span className="text-gray-900">{date}</span>
-                  </div>
-                  {age && (
-                    <div className="flex gap-2">
-                      <span className="font-bold w-16 shrink-0 text-gray-900">AGE:</span>
-                      <span className="text-gray-900">{age} YRS</span>
-                    </div>
-                  )}
-                  {contact && (
-                    <div className="flex gap-2">
-                      <span className="font-bold w-16 shrink-0 text-gray-900">MOBILE:</span>
-                      <span className="text-gray-900">{contact}</span>
-                    </div>
-                  )}
-                  <div className="flex gap-2">
-                    <span className="font-bold w-16 shrink-0 text-gray-900">REF. BY:</span>
-                    <span className="text-gray-900">{(refBy || "SELF").toUpperCase()}</span>
-                  </div>
-                  {gender && (
-                    <div className="flex gap-2">
-                      <span className="font-bold w-16 shrink-0 text-gray-900">SEX:</span>
-                      <span className="text-gray-900">{gender.toUpperCase()}</span>
-                    </div>
-                  )}
-                  {/* SR. NO — always visible, editable by doctor */}
-                  <div className="flex gap-2 items-center">
-                    <span className="font-bold w-16 shrink-0 text-gray-900">SR. NO:</span>
+              {/* Dynamic Page Break Markers (editor only) */}
+              {!isReadOnly && Array.from({ length: numPages - 1 }).map((_, i) => (
+                <div
+                  key={i}
+                  style={{ top: `${(i + 1) * 1122}px` }}
+                  className="absolute left-0 right-0 border-t border-dashed border-blue-400 pointer-events-none flex justify-center items-center select-none print:hidden z-10"
+                >
+                  <span className="bg-blue-50 text-blue-600 font-bold text-[9px] px-2 py-0.5 rounded border border-blue-200 uppercase tracking-wider -translate-y-1/2">
+                    A4 Page Break (Page {i + 2})
+                  </span>
+                </div>
+              ))}
+              {/* Patient info — NON-EDITABLE (except SR. NO), matches the printed report header */}
+              <div className="select-none mb-5 border-4 border-double border-gray-700 px-3.5 sm:px-5 py-2.5 sm:py-3.5 flex flex-col sm:flex-row justify-between gap-3 sm:gap-6 text-[13px] font-bold text-gray-900">
+                <div className="space-y-1 min-w-0">
+                  <p className="truncate">NAME - {patient.toUpperCase()}</p>
+                  <p className="truncate">REF. BY - {(refBy || "SELF").toUpperCase()}</p>
+                  {/* SR. NO — inside the box like the Word file, editable by doctor */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="shrink-0">SR. NO -</span>
                     {!isReadOnly && editingSrNo ? (
-                      <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                        <span className="text-gray-500 text-xs">#</span>
+                      <span className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                        <span>#</span>
                         <input
                           autoFocus
                           type="text"
@@ -1418,14 +1182,14 @@ function ReportEditorInner() {
                             if (e.key === "Escape") { setLocalSrNo(paramSrNo); setEditingSrNo(false) }
                           }}
                           onBlur={() => { setEditingSrNo(false); void handleSrNoSave(localSrNo) }}
-                          className="w-20 border-0 border-b border-blue-400 text-xs text-gray-900 bg-transparent focus:outline-none px-0 py-px"
+                          className="w-20 border-0 border-b border-blue-400 text-[13px] font-bold text-gray-900 bg-transparent focus:outline-none px-0 py-px"
                           placeholder="e.g. 1001"
                         />
-                      </div>
+                      </span>
                     ) : (
-                      <div className="flex items-center gap-2">
-                        <span className="text-gray-900 text-xs">
-                          {localSrNo ? `#${localSrNo}` : <span className="text-gray-400 italic">not set</span>}
+                      <span className="flex items-center gap-2">
+                        <span>
+                          {localSrNo ? `#${localSrNo}` : <span className="text-gray-400 italic font-normal">not set</span>}
                         </span>
                         {!isReadOnly && (
                           <button
@@ -1440,15 +1204,29 @@ function ReportEditorInner() {
                             </span>
                           </button>
                         )}
-                      </div>
+                      </span>
                     )}
                   </div>
                 </div>
+                <div className="space-y-1 shrink-0 text-left">
+                  <p>DATE - {date}</p>
+                  <p>AGE - {age ? `${age} YRS` : "—"}</p>
+                  <p>SEX - {(gender || "—").toUpperCase()}</p>
+                </div>
               </div>
 
-              {/* Study title */}
-              <div className="text-center font-bold uppercase text-base py-1 underline underline-offset-4 tracking-wide mb-6 text-gray-900 select-none">
-                {study}
+              {/* Study heading — editable, boxed like the printed report */}
+              <div className="flex justify-center mb-6">
+                <div
+                  ref={titleRef}
+                  contentEditable={!isReadOnly}
+                  suppressContentEditableWarning
+                  spellCheck={false}
+                  title={isReadOnly ? undefined : "Click to edit the study heading"}
+                  className={`text-center font-bold uppercase text-base py-1.5 px-10 min-w-[280px] border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900 focus:outline-none${
+                    isReadOnly ? "" : " hover:bg-blue-50/60 focus:bg-blue-50/60 transition-colors cursor-text"
+                  }`}
+                />
               </div>
 
               {/* Report body — editable or read-only depending on mode */}
@@ -1459,6 +1237,21 @@ function ReportEditorInner() {
                 data-placeholder="Start typing the report here..."
                 className={`doc-field min-h-[400px] text-sm leading-relaxed text-gray-900 focus:outline-none${isReadOnly ? " cursor-default select-text" : ""}`}
               />
+
+              {/* Two-doctor signature block — NON-EDITABLE, matches print / Word */}
+              <div className="mt-24 grid grid-cols-2 gap-8 select-none text-gray-900">
+                <div>
+                  <div className="h-12" /> {/* Visual spacing for signing */}
+                  <p className="font-bold text-[13px] uppercase">DR. PRADNYA GORE</p>
+                  <p className="text-[10px] uppercase text-gray-600 mt-0.5">Consultant Radiologist</p>
+                </div>
+                <div>
+                  <div className="h-12" /> {/* Visual spacing for signing */}
+                  <p className="font-bold text-[13px] uppercase">DR. RAMNATH GHUTE</p>
+                  <p className="text-[10px] uppercase text-gray-600 mt-0.5">Consultant Radiologist</p>
+                  <p className="text-[10px] uppercase text-gray-600">M.D. Radiology</p>
+                </div>
+              </div>
 
               {/* Mobile share buttons (visible below document on small screens) */}
               <div className="mt-8 pt-5 border-t border-gray-100 flex flex-wrap gap-2 sm:hidden">

@@ -1,16 +1,19 @@
 "use client"
 
 import { useState, useEffect, useRef } from "react"
-import { Search, FlaskConical, Info, Pencil, Check, X, Loader2, Tag } from "lucide-react"
+import { Search, FlaskConical, Info, Pencil, Check, X, Loader2, Tag, Plus, Trash2, AlertCircle } from "lucide-react"
 import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { useRole } from "@/lib/role-context"
 import { motion } from "motion/react"
-import { STUDY_CATEGORIES } from "@/lib/study-catalogue"
+import { STUDY_CATEGORIES, autoCategory } from "@/lib/study-catalogue"
 import { categoryColor } from "@/components/combo-input"
 
 interface StudyDoc {
@@ -30,14 +33,25 @@ interface Stats {
 export default function StudiesPage() {
   const { user } = useRole()
   const isAdmin  = user?.role === "admin"
-  const isDoctor = user?.role === "doctor"
-  const canEditCategory = isAdmin || isDoctor
+  // All staff (receptionist, doctor, admin) can add studies and fix categories
+  const canEditCategory = true
 
   const [studies,    setStudies]    = useState<StudyDoc[]>([])
   const [stats,      setStats]      = useState<Stats | null>(null)
   const [loading,    setLoading]    = useState(true)
   const [search,     setSearch]     = useState("")
   const [catFilter,  setCatFilter]  = useState("All Categories")
+
+  // Add-study dialog state
+  const [addOpen,    setAddOpen]    = useState(false)
+  const [newName,    setNewName]    = useState("")
+  const [newCat,     setNewCat]     = useState<string>("")
+  const [newPrice,   setNewPrice]   = useState("")
+  const [addSaving,  setAddSaving]  = useState(false)
+  const [addError,   setAddError]   = useState("")
+
+  // Delete state (admin only)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   // Inline price edit state
   const [editingPriceId,  setEditingPriceId]  = useState<string | null>(null)
@@ -98,6 +112,49 @@ export default function StudiesPage() {
     }
   }
 
+  // ── Add / delete studies ───────────────────────────────────────────────────────
+  const handleAddStudy = async () => {
+    const name = newName.trim()
+    if (!name) return
+    setAddSaving(true)
+    setAddError("")
+    try {
+      const res = await fetch("/api/studies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          category: newCat || autoCategory(name),
+          price: Number(newPrice) || 0,
+        }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || "Failed to add study")
+      setStudies((prev) => [...prev, data.study])
+      setStats((prev) => prev ? { ...prev, total: prev.total + 1 } : prev)
+      setAddOpen(false)
+      setNewName(""); setNewCat(""); setNewPrice("")
+    } catch (err) {
+      setAddError(err instanceof Error ? err.message : "Failed to add study")
+    } finally {
+      setAddSaving(false)
+    }
+  }
+
+  const handleDeleteStudy = async (s: StudyDoc) => {
+    if (!confirm(`Remove "${s.name}" from the studies list?`)) return
+    setDeletingId(s._id)
+    try {
+      const res = await fetch(`/api/studies/${s._id}`, { method: "DELETE" })
+      if (res.ok) {
+        setStudies((prev) => prev.filter((st) => st._id !== s._id))
+        setStats((prev) => prev ? { ...prev, total: Math.max(0, prev.total - 1) } : prev)
+      }
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   // ── Category editing ──────────────────────────────────────────────────────────
   const startEditCat = (s: StudyDoc) => {
     setEditingPriceId(null)
@@ -140,12 +197,74 @@ export default function StudiesPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Studies &amp; Tests</h1>
-        <p className="text-muted-foreground text-sm mt-0.5">
-          Test catalogue — auto-updated from patient registrations and billing
-        </p>
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-2xl font-bold">Studies &amp; Tests</h1>
+          <p className="text-muted-foreground text-sm mt-0.5">
+            X-Ray, Sonography &amp; Pathology studies added by the staff
+          </p>
+        </div>
+        <Button onClick={() => setAddOpen(true)} className="bg-blue-600 hover:bg-blue-700 gap-1.5">
+          <Plus className="h-4 w-4" />Add Study
+        </Button>
       </div>
+
+      {/* Add Study dialog */}
+      <Dialog open={addOpen} onOpenChange={(o) => { if (!o) { setAddOpen(false); setAddError("") } }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="text-base">Add Study</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 pt-1">
+            <div className="space-y-1.5">
+              <Label>Study Name <span className="text-red-500">*</span></Label>
+              <Input
+                value={newName}
+                autoFocus
+                onChange={(e) => {
+                  setNewName(e.target.value)
+                  if (!newCat && e.target.value.trim()) setNewCat(autoCategory(e.target.value.trim()))
+                }}
+                onKeyDown={(e) => { if (e.key === "Enter") void handleAddStudy() }}
+                placeholder="e.g. X-Ray Chest PA"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>Category <span className="text-red-500">*</span></Label>
+                <Select value={newCat} onValueChange={setNewCat}>
+                  <SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger>
+                  <SelectContent>
+                    {STUDY_CATEGORIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>Price (₹)</Label>
+                <Input
+                  type="number" min={0}
+                  value={newPrice}
+                  onChange={(e) => setNewPrice(e.target.value)}
+                  placeholder="0"
+                />
+              </div>
+            </div>
+            {addError && (
+              <div className="flex items-center gap-2 rounded-lg bg-red-50 border border-red-200 px-3 py-2">
+                <AlertCircle className="h-4 w-4 text-red-500 shrink-0" />
+                <p className="text-sm text-red-600">{addError}</p>
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <Button variant="outline" size="sm" onClick={() => setAddOpen(false)}>Cancel</Button>
+              <Button size="sm" disabled={!newName.trim() || !newCat || addSaving} onClick={() => void handleAddStudy()} className="bg-blue-600 hover:bg-blue-700 gap-1.5">
+                {addSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                Add Study
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -169,8 +288,8 @@ export default function StudiesPage() {
       <div className="flex items-start gap-2 p-3 rounded-lg bg-blue-50 border border-blue-200 text-sm text-blue-700">
         <Info className="h-4 w-4 mt-0.5 shrink-0" />
         <span>
-          Studies are added automatically when a patient is registered. Categories are auto-detected and can be corrected by{" "}
-          {isAdmin ? "admins (price + category)" : "doctors (category)"}.
+          The list starts empty — studies appear here only after staff add them (via the Add Study button
+          or during patient registration). Only three categories exist: X-Ray, Sonography and Pathology.
         </span>
       </div>
 
@@ -216,7 +335,11 @@ export default function StudiesPage() {
           ) : (
             <>
               {filtered.length === 0 && (
-                <p className="text-center py-10 text-muted-foreground text-sm">No tests match your search.</p>
+                <p className="text-center py-10 text-muted-foreground text-sm">
+                  {studies.length === 0
+                    ? "No studies added yet. Use the Add Study button to add X-Ray, Sonography or Pathology studies."
+                    : "No tests match your search."}
+                </p>
               )}
               {Object.entries(grouped).map(([cat, items]) => (
                 <div key={cat}>
@@ -310,6 +433,14 @@ export default function StudiesPage() {
                                   className="h-7 w-7 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-blue-100 text-blue-500 transition-all ml-1"
                                   title="Edit price">
                                   <Pencil className="h-3 w-3" />
+                                </button>
+                              )}
+                              {isAdmin && (
+                                <button onClick={() => void handleDeleteStudy(s)}
+                                  disabled={deletingId === s._id}
+                                  className="h-7 w-7 flex items-center justify-center rounded opacity-0 group-hover:opacity-100 hover:bg-red-100 text-red-500 transition-all"
+                                  title="Delete study">
+                                  {deletingId === s._id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                                 </button>
                               )}
                             </>

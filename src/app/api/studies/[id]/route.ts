@@ -38,3 +38,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     return NextResponse.json({ error: "Server error" }, { status: 500 })
   }
 }
+
+// DELETE /api/studies/:id — remove a study from the catalogue
+export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    await connectDB()
+    const { id } = await params
+    const study = await Study.findByIdAndDelete(id)
+    if (!study) return NextResponse.json({ error: "Not found" }, { status: 404 })
+    return NextResponse.json({ ok: true })
+  } catch {
+    return NextResponse.json({ error: "Server error" }, { status: 500 })
+  }
+}

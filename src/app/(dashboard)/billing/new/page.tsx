@@ -14,6 +14,7 @@ import {
 import { Separator } from "@/components/ui/separator"
 import { Badge } from "@/components/ui/badge"
 import { ComboInput, StudyComboInput, getSavedDoctors, saveDoctor } from "@/components/combo-input"
+import { useRole } from "@/lib/role-context"
 
 const paymentModes = ["Cash", "UPI", "Card", "Cheque", "NEFT/RTGS"]
 
@@ -129,12 +130,7 @@ function printReceipt(data: SavedBillData) {
   </style>
 </head>
 <body>
-  <div style="text-align:center;margin-bottom:10px;">
-    <img src="/logo.jpeg" style="width:72px;height:72px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" />
-    <h1 style="font-size:15pt;font-weight:bold;text-transform:uppercase;letter-spacing:2px;">Aarya Diagnostic Center</h1>
-    <p style="font-size:8.5pt;color:#333;line-height:1.6;">Shop no - 5, K. K. Smruti Building, New Maneklal Estate, S.N. Mehta Road, Ghatkopar (W) 400086<br>Contact no - 9819022444 &nbsp;&nbsp; aaryadiagnosticsmumbai@gmail.com</p>
-  </div>
-
+  <!-- No clinic letterhead — receipts print on pre-printed stationery -->
   <div style="border-top:2.5px solid #111;border-bottom:2.5px solid #111;padding:2px 0;text-align:center;font-weight:bold;font-size:9.5pt;text-transform:uppercase;letter-spacing:1px;margin:8px 0;">Payment Receipt</div>
 
   <div style="margin-bottom:8px;font-size:9.5pt;display:flex;justify-content:space-between;">
@@ -180,8 +176,7 @@ function printReceipt(data: SavedBillData) {
 </body>
 </html>`
 
-  const absoluteHtml = html.replace('src="/logo.jpeg"', `src="${window.location.origin}/logo.jpeg"`)
-  const blob = new Blob([absoluteHtml], { type: "text/html" })
+  const blob = new Blob([html], { type: "text/html" })
   const url  = URL.createObjectURL(blob)
   const win  = window.open(url, "_blank", "width=620,height=900")
   if (!win) { alert("Please allow pop-ups to print."); URL.revokeObjectURL(url); return }
@@ -192,6 +187,8 @@ function printReceipt(data: SavedBillData) {
 function NewBillingForm() {
   const params = useSearchParams()
   const router = useRouter()
+  const { user } = useRole()
+  const editorName = user?.name || "Staff"
 
   const patientIdParam = params.get("id")       ?? ""
   const nameParam      = params.get("name")     ?? ""
@@ -202,6 +199,7 @@ function NewBillingForm() {
   const contactParam   = params.get("contact")  ?? ""
   const refByParam     = params.get("refBy")    ?? ""
   const billIdParam    = params.get("billId")   ?? ""
+  const sidxParam      = parseInt(params.get("sidx") ?? "0", 10)
 
   const [loading,      setLoading]      = useState(false)
   const [billNo,       setBillNo]       = useState("—")
@@ -216,9 +214,73 @@ function NewBillingForm() {
   const [saved,        setSaved]        = useState(false)
   const [savedBillData, setSavedBillData] = useState<SavedBillData | null>(null)
 
+  // Patient details — start from URL params, then prefilled from the DB so the
+  // receipt always carries the full patient data without re-typing it
+  const [patientId, setPatientId] = useState(patientIdParam)
+  const [srNo,      setSrNo]      = useState(srNoParam)
+  const [age,       setAge]       = useState(ageParam)
+  const [gender,    setGender]    = useState(genderParam)
+  const [contact,   setContact]   = useState(contactParam)
+
   const [items, setItems] = useState<BillItem[]>([
     { id: 1, study: studyParam, studyInput: studyParam, price: 0, qty: 1 },
   ])
+
+  // Patient picker (when the page is opened without a patient link)
+  interface PickerPatient {
+    _id: string; srNo: number; name: string; age: number; gender: string
+    contact: string; referredBy: string; study: string
+    studies?: { name: string }[]
+  }
+  const [allPatients, setAllPatients] = useState<PickerPatient[]>([])
+
+  const applyPatient = (p: PickerPatient & { referredBy?: string }) => {
+    setPatientId(p._id)
+    setPatientName(p.name)
+    setSrNo(p.srNo || 0)
+    setAge(p.age || 0)
+    setGender(p.gender || "")
+    setContact(p.contact || "")
+    if (!refByParam) setRefDoctor(p.referredBy && p.referredBy !== "Self" ? p.referredBy : "")
+    const names = p.studies?.[sidxParam]?.name
+      ? [p.studies[sidxParam].name]
+      : (p.studies?.length ? p.studies.map((s) => s.name) : [p.study]).filter(Boolean)
+    if (names.length > 0) {
+      setItems(names.map((n, i) => ({ id: i + 1, study: n, studyInput: n, price: 0, qty: 1 })))
+      // Fill known catalogue prices for the patient's studies
+      fetch("/api/studies")
+        .then((r) => r.json())
+        .then((d) => {
+          const priceMap: Record<string, number> = Object.fromEntries(
+            (d.studies || []).map((s: { name: string; price: number }) => [s.name, s.price])
+          )
+          setItems((prev) => prev.map((it) => ({ ...it, price: it.price || priceMap[it.study] || 0 })))
+        })
+        .catch(() => {})
+    }
+  }
+
+  useEffect(() => {
+    if (billIdParam) return
+    if (patientIdParam) {
+      // Prefill everything from the patient record (incl. all their studies)
+      fetch(`/api/patients/${patientIdParam}`)
+        .then((r) => r.json())
+        .then((d) => {
+          const p = d.patient
+          if (!p) return
+          applyPatient(p)
+        })
+        .catch(() => {})
+    } else {
+      // No patient linked — offer a picker over all registered patients
+      fetch("/api/patients")
+        .then((r) => r.json())
+        .then((d) => setAllPatients(d.patients || []))
+        .catch(() => {})
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [patientIdParam, billIdParam])
 
   // Edit mode: snapshot of values at load time, used for live change detection
   const [originalValues, setOriginalValues] = useState<{
@@ -263,6 +325,12 @@ function NewBillingForm() {
 
         setBillNo(b.billNo || `B-${1000 + b.srNo}`)
         setPatientName(loadedName)
+        // Patient details for the printed receipt come from the saved bill
+        setPatientId(b.patientId || patientIdParam)
+        setSrNo(b.srNo || srNoParam)
+        setAge(b.age || ageParam)
+        setGender(b.gender || genderParam)
+        setContact(b.contact || contactParam)
         setRefDoctor(loadedRef)
         setBillDate(loadedDate)
         setNotes(loadedNotes)
@@ -328,8 +396,8 @@ function NewBillingForm() {
   const balance   = netAmount - paidAmount
 
   const doSave = async () => {
-    if (!patientIdParam && !billIdParam) {
-      alert("No patient linked. Please open this page from the patient queue.")
+    if (!patientId && !billIdParam) {
+      alert("No patient linked. Please pick a patient first.")
       return
     }
     if (!items.some((i) => i.study && i.price > 0)) {
@@ -344,7 +412,7 @@ function NewBillingForm() {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            editor:      "Receptionist",
+            editor:      editorName,
             patientName: patientName || nameParam,
             referredBy:  refDoctor || refByParam || "Self",
             items:       items.map((i) => ({ study: i.study, quantity: i.qty, price: i.price })),
@@ -361,12 +429,12 @@ function NewBillingForm() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            patientId:   patientIdParam,
-            srNo:        srNoParam,
+            patientId,
+            srNo,
             patientName: patientName || nameParam,
-            age:         ageParam,
-            gender:      genderParam,
-            contact:     contactParam,
+            age,
+            gender,
+            contact,
             referredBy:  refDoctor || refByParam || "Self",
             items:       items.map((i) => ({ study: i.study, quantity: i.qty, price: i.price })),
             charges:     subtotal,
@@ -375,6 +443,7 @@ function NewBillingForm() {
             paymentMode: paymentMode || "Cash",
             billDate,
             notes,
+            studyIndex:  sidxParam,
           }),
         })
       }
@@ -384,7 +453,7 @@ function NewBillingForm() {
       setBillNo(savedNo)
 
       const newEditEntry: EditEntry = {
-        editor:         "Receptionist",
+        editor:         editorName,
         editedAt:       new Date().toISOString(),
         changedFields:  Array.from(liveChangedFields),
         previousValues: {},
@@ -393,10 +462,10 @@ function NewBillingForm() {
       const snapData: SavedBillData = {
         billNo:      savedNo,
         patientName: patientName || nameParam,
-        srNo:        srNoParam,
-        age:         ageParam,
-        gender:      genderParam,
-        contact:     contactParam,
+        srNo,
+        age,
+        gender,
+        contact,
         refDoctor:   refDoctor || refByParam || "Self",
         billDate,
         items:       [...items],
@@ -492,22 +561,38 @@ function NewBillingForm() {
             <CardContent className="space-y-3">
               <div className="space-y-2">
                 {changedFieldLabel("patientName", "Patient Name", true)}
-                {patientIdParam && !isEditMode ? (
+                {patientId && !isEditMode ? (
                   <div className="flex items-center gap-2 px-3 py-2 border rounded-md bg-muted/40 text-sm font-medium">
                     {patientName}
-                    <Badge variant="secondary" className="ml-auto text-[10px]">#{srNoParam}</Badge>
+                    {srNo > 0 && <Badge variant="secondary" className="ml-auto text-[10px]">#{srNo}</Badge>}
                   </div>
                 ) : (
                   <ComboInput
                     value={patientName}
-                    onChange={setPatientName}
-                    suggestions={[]}
-                    placeholder="Type patient name..."
+                    onChange={(v) => {
+                      setPatientName(v)
+                      if (!isEditMode) setPatientId("")
+                    }}
+                    suggestions={allPatients.map((p) => `${p.name} (#${p.srNo})`)}
+                    placeholder="Type to search registered patients..."
+                    onSelect={(label) => {
+                      const m = label.match(/^(.*) \(#(\d+)\)$/)
+                      const found = m
+                        ? allPatients.find((p) => p.name === m[1] && String(p.srNo) === m[2])
+                        : allPatients.find((p) => p.name === label)
+                      if (found) applyPatient(found)
+                      else setPatientName(label)
+                    }}
                   />
                 )}
-                {ageParam > 0 && (
+                {Number(age) > 0 && (
                   <p className="text-[11px] text-muted-foreground">
-                    {ageParam} yrs · {genderParam} · {contactParam}
+                    {age} yrs · {gender} · {contact}
+                  </p>
+                )}
+                {!patientId && !isEditMode && (
+                  <p className="text-[11px] text-amber-600">
+                    Pick a registered patient — their details prefill the receipt automatically.
                   </p>
                 )}
               </div>
@@ -570,7 +655,8 @@ function NewBillingForm() {
             </Button>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="grid grid-cols-12 gap-2 text-xs font-medium text-muted-foreground px-1">
+            {/* Desktop header */}
+            <div className="hidden sm:grid grid-cols-12 gap-2 text-xs font-medium text-muted-foreground px-1">
               <div className="col-span-6">Test / Study Name</div>
               <div className="col-span-2 text-center">Qty</div>
               <div className="col-span-3 text-right">Price (&#8377;)</div>
@@ -578,45 +664,94 @@ function NewBillingForm() {
             </div>
 
             {items.map((item) => (
-              <div key={item.id} className="grid grid-cols-12 gap-2 items-start">
-                <div className="col-span-6">
+              <div key={item.id}>
+                {/* Desktop View */}
+                <div className="hidden sm:grid grid-cols-12 gap-2 items-start">
+                  <div className="col-span-6">
+                    <StudyComboInput
+                      value={item.studyInput}
+                      onChange={(v) => updateItemStudyInput(item.id, v)}
+                      onSelect={(name, price) => updateItemStudy(item.id, name, price)}
+                      placeholder="Type to search test..."
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <Input
+                      type="number" min={1}
+                      value={item.qty}
+                      onChange={(e) =>
+                        setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, qty: +e.target.value } : i))
+                      }
+                      className="text-center"
+                    />
+                  </div>
+                  <div className="col-span-3">
+                    <Input
+                      type="number" min={0}
+                      value={item.price || ""}
+                      onChange={(e) =>
+                        setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, price: +e.target.value } : i))
+                      }
+                      className="text-right"
+                      placeholder="0"
+                    />
+                  </div>
+                  <div className="col-span-1 flex justify-center pt-1">
+                    <Button
+                      type="button" variant="ghost" size="icon"
+                      className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                      onClick={() => removeItem(item.id)}
+                      disabled={items.length === 1}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Mobile View */}
+                <div className="flex flex-col gap-2.5 sm:hidden border-b border-gray-100 pb-4 mb-2 last:border-0 last:pb-0">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-[11px] text-muted-foreground font-semibold uppercase">Test / Study Name</Label>
+                    <Button
+                      type="button" variant="ghost" size="sm"
+                      className="h-7 px-2 text-destructive hover:text-destructive hover:bg-destructive/10 text-xs flex items-center gap-1"
+                      onClick={() => removeItem(item.id)}
+                      disabled={items.length === 1}
+                    >
+                      <Trash2 className="h-3 w-3" /> Remove
+                    </Button>
+                  </div>
                   <StudyComboInput
                     value={item.studyInput}
                     onChange={(v) => updateItemStudyInput(item.id, v)}
                     onSelect={(name, price) => updateItemStudy(item.id, name, price)}
                     placeholder="Type to search test..."
                   />
-                </div>
-                <div className="col-span-2">
-                  <Input
-                    type="number" min={1}
-                    value={item.qty}
-                    onChange={(e) =>
-                      setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, qty: +e.target.value } : i))
-                    }
-                    className="text-center"
-                  />
-                </div>
-                <div className="col-span-3">
-                  <Input
-                    type="number" min={0}
-                    value={item.price || ""}
-                    onChange={(e) =>
-                      setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, price: +e.target.value } : i))
-                    }
-                    className="text-right"
-                    placeholder="0"
-                  />
-                </div>
-                <div className="col-span-1 flex justify-center pt-1">
-                  <Button
-                    type="button" variant="ghost" size="icon"
-                    className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                    onClick={() => removeItem(item.id)}
-                    disabled={items.length === 1}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </Button>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <Label className="text-[11px] text-muted-foreground font-semibold uppercase">Qty</Label>
+                      <Input
+                        type="number" min={1}
+                        value={item.qty}
+                        onChange={(e) =>
+                          setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, qty: +e.target.value } : i))
+                        }
+                        className="text-center h-8 text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-[11px] text-muted-foreground font-semibold uppercase">Price (₹)</Label>
+                      <Input
+                        type="number" min={0}
+                        value={item.price || ""}
+                        onChange={(e) =>
+                          setItems((prev) => prev.map((i) => i.id === item.id ? { ...i, price: +e.target.value } : i))
+                        }
+                        className="text-right h-8 text-xs"
+                        placeholder="0"
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
             ))}

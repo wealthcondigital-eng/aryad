@@ -2,17 +2,19 @@ import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import Patient from "@/models/Patient"
 
-// GET /api/patients/:id/pdf — public (no auth) so the shared link works for patients
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+// GET /api/patients/:id/pdf?sidx=N — public (no auth) so the shared link works for patients
+export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     await connectDB()
     const { id } = await params
-    const patient = await Patient.findById(id).select("reportPdf name study")
-    if (!patient?.reportPdf) {
+    const sidx = parseInt(new URL(req.url).searchParams.get("sidx") ?? "0", 10) || 0
+    const patient = await Patient.findById(id).select("reportPdf name study studies.reportPdf studies.name")
+    const pdf: string | undefined = patient?.studies?.[sidx]?.reportPdf || patient?.reportPdf
+    if (!pdf) {
       return NextResponse.json({ error: "PDF not available" }, { status: 404 })
     }
 
-    const buffer   = Buffer.from(patient.reportPdf, "base64")
+    const buffer   = Buffer.from(pdf, "base64")
     const safeName = (patient.name || "Patient").replace(/\s+/g, "_").replace(/[^A-Za-z0-9_]/g, "")
     const fileName = `${safeName}_Report.pdf`
 

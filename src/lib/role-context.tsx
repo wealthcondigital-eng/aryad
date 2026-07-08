@@ -33,22 +33,22 @@ export const DEFAULT_PERMISSIONS: Record<Role, Permissions> = {
     studies:   { view: true,  manage: true               },
   },
   doctor: {
-    patients:  { view: true,  create: false, edit: false },
-    billing:   { view: false, create: false              },
+    patients:  { view: true,  create: true,  edit: true  },
+    billing:   { view: true,  create: true               },
     reports:   { view: true,  create: true,  edit: true  },
     analytics: { view: false                             },
     users:     { manage: false                           },
     doctors:   { view: true,  manage: false              },
-    studies:   { view: true,  manage: false              },
+    studies:   { view: true,  manage: true               },
   },
   receptionist: {
     patients:  { view: true,  create: true,  edit: true  },
     billing:   { view: true,  create: true               },
-    reports:   { view: true,  create: false, edit: false },
+    reports:   { view: true,  create: true,  edit: true  },
     analytics: { view: false                             },
     users:     { manage: false                           },
     doctors:   { view: true,  manage: false              },
-    studies:   { view: true,  manage: false              },
+    studies:   { view: true,  manage: true               },
   },
 }
 

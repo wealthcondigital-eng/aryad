@@ -1,12 +1,13 @@
 "use client"
 
-import { useState, useEffect, Fragment } from "react"
+import { useState, useEffect } from "react"
 import Link from "next/link"
 import {
   UserPlus, Search, MoreHorizontal, Phone, MapPin,
   ClipboardEdit, Eye, Share2, MessageCircle, CheckCircle2,
   Clock, AlertCircle, Printer, Loader2, History,
   X, Pencil, User, CalendarDays, FileText, Receipt,
+  ChevronDown, ChevronUp,
 } from "lucide-react"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
@@ -34,6 +35,18 @@ interface RegistrationEditEntry {
   previousValues: Record<string, unknown>
 }
 
+interface StudyEntry {
+  name: string
+  category?: string
+  reportStatus: "pending" | "in_progress" | "completed"
+  reportSlug?: string
+  billId?: string
+  charges?: number
+  paid?: number
+  discount?: number
+  paymentMode?: string
+}
+
 interface PatientDoc {
   _id: string
   srNo: number
@@ -44,6 +57,7 @@ interface PatientDoc {
   address: string
   referredBy: string
   study: string
+  studies?: StudyEntry[]
   reportStatus: "pending" | "in_progress" | "completed"
   charges: number
   paid: number
@@ -53,6 +67,17 @@ interface PatientDoc {
   reportSlug?: string
   registrationEditHistory?: RegistrationEditEntry[]
   createdAt: string
+}
+
+// Every patient has at least one study; older records are normalised by the API
+function studiesOf(p: PatientDoc): StudyEntry[] {
+  return p.studies?.length
+    ? p.studies
+    : [{ name: p.study, reportStatus: p.reportStatus, reportSlug: p.reportSlug }]
+}
+
+function studyNames(p: PatientDoc): string {
+  return studiesOf(p).map((s) => s.name).join(", ")
 }
 
 const PATIENT_FIELD_LABELS: Record<string, string> = {
@@ -92,15 +117,51 @@ function ReportStatusBadge({ status }: { status: string }) {
   return <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-slate-100 text-slate-600"><AlertCircle className="h-3 w-3" />Pending</span>
 }
 
-function buildFillHref(p: PatientDoc, mode: "fill" | "edit" = "fill") {
+function buildFillHref(p: PatientDoc, sidx = 0, mode: "fill" | "edit" = "fill") {
+  const entry = studiesOf(p)[sidx]
   const params = new URLSearchParams({
-    patient: p.name, study: p.study, refBy: p.referredBy || "Self",
+    patient: p.name, study: entry?.name ?? p.study, sidx: String(sidx),
+    refBy: p.referredBy || "Self",
     date: dateOf(p.createdAt), age: String(p.age), gender: p.gender,
     srNo: String(p.srNo), contact: p.contact, id: p._id,
     ...(mode === "edit" ? { load: "1" } : {}),
   })
   return `/reports/new?${params}`
 }
+
+function billHrefFor(p: PatientDoc, sidx = 0) {
+  const study = studiesOf(p)[sidx]?.name || p.study
+  const params = new URLSearchParams({
+    id: p._id,
+    sidx: String(sidx),
+    name: p.name,
+    srNo: String(p.srNo),
+    age: String(p.age),
+    gender: p.gender,
+    contact: p.contact,
+    refBy: p.referredBy || "Self",
+    study: study,
+  })
+  return `/billing/new?${params}`
+}
+
+function sharePdfUrl(p: PatientDoc, sidx = 0) {
+  const entry = studiesOf(p)[sidx]
+  return entry?.reportSlug
+    ? `${window.location.origin}/${entry.reportSlug}/pdf`
+    : p.reportSlug && sidx === 0
+    ? `${window.location.origin}/${p.reportSlug}/pdf`
+    : `${window.location.origin}/api/patients/${p._id}/pdf?sidx=${sidx}`
+}
+
+function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
+  const entry = studiesOf(p)[sidx]
+  const msg = `Dear ${p.name},\n\nYour *${entry?.name ?? p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${sharePdfUrl(p, sidx)}`
+  window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
+}
+
+// Shared column template so rows stay aligned across separate patient cards
+const ROW_GRID = "grid grid-cols-[minmax(220px,2fr)_100px_minmax(160px,1.6fr)_minmax(130px,1.2fr)_minmax(180px,1.6fr)_110px_44px] items-center gap-3"
 
 // ─── View Patient Modal ───────────────────────────────────────────────────────
 
@@ -177,8 +238,10 @@ function ViewPatientModal({
               <p className="font-medium">{patient.address || <span className="text-muted-foreground">—</span>}</p>
             </div>
             <div>
-              <p className="text-xs text-muted-foreground uppercase tracking-wide mb-0.5">Study / Test</p>
-              <p className="font-medium">{patient.study}</p>
+              <p className="text-xs text-muted-foreground uppercase tracking-wide mb-0.5">
+                Stud{studiesOf(patient).length > 1 ? "ies" : "y"} / Test{studiesOf(patient).length > 1 ? "s" : ""}
+              </p>
+              <p className="font-medium">{studyNames(patient)}</p>
             </div>
             <div>
               <p className="text-xs text-muted-foreground uppercase tracking-wide mb-0.5">Referred By</p>
@@ -224,7 +287,9 @@ function EditPatientModal({
   const [contact,      setContact]    = useState(patient.contact)
   const [address,      setAddress]    = useState(patient.address || "")
   const [referredBy,   setReferredBy] = useState(patient.referredBy || "")
-  const [study,        setStudy]      = useState(patient.study)
+  const [studyRows,    setStudyRows]  = useState<{ id: number; name: string }[]>(() =>
+    studiesOf(patient).map((s, i) => ({ id: i + 1, name: s.name }))
+  )
   const [loading,      setLoading]    = useState(false)
   const [error,        setError]      = useState("")
   const [savedDoctors, setSavedDoctors] = useState<string[]>(() =>
@@ -236,6 +301,10 @@ function EditPatientModal({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  const validStudyRows = studyRows.map((r) => r.name.trim()).filter(Boolean)
+  const originalStudies = studiesOf(patient).map((s) => s.name).join(", ")
+  const studiesChanged  = validStudyRows.join(", ") !== originalStudies
+
   // Detect which fields changed
   const changedFields = [
     name.trim()       !== patient.name.trim()              && "name",
@@ -244,7 +313,7 @@ function EditPatientModal({
     contact.trim()    !== patient.contact.trim()           && "contact",
     address.trim()    !== (patient.address || "").trim()   && "address",
     referredBy.trim() !== (patient.referredBy || "").trim() && "referredBy",
-    study             !== patient.study                    && "study",
+    studiesChanged                                          && "study",
   ].filter(Boolean) as string[]
 
   const hasChanges = changedFields.length > 0
@@ -257,7 +326,7 @@ function EditPatientModal({
 
     const previousValues: Record<string, unknown> = {}
     changedFields.forEach((f) => {
-      previousValues[f] = patient[f as keyof PatientDoc]
+      previousValues[f] = f === "study" ? originalStudies : patient[f as keyof PatientDoc]
     })
 
     const updateFields: Record<string, unknown> = {}
@@ -267,7 +336,7 @@ function EditPatientModal({
     if (changedFields.includes("contact"))    updateFields.contact    = contact.trim()
     if (changedFields.includes("address"))    updateFields.address    = address.trim()
     if (changedFields.includes("referredBy")) updateFields.referredBy = referredBy.trim() || "Self"
-    if (changedFields.includes("study"))      updateFields.study      = study
+    if (changedFields.includes("study"))      updateFields.studies    = validStudyRows.map((n) => ({ name: n }))
 
     const registrationEditHistoryEntry = {
       editor:         editorName,
@@ -387,9 +456,39 @@ function EditPatientModal({
             </div>
 
             <div className="space-y-1.5">
-              <Label>Study / Test <span className="text-red-500">*</span></Label>
-              <div className={changedFields.includes("study") ? "rounded-md ring-1 ring-blue-200 border border-blue-400" : ""}>
-                <StudyComboInput value={study} onChange={setStudy} onSelect={setStudy} />
+              <div className="flex items-center justify-between">
+                <Label>Studies / Tests <span className="text-red-500">*</span></Label>
+                <button
+                  type="button"
+                  onClick={() => setStudyRows((prev) => [...prev, { id: Date.now(), name: "" }])}
+                  className="text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors"
+                >
+                  + Add study
+                </button>
+              </div>
+              <div className={`space-y-2 ${changedFields.includes("study") ? "rounded-md ring-1 ring-blue-200 border border-blue-400 p-2" : ""}`}>
+                {studyRows.map((row) => (
+                  <div key={row.id} className="flex items-center gap-2">
+                    <div className="flex-1">
+                      <StudyComboInput
+                        value={row.name}
+                        onChange={(v) => setStudyRows((prev) => prev.map((r) => r.id === row.id ? { ...r, name: v } : r))}
+                        onSelect={(n) => setStudyRows((prev) => prev.map((r) => r.id === row.id ? { ...r, name: n } : r))}
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      className="p-1.5 rounded text-muted-foreground hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-30"
+                      onClick={() => setStudyRows((prev) => prev.length === 1 ? prev : prev.filter((r) => r.id !== row.id))}
+                      disabled={studyRows.length === 1}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+                <p className="text-[11px] text-muted-foreground">
+                  Removing a study deletes its report. Each study keeps its own separate report.
+                </p>
               </div>
             </div>
 
@@ -420,7 +519,7 @@ function EditPatientModal({
             <Button
               type="submit"
               size="sm"
-              disabled={!name || !age || !gender || !contact || !study || loading}
+              disabled={!name || !age || !gender || !contact || validStudyRows.length === 0 || loading}
               className="bg-blue-600 hover:bg-blue-700 gap-1.5 min-w-[120px]"
             >
               {loading ? (
@@ -528,7 +627,7 @@ function DoctorPatientsView() {
   const [loadingToday, setLoadingToday] = useState(true)
   const [loadingAll,   setLoadingAll]   = useState(false)
   const [search,   setSearch]   = useState("")
-  const [viewing,  setViewing]  = useState<PatientDoc | null>(null)
+  const [viewing,  setViewing]  = useState<{ p: PatientDoc; sidx: number } | null>(null)
 
   useEffect(() => {
     fetch("/api/patients?date=today")
@@ -568,18 +667,33 @@ function DoctorPatientsView() {
   const historyFiltered = allPats.filter((p) =>
     !search ||
     p.name.toLowerCase().includes(search.toLowerCase()) ||
-    p.study.toLowerCase().includes(search.toLowerCase()) ||
+    studyNames(p).toLowerCase().includes(search.toLowerCase()) ||
     `${p.srNo}`.includes(search)
   )
 
+  // One row per study — each study has its own report
+  const queueRows   = queueFiltered.flatMap((p) => studiesOf(p).map((entry, sidx) => ({ p, entry, sidx })))
+  const historyRows = historyFiltered.flatMap((p) => studiesOf(p).map((entry, sidx) => ({ p, entry, sidx })))
+
   return (
     <>
-    {viewing && <ReportViewModal patient={viewing} onClose={() => setViewing(null)} />}
+    {viewing && (
+      <ReportViewModal
+        patient={{ ...viewing.p, study: studiesOf(viewing.p)[viewing.sidx]?.name ?? viewing.p.study }}
+        sidx={viewing.sidx}
+        onClose={() => setViewing(null)}
+      />
+    )}
 
     <div className="space-y-5">
-      <div>
-        <h1 className="text-xl font-bold">Patients</h1>
-        <p className="text-sm text-muted-foreground">{today}</p>
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-xl font-bold">Patients</h1>
+          <p className="text-sm text-muted-foreground">{today}</p>
+        </div>
+        <Button asChild>
+          <Link href="/patients/new"><UserPlus className="h-4 w-4 mr-2" />Register Patient</Link>
+        </Button>
       </div>
 
       {/* Tab toggle */}
@@ -682,15 +796,15 @@ function DoctorPatientsView() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {queueFiltered.length === 0 && (
+                    {queueRows.length === 0 && (
                       <TableRow>
                         <TableCell colSpan={6} className="text-center py-10 text-muted-foreground text-sm">
                           No patients registered today yet.
                         </TableCell>
                       </TableRow>
                     )}
-                    {queueFiltered.map((p, i) => (
-                      <TableRow key={p._id} className="hover:bg-muted/20">
+                    {queueRows.map(({ p, entry, sidx }, i) => (
+                      <TableRow key={`${p._id}_${sidx}`} className="hover:bg-muted/20">
                         <TableCell className="text-xs font-mono text-muted-foreground">{i + 1}</TableCell>
                         <TableCell>
                           <div className="flex items-center gap-3">
@@ -703,35 +817,38 @@ function DoctorPatientsView() {
                             </div>
                           </div>
                         </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">{p.study}</TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {entry.name}
+                          {studiesOf(p).length > 1 && (
+                            <span className="ml-1.5 text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium">
+                              {sidx + 1}/{studiesOf(p).length}
+                            </span>
+                          )}
+                        </TableCell>
                         <TableCell className="text-sm text-muted-foreground hidden sm:table-cell">{p.referredBy || "Self"}</TableCell>
-                        <TableCell><ReportStatusBadge status={p.reportStatus} /></TableCell>
+                        <TableCell><ReportStatusBadge status={entry.reportStatus} /></TableCell>
                         <TableCell className="text-right">
-                          {p.reportStatus === "completed" ? (
+                          {entry.reportStatus === "completed" ? (
                             <div className="flex items-center justify-end gap-1.5">
                               <Button variant="outline" size="sm" className="h-7 text-xs gap-1"
-                                onClick={() => setViewing(p)}>
+                                onClick={() => setViewing({ p, sidx })}>
                                 <Eye className="h-3 w-3" />View
                               </Button>
                               <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1">
-                                <Link href={buildFillHref(p, "edit")}>
+                                <Link href={buildFillHref(p, sidx, "edit")}>
                                   <ClipboardEdit className="h-3 w-3" />Edit
                                 </Link>
                               </Button>
                               <Button size="sm" className="h-7 text-xs gap-1 bg-green-600 hover:bg-green-700"
-                                onClick={() => {
-                                  const pdfUrl = p.reportSlug ? `${window.location.origin}/${p.reportSlug}/pdf` : `${window.location.origin}/api/patients/${p._id}/pdf`
-                                  const msg = `Dear ${p.name},\n\nYour *${p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
-                                  window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
-                                }}>
+                                onClick={() => shareOnWhatsApp(p, sidx)}>
                                 <MessageCircle className="h-3 w-3" />Share
                               </Button>
                             </div>
                           ) : (
                             <Button asChild size="sm" className="h-7 text-xs gap-1 bg-blue-600 hover:bg-blue-700">
-                              <Link href={buildFillHref(p)}>
+                              <Link href={buildFillHref(p, sidx)}>
                                 <ClipboardEdit className="h-3 w-3" />
-                                {p.reportStatus === "in_progress" ? "Continue" : "Fill Report"}
+                                {entry.reportStatus === "in_progress" ? "Continue" : "Fill Report"}
                               </Link>
                             </Button>
                           )}
@@ -810,15 +927,15 @@ function DoctorPatientsView() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {historyFiltered.length === 0 && (
+                  {historyRows.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={6} className="text-center py-10 text-muted-foreground text-sm">
                         No patients found.
                       </TableCell>
                     </TableRow>
                   )}
-                  {historyFiltered.map((p) => (
-                    <TableRow key={p._id} className="hover:bg-muted/20">
+                  {historyRows.map(({ p, entry, sidx }) => (
+                    <TableRow key={`${p._id}_${sidx}`} className="hover:bg-muted/20">
                       <TableCell>
                         <div className="flex items-center gap-3">
                           <div className="h-8 w-8 rounded-full bg-slate-100 flex items-center justify-center text-xs font-semibold text-slate-600 shrink-0">
@@ -830,18 +947,25 @@ function DoctorPatientsView() {
                           </div>
                         </div>
                       </TableCell>
-                      <TableCell className="text-sm text-muted-foreground">{p.study}</TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {entry.name}
+                        {studiesOf(p).length > 1 && (
+                          <span className="ml-1.5 text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium">
+                            {sidx + 1}/{studiesOf(p).length}
+                          </span>
+                        )}
+                      </TableCell>
                       <TableCell className="text-sm text-muted-foreground hidden sm:table-cell">{p.referredBy || "Self"}</TableCell>
                       <TableCell className="text-xs text-muted-foreground hidden md:table-cell">{dateOf(p.createdAt)}</TableCell>
-                      <TableCell><ReportStatusBadge status={p.reportStatus} /></TableCell>
+                      <TableCell><ReportStatusBadge status={entry.reportStatus} /></TableCell>
                       <TableCell className="text-right">
-                        {p.reportStatus === "completed" ? (
-                          <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => setViewing(p)}>
+                        {entry.reportStatus === "completed" ? (
+                          <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => setViewing({ p, sidx })}>
                             <Eye className="h-3 w-3" />View
                           </Button>
                         ) : (
                           <Button asChild size="sm" className="h-7 text-xs gap-1 bg-blue-600 hover:bg-blue-700">
-                            <Link href={buildFillHref(p)}>
+                            <Link href={buildFillHref(p, sidx)}>
                               <ClipboardEdit className="h-3 w-3" />Fill Report
                             </Link>
                           </Button>
@@ -867,13 +991,45 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
   const { user } = useRole()
   const [patients,       setPatients]      = useState<PatientDoc[]>([])
   const [loading,        setLoading]       = useState(true)
-  const [viewReport,     setViewReport]    = useState<PatientDoc | null>(null)
+  const [viewReport,     setViewReport]    = useState<{ p: PatientDoc; sidx: number } | null>(null)
   const [viewBill,       setViewBill]      = useState<PatientDoc | null>(null)
   const [viewingPatient, setViewingPatient] = useState<PatientDoc | null>(null)
   const [editingPatient, setEditingPatient] = useState<PatientDoc | null>(null)
   const [historyPatient, setHistoryPatient] = useState<PatientDoc | null>(null)
+  const [addingStudyFor, setAddingStudyFor] = useState<PatientDoc | null>(null)
+  const [newStudyName,   setNewStudyName]   = useState("")
+  const [addStudySaving, setAddStudySaving] = useState(false)
   const [search,         setSearch]        = useState("")
   const [monthFilter,    setMonthFilter]   = useState("All Months")
+  // Patient ids whose linked study rows are collapsed (default: expanded)
+  const [collapsed,      setCollapsed]     = useState<Set<string>>(new Set())
+
+  const toggleCollapsed = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+
+  const handleAddStudy = async () => {
+    if (!addingStudyFor || !newStudyName.trim()) return
+    setAddStudySaving(true)
+    try {
+      const res = await fetch(`/api/patients/${addingStudyFor._id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ addStudy: { name: newStudyName.trim() } }),
+      })
+      if (res.ok) {
+        const { patient: updated } = await res.json()
+        setPatients((prev) => prev.map((p) => p._id === updated._id ? { ...p, ...updated } : p))
+        setAddingStudyFor(null)
+        setNewStudyName("")
+      }
+    } finally {
+      setAddStudySaving(false)
+    }
+  }
 
   useEffect(() => {
     fetch("/api/patients")
@@ -928,7 +1084,41 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
   return (
     <div className="space-y-6">
       {/* Modals */}
-      {viewReport    && <ReportViewModal patient={viewReport} onClose={() => setViewReport(null)} />}
+      {viewReport && (
+        <ReportViewModal
+          patient={{ ...viewReport.p, study: studiesOf(viewReport.p)[viewReport.sidx]?.name ?? viewReport.p.study }}
+          sidx={viewReport.sidx}
+          onClose={() => setViewReport(null)}
+        />
+      )}
+      {addingStudyFor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setAddingStudyFor(null)}>
+          <div className="bg-background rounded-xl shadow-xl w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+            <div className="px-5 py-4 border-b">
+              <h2 className="font-semibold text-base">Add Study</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">{addingStudyFor.name} · #{addingStudyFor.srNo}</p>
+            </div>
+            <div className="px-5 py-4 space-y-3">
+              <Label>Study / Test</Label>
+              <StudyComboInput
+                value={newStudyName}
+                onChange={setNewStudyName}
+                onSelect={setNewStudyName}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                The new study is added alongside the existing one{studiesOf(addingStudyFor).length > 1 ? "s" : ""} and gets its own separate report.
+              </p>
+            </div>
+            <div className="flex items-center justify-end gap-2 px-5 py-4 border-t">
+              <Button variant="outline" size="sm" onClick={() => setAddingStudyFor(null)}>Cancel</Button>
+              <Button size="sm" disabled={!newStudyName.trim() || addStudySaving} onClick={() => void handleAddStudy()} className="bg-blue-600 hover:bg-blue-700 gap-1.5">
+                {addStudySaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                Add Study
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
       {viewingPatient && (
         <ViewPatientModal
           patient={viewingPatient}
@@ -956,9 +1146,10 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
       {viewBill && (
         <BillDocViewer
           open={!!viewBill} onClose={() => setViewBill(null)}
+          id={viewBill.billId?.toString()}
           srNo={viewBill.srNo} name={viewBill.name} age={viewBill.age}
           gender={viewBill.gender} contact={viewBill.contact}
-          referredBy={viewBill.referredBy} study={viewBill.study}
+          referredBy={viewBill.referredBy} study={studyNames(viewBill)}
           charges={viewBill.charges} discount={viewBill.discount ?? 0} paid={viewBill.paid}
           paymentMode={viewBill.paymentMode || "Cash"}
           date={viewBill.createdAt?.split("T")[0]}
@@ -1018,205 +1209,638 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
         </CardHeader>
         <CardContent className="p-0">
           {loading ? (
-            <div className="px-4 pb-2">
-              <div className="flex items-center gap-3 py-3 border-b border-border/60 mb-1">
-                <Skeleton className="h-3 w-24" />
-                <Skeleton className="h-3 w-16" />
-                <Skeleton className="h-3 w-20" />
-                <Skeleton className="h-3 w-20 hidden md:block" />
-                <Skeleton className="h-3 w-24" />
-                <Skeleton className="h-3 w-14" />
-                <Skeleton className="h-3 w-8 ml-auto" />
-              </div>
-              {[...Array(7)].map((_, i) => (
-                <motion.div
-                  key={i}
-                  className="flex items-center gap-3 py-3 border-b border-border/40 last:border-0"
-                  initial={{ opacity: 0, x: -12 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: i * 0.06, duration: 0.25, ease: "easeOut" }}
-                >
-                  <div className="flex items-center gap-2 flex-1">
-                    <Skeleton className="h-9 w-9 rounded-full shrink-0" />
-                    <div className="space-y-1.5">
-                      <Skeleton className="h-4 w-32" />
-                      <Skeleton className="h-3 w-16" />
+            <>
+              {/* Desktop loading skeleton */}
+              <div className="hidden md:block px-4 pb-2">
+                <div className="flex items-center gap-3 py-3 border-b border-border/60 mb-1">
+                  <Skeleton className="h-3 w-24" />
+                  <Skeleton className="h-3 w-16" />
+                  <Skeleton className="h-3 w-20" />
+                  <Skeleton className="h-3 w-20 hidden md:block" />
+                  <Skeleton className="h-3 w-24" />
+                  <Skeleton className="h-3 w-14" />
+                  <Skeleton className="h-3 w-8 ml-auto" />
+                </div>
+                {[...Array(7)].map((_, i) => (
+                  <motion.div
+                    key={i}
+                    className="flex items-center gap-3 py-3 border-b border-border/40 last:border-0"
+                    initial={{ opacity: 0, x: -12 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: i * 0.06, duration: 0.25, ease: "easeOut" }}
+                  >
+                    <div className="flex items-center gap-2 flex-1">
+                      <Skeleton className="h-9 w-9 rounded-full shrink-0" />
+                      <div className="space-y-1.5">
+                        <Skeleton className="h-4 w-32" />
+                        <Skeleton className="h-3 w-16" />
+                      </div>
                     </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-4 w-10" />
+                      <Skeleton className="h-3 w-14" />
+                    </div>
+                    <Skeleton className="h-4 w-24" />
+                    <Skeleton className="h-4 w-24 hidden md:block" />
+                    <Skeleton className="h-4 w-28" />
+                    <Skeleton className="h-5 w-16 rounded-full" />
+                    <Skeleton className="h-8 w-8 rounded-lg ml-auto" />
+                  </motion.div>
+                ))}
+              </div>
+
+              {/* Mobile loading skeleton */}
+              <div className="block md:hidden px-4 pb-4 space-y-4 pt-3">
+                {[...Array(3)].map((_, i) => (
+                  <div key={i} className="rounded-xl border bg-background p-3.5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-1.5">
+                        <Skeleton className="h-4 w-32" />
+                        <Skeleton className="h-3 w-20" />
+                      </div>
+                      <Skeleton className="h-5 w-16 rounded-full" />
+                    </div>
+                    <Skeleton className="h-3 w-44" />
+                    <Skeleton className="h-10 w-full rounded-lg" />
                   </div>
-                  <div className="space-y-1.5">
-                    <Skeleton className="h-4 w-10" />
-                    <Skeleton className="h-3 w-14" />
-                  </div>
-                  <Skeleton className="h-4 w-24" />
-                  <Skeleton className="h-4 w-24 hidden md:block" />
-                  <Skeleton className="h-4 w-28" />
-                  <Skeleton className="h-5 w-16 rounded-full" />
-                  <Skeleton className="h-8 w-8 rounded-lg ml-auto" />
-                </motion.div>
-              ))}
-            </div>
+                ))}
+              </div>
+            </>
           ) : (
-            <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Patient</TableHead>
-                  <TableHead>Age / Gender</TableHead>
-                  <TableHead>Contact</TableHead>
-                  <TableHead className="hidden md:table-cell">Referred By</TableHead>
-                  <TableHead>Study</TableHead>
-                  <TableHead>Report</TableHead>
-                  <TableHead className="w-10"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={7} className="text-center py-10 text-muted-foreground text-sm">
-                      No patients found.
-                    </TableCell>
-                  </TableRow>
-                )}
-                {groupedByDate.map(({ date, label, list }) => (
-                  <Fragment key={date}>
-                    {/* Date separator */}
-                    <TableRow className="hover:bg-transparent">
-                      <TableCell colSpan={7} className="py-2 px-4 bg-muted/40 border-y">
-                        <div className="flex items-center gap-2">
+            <>
+              {/* Desktop view: Table layout */}
+              <div className="hidden md:block overflow-x-auto">
+                <div className="min-w-[920px] px-4 pb-4">
+                  {/* Column headers */}
+                  <div className={`${ROW_GRID} px-4 py-2.5 text-xs font-medium text-muted-foreground uppercase tracking-wide`}>
+                    <span>Patient</span>
+                    <span>Age / Gender</span>
+                    <span>Contact</span>
+                    <span>Referred By</span>
+                    <span>Study</span>
+                    <span>Report</span>
+                    <span />
+                  </div>
+                  {filtered.length === 0 && (
+                    <p className="text-center py-10 text-muted-foreground text-sm">No patients found.</p>
+                  )}
+                  <div className="space-y-6">
+                    {groupedByDate.map(({ date, label, list }) => (
+                      <div key={date} className="space-y-2.5">
+                        {/* Date separator */}
+                        <div className="flex items-center gap-2 px-1">
                           <span className="text-xs font-semibold text-foreground uppercase tracking-wide">{label}</span>
                           <span className="text-xs text-muted-foreground">· {list.length} patient{list.length !== 1 ? "s" : ""}</span>
                         </div>
-                      </TableCell>
-                    </TableRow>
-                    {list.map((p) => {
-                      const editCount = p.registrationEditHistory?.length ?? 0
-                      return (
-                        <TableRow key={p._id} className="cursor-pointer hover:bg-muted/20">
-                          <TableCell>
-                            <div className="flex items-center gap-3">
-                              <div className="h-9 w-9 rounded-full bg-primary/10 flex items-center justify-center text-xs font-semibold text-primary shrink-0">
-                                {p.name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
-                              </div>
-                              <div>
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <p className="font-medium text-sm">{p.name}</p>
-                                  {editCount > 0 && (
-                                    <span className="inline-flex items-center gap-0.5 text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">
-                                      <Pencil className="h-2.5 w-2.5" />edited
-                                    </span>
+                        {list.map((p) => {
+                          const editCount   = p.registrationEditHistory?.length ?? 0
+                          const pStudies    = studiesOf(p)
+                          const first       = pStudies[0]
+                          const isCollapsed = collapsed.has(p._id)
+                          return (
+                            <div key={p._id} className="rounded-xl border bg-background shadow-sm overflow-hidden">
+                              {/* ── Main patient row ── */}
+                              <div className={`${ROW_GRID} relative px-4 py-3 hover:bg-muted/20 transition-colors`}>
+                                {pStudies.length > 1 && !isCollapsed && (
+                                  <div className="absolute left-[34px] top-[44px] bottom-0 w-0.5 bg-slate-200" />
+                                )}
+                                <div className="flex items-center gap-3">
+                                  <div className="h-9 w-9 rounded-full bg-blue-50 flex items-center justify-center text-xs font-semibold text-primary shrink-0 relative z-10">
+                                    {p.name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
+                                  </div>
+                                  <div>
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <p className="font-medium text-sm">{p.name}</p>
+                                      {editCount > 0 && (
+                                        <span className="inline-flex items-center gap-0.5 text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">
+                                          <Pencil className="h-2.5 w-2.5" />edited
+                                        </span>
+                                      )}
+                                    </div>
+                                    <p className="text-xs text-muted-foreground">#{p.srNo}</p>
+                                  </div>
+                                </div>
+                                <div>
+                                  <p className="text-sm font-medium">{p.age} yrs</p>
+                                  <p className="text-xs text-muted-foreground capitalize">{p.gender}</p>
+                                </div>
+                                <div>
+                                  <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                                    <Phone className="h-3.5 w-3.5" />{p.contact}
+                                  </div>
+                                  {p.address && (
+                                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-0.5">
+                                      <MapPin className="h-3 w-3" />{p.address}
+                                    </div>
                                   )}
                                 </div>
-                                <p className="text-xs text-muted-foreground">#{p.srNo}</p>
+                                <div className="text-sm">{p.referredBy || "Self"}</div>
+                                <div className="text-sm text-muted-foreground">
+                                  <span className="inline-flex items-center gap-1.5">
+                                    {first?.name ?? p.study}
+                                    {pStudies.length > 1 && (
+                                      <button
+                                        onClick={(e) => { e.stopPropagation(); toggleCollapsed(p._id) }}
+                                        title={isCollapsed ? `Show ${pStudies.length - 1} more stud${pStudies.length - 1 > 1 ? "ies" : "y"}` : "Hide linked studies"}
+                                        className="inline-flex items-center gap-0.5 text-[11px] bg-blue-100 text-blue-700 hover:bg-blue-200 px-1.5 py-0.5 rounded font-medium shrink-0 transition-colors"
+                                      >
+                                        {isCollapsed ? `+${pStudies.length - 1} more` : `1/${pStudies.length}`}
+                                        {isCollapsed
+                                          ? <ChevronDown className="h-3 w-3" />
+                                          : <ChevronUp className="h-3 w-3" />}
+                                      </button>
+                                    )}
+                                  </span>
+                                </div>
+                                <div><ReportStatusBadge status={first?.reportStatus ?? p.reportStatus} /></div>
+                                <div className="justify-self-end">
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <Button variant="ghost" size="icon" className="h-8 w-8">
+                                        <MoreHorizontal className="h-4 w-4" />
+                                      </Button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end" className="w-52">
+                                      {/* ── Patient info ── */}
+                                      <DropdownMenuItem
+                                        className="flex items-center gap-2"
+                                        onClick={() => setViewingPatient(p)}
+                                      >
+                                        <User className="h-3.5 w-3.5 text-primary" />View Patient
+                                      </DropdownMenuItem>
+                                      {canEdit && (
+                                        <DropdownMenuItem
+                                          className="flex items-center gap-2"
+                                          onClick={() => setEditingPatient(p)}
+                                        >
+                                          <Pencil className="h-3.5 w-3.5 text-blue-500" />Edit Patient
+                                        </DropdownMenuItem>
+                                      )}
+                                      {editCount > 0 && (
+                                        <DropdownMenuItem
+                                          className="flex items-center gap-2"
+                                          onClick={() => setHistoryPatient(p)}
+                                        >
+                                          <History className="h-3.5 w-3.5 text-amber-500" />
+                                          Edit History
+                                          <span className="ml-auto text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">
+                                            {editCount}
+                                          </span>
+                                        </DropdownMenuItem>
+                                      )}
+                                      {canEdit && (
+                                        <DropdownMenuItem
+                                          className="flex items-center gap-2"
+                                          onClick={() => { setNewStudyName(""); setAddingStudyFor(p) }}
+                                        >
+                                          <ClipboardEdit className="h-3.5 w-3.5 text-purple-500" />Add Study
+                                        </DropdownMenuItem>
+                                      )}
+                                      <DropdownMenuSeparator />
+                                      {/* ── Report of the first study ── */}
+                                      {first?.reportStatus === "completed" ? (
+                                        <>
+                                          <DropdownMenuItem
+                                            className="flex items-center gap-2"
+                                            onClick={() => setViewReport({ p, sidx: 0 })}
+                                          >
+                                            <FileText className="h-3.5 w-3.5" />
+                                            <span className="truncate">View Report{pStudies.length > 1 ? ` — ${first.name}` : ""}</span>
+                                          </DropdownMenuItem>
+                                          <DropdownMenuItem asChild>
+                                            <Link href={buildFillHref(p, 0, "edit")} className="flex items-center gap-2">
+                                              <Pencil className="h-3.5 w-3.5 text-blue-500" />
+                                              <span className="truncate">Edit Report{pStudies.length > 1 ? ` — ${first.name}` : ""}</span>
+                                            </Link>
+                                          </DropdownMenuItem>
+                                        </>
+                                      ) : (
+                                        <DropdownMenuItem asChild>
+                                          <Link href={buildFillHref(p, 0)} className="flex items-center gap-2">
+                                            <ClipboardEdit className="h-3.5 w-3.5 text-blue-500" />
+                                            <span className="truncate">Fill Report{pStudies.length > 1 ? ` — ${first?.name}` : ""}</span>
+                                          </Link>
+                                        </DropdownMenuItem>
+                                      )}
+                                      <DropdownMenuSeparator />
+                                      {/* ── Bill ── */}
+                                      {first?.reportStatus === "completed" && (
+                                        <DropdownMenuItem className="flex items-center gap-2" onClick={() => setViewBill({ ...p, charges: first.charges || 0, paid: first.paid || 0, discount: first.discount || 0, paymentMode: first.paymentMode || "Cash", billId: first.billId?.toString() })}>
+                                          <Printer className="h-3.5 w-3.5" />Print Bill
+                                        </DropdownMenuItem>
+                                      )}
+                                      {first?.billId ? (
+                                        <DropdownMenuItem asChild>
+                                          <Link href={`/billing/new?billId=${first.billId}`} className="flex items-center gap-2">
+                                            <Receipt className="h-3.5 w-3.5 text-blue-500" />Edit Bill
+                                          </Link>
+                                        </DropdownMenuItem>
+                                      ) : canCreate && (
+                                        <DropdownMenuItem asChild>
+                                          <Link href={billHrefFor(p, 0)} className="flex items-center gap-2">
+                                            <Receipt className="h-3.5 w-3.5" />Create Bill
+                                          </Link>
+                                        </DropdownMenuItem>
+                                      )}
+                                      {first?.reportStatus === "completed" && (
+                                        <DropdownMenuItem
+                                          className="flex items-center gap-2 text-green-700"
+                                          onClick={() => shareOnWhatsApp(p, 0)}
+                                        >
+                                          <Share2 className="h-3.5 w-3.5" />
+                                          <span className="truncate">Share Report{pStudies.length > 1 ? ` — ${first.name}` : ""}</span>
+                                        </DropdownMenuItem>
+                                      )}
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+                                </div>
                               </div>
+                              {/* ── Linked study rows (2nd study onwards) — threaded under the patient ── */}
+                              {!isCollapsed && pStudies.slice(1).map((s, i) => {
+                                const sidx = i + 1
+                                return (
+                                  <div key={`${p._id}_s${sidx}`} className={`${ROW_GRID} relative px-4 py-2.5 bg-slate-50 hover:bg-slate-100/80 border-t border-border/60 transition-colors`}>
+                                    {sidx < pStudies.length - 1 && (
+                                      <div className="absolute left-[34px] top-0 bottom-0 w-0.5 bg-slate-200" />
+                                    )}
+                                    <div className="absolute left-[34px] top-0 w-[14px] h-[24px] border-l-2 border-b-2 border-slate-200 rounded-bl-lg" />
+                                    <div className="flex items-center gap-3 pl-[32px]">
+                                      <div className="h-7 w-7 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-semibold text-slate-500 shrink-0 relative z-10">
+                                        {p.name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
+                                      </div>
+                                      <div>
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <p className="font-medium text-sm text-slate-700">{p.name}</p>
+                                          <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-medium">
+                                            same patient
+                                          </span>
+                                        </div>
+                                        <p className="text-xs text-muted-foreground">#{p.srNo}</p>
+                                      </div>
+                                    </div>
+                                    <div>
+                                      <p className="text-sm font-medium text-slate-700">{p.age} yrs</p>
+                                      <p className="text-xs text-muted-foreground capitalize">{p.gender}</p>
+                                    </div>
+                                    <div>
+                                      <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                                        <Phone className="h-3.5 w-3.5" />{p.contact}
+                                      </div>
+                                      {p.address && (
+                                        <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-0.5">
+                                          <MapPin className="h-3 w-3" />{p.address}
+                                        </div>
+                                      )}
+                                    </div>
+                                    <div className="text-sm text-slate-600">
+                                      {p.referredBy || "Self"}
+                                    </div>
+                                    <div className="text-sm text-muted-foreground">
+                                      <span className="inline-flex items-center gap-1.5 font-medium text-slate-700">
+                                        {s.name}
+                                        <span className="text-[11px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium shrink-0">
+                                          {sidx + 1}/{pStudies.length}
+                                        </span>
+                                      </span>
+                                    </div>
+                                    <div><ReportStatusBadge status={s.reportStatus} /></div>
+                                    <div className="justify-self-end">
+                                      <DropdownMenu>
+                                        <DropdownMenuTrigger asChild>
+                                          <Button variant="ghost" size="icon" className="h-8 w-8">
+                                            <MoreHorizontal className="h-4 w-4" />
+                                          </Button>
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent align="end" className="w-52">
+                                          {/* ── Patient info ── */}
+                                          <DropdownMenuItem
+                                            className="flex items-center gap-2"
+                                            onClick={() => setViewingPatient(p)}
+                                          >
+                                            <User className="h-3.5 w-3.5 text-primary" />View Patient
+                                          </DropdownMenuItem>
+                                          {canEdit && (
+                                            <DropdownMenuItem
+                                              className="flex items-center gap-2"
+                                              onClick={() => setEditingPatient(p)}
+                                            >
+                                              <Pencil className="h-3.5 w-3.5 text-blue-500" />Edit Patient
+                                            </DropdownMenuItem>
+                                          )}
+                                          {editCount > 0 && (
+                                            <DropdownMenuItem
+                                              className="flex items-center gap-2"
+                                              onClick={() => setHistoryPatient(p)}
+                                            >
+                                              <History className="h-3.5 w-3.5 text-amber-500" />
+                                              Edit History
+                                              <span className="ml-auto text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">
+                                                {editCount}
+                                              </span>
+                                            </DropdownMenuItem>
+                                          )}
+                                          {canEdit && (
+                                            <DropdownMenuItem
+                                              className="flex items-center gap-2"
+                                              onClick={() => { setNewStudyName(""); setAddingStudyFor(p) }}
+                                            >
+                                              <ClipboardEdit className="h-3.5 w-3.5 text-purple-500" />Add Study
+                                            </DropdownMenuItem>
+                                          )}
+                                          <DropdownMenuSeparator />
+                                          {/* ── Report of the current study ── */}
+                                          {s.reportStatus === "completed" ? (
+                                            <>
+                                              <DropdownMenuItem
+                                                className="flex items-center gap-2"
+                                                onClick={() => setViewReport({ p, sidx })}
+                                              >
+                                                <FileText className="h-3.5 w-3.5" />
+                                                <span className="truncate">View Report{pStudies.length > 1 ? ` — ${s.name}` : ""}</span>
+                                              </DropdownMenuItem>
+                                              <DropdownMenuItem asChild>
+                                                <Link href={buildFillHref(p, sidx, "edit")} className="flex items-center gap-2">
+                                                  <Pencil className="h-3.5 w-3.5 text-blue-500" />
+                                                  <span className="truncate">Edit Report{pStudies.length > 1 ? ` — ${s.name}` : ""}</span>
+                                                </Link>
+                                              </DropdownMenuItem>
+                                            </>
+                                          ) : (
+                                            <DropdownMenuItem asChild>
+                                              <Link href={buildFillHref(p, sidx)} className="flex items-center gap-2">
+                                                <ClipboardEdit className="h-3.5 w-3.5 text-blue-500" />
+                                                <span className="truncate">Fill Report{pStudies.length > 1 ? ` — ${s.name}` : ""}</span>
+                                              </Link>
+                                            </DropdownMenuItem>
+                                          )}
+                                          <DropdownMenuSeparator />
+                                          {/* ── Bill ── */}
+                                          {s.reportStatus === "completed" && (
+                                            <DropdownMenuItem className="flex items-center gap-2" onClick={() => setViewBill({ ...p, charges: s.charges || 0, paid: s.paid || 0, discount: s.discount || 0, paymentMode: s.paymentMode || "Cash", billId: s.billId?.toString() })}>
+                                              <Printer className="h-3.5 w-3.5" />Print Bill
+                                            </DropdownMenuItem>
+                                          )}
+                                          {s.billId ? (
+                                            <DropdownMenuItem asChild>
+                                              <Link href={`/billing/new?billId=${s.billId}`} className="flex items-center gap-2">
+                                                <Receipt className="h-3.5 w-3.5 text-blue-500" />Edit Bill
+                                              </Link>
+                                            </DropdownMenuItem>
+                                          ) : canCreate && (
+                                            <DropdownMenuItem asChild>
+                                              <Link href={billHrefFor(p, sidx)} className="flex items-center gap-2">
+                                                <Receipt className="h-3.5 w-3.5" />Create Bill
+                                              </Link>
+                                            </DropdownMenuItem>
+                                          )}
+                                          {s.reportStatus === "completed" && (
+                                            <DropdownMenuItem
+                                              className="flex items-center gap-2 text-green-700"
+                                              onClick={() => shareOnWhatsApp(p, sidx)}
+                                            >
+                                              <Share2 className="h-3.5 w-3.5" />
+                                              <span className="truncate">Share Report{pStudies.length > 1 ? ` — ${s.name}` : ""}</span>
+                                            </DropdownMenuItem>
+                                          )}
+                                        </DropdownMenuContent>
+                                      </DropdownMenu>
+                                    </div>
+                                  </div>
+                                )
+                              })}
                             </div>
-                          </TableCell>
-                          <TableCell>
-                            <p className="text-sm font-medium">{p.age} yrs</p>
-                            <p className="text-xs text-muted-foreground capitalize">{p.gender}</p>
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
-                              <Phone className="h-3.5 w-3.5" />{p.contact}
+                          )
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Mobile view: Cards list layout */}
+              <div className="block md:hidden px-4 pb-4 space-y-4">
+                {filtered.length === 0 && (
+                  <p className="text-center py-10 text-muted-foreground text-sm">No patients found.</p>
+                )}
+                {groupedByDate.map(({ date, label, list }) => (
+                  <div key={date} className="space-y-3">
+                    {/* Date separator */}
+                    <div className="flex items-center gap-2 px-1 pt-2">
+                      <span className="text-xs font-semibold text-foreground uppercase tracking-wide">{label}</span>
+                      <span className="text-xs text-muted-foreground">· {list.length} patient{list.length !== 1 ? "s" : ""}</span>
+                    </div>
+                    {list.map((p) => {
+                      const editCount   = p.registrationEditHistory?.length ?? 0
+                      const pStudies    = studiesOf(p)
+                      const first       = pStudies[0]
+                      const isCollapsed = collapsed.has(p._id)
+                      return (
+                        <div key={p._id} className="rounded-xl border bg-background shadow-sm overflow-hidden p-3.5 space-y-3">
+                          {/* Top: Patient details & main action trigger */}
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <p className="font-semibold text-sm text-slate-800">{p.name}</p>
+                                {editCount > 0 && (
+                                  <span className="inline-flex items-center gap-0.5 text-[9px] bg-amber-100 text-amber-700 px-1.5 py-0.2 rounded font-medium">
+                                    edited
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                #{p.srNo} · {p.age} yrs · <span className="capitalize">{p.gender}</span>
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <ReportStatusBadge status={first?.reportStatus ?? p.reportStatus} />
+                              <DropdownMenu>
+                                <DropdownMenuTrigger asChild>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7">
+                                    <MoreHorizontal className="h-4 w-4" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                                <DropdownMenuContent align="end" className="w-52">
+                                  <DropdownMenuItem onClick={() => setViewingPatient(p)}>
+                                    <User className="h-3.5 w-3.5 text-primary" />View Patient
+                                  </DropdownMenuItem>
+                                  {canEdit && (
+                                    <DropdownMenuItem onClick={() => setEditingPatient(p)}>
+                                      <Pencil className="h-3.5 w-3.5 text-blue-500" />Edit Patient
+                                    </DropdownMenuItem>
+                                  )}
+                                  {editCount > 0 && (
+                                    <DropdownMenuItem onClick={() => setHistoryPatient(p)}>
+                                      <History className="h-3.5 w-3.5 text-amber-500" />
+                                      Edit History
+                                      <span className="ml-auto text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">
+                                        {editCount}
+                                      </span>
+                                    </DropdownMenuItem>
+                                  )}
+                                  {canEdit && (
+                                    <DropdownMenuItem onClick={() => { setNewStudyName(""); setAddingStudyFor(p) }}>
+                                      <ClipboardEdit className="h-3.5 w-3.5 text-purple-500" />Add Study
+                                    </DropdownMenuItem>
+                                  )}
+                                  <DropdownMenuSeparator />
+                                  {first?.reportStatus === "completed" ? (
+                                    <>
+                                      <DropdownMenuItem onClick={() => setViewReport({ p, sidx: 0 })}>
+                                        <FileText className="h-3.5 w-3.5" />View Report
+                                      </DropdownMenuItem>
+                                      <DropdownMenuItem asChild>
+                                        <Link href={buildFillHref(p, 0, "edit")} className="flex items-center gap-2">
+                                          <Pencil className="h-3.5 w-3.5 text-blue-500" />Edit Report
+                                        </Link>
+                                      </DropdownMenuItem>
+                                    </>
+                                  ) : (
+                                    <DropdownMenuItem asChild>
+                                      <Link href={buildFillHref(p, 0)} className="flex items-center gap-2">
+                                        <ClipboardEdit className="h-3.5 w-3.5 text-blue-500" />Fill Report
+                                      </Link>
+                                    </DropdownMenuItem>
+                                  )}
+                                  <DropdownMenuSeparator />
+                                  {first?.reportStatus === "completed" && (
+                                    <DropdownMenuItem onClick={() => setViewBill({ ...p, charges: first.charges || 0, paid: first.paid || 0, discount: first.discount || 0, paymentMode: first.paymentMode || "Cash", billId: first.billId?.toString() })}>
+                                      <Printer className="h-3.5 w-3.5" />Print Bill
+                                    </DropdownMenuItem>
+                                  )}
+                                  {first?.billId ? (
+                                    <DropdownMenuItem asChild>
+                                      <Link href={`/billing/new?billId=${first.billId}`} className="flex items-center gap-2">
+                                        <Receipt className="h-3.5 w-3.5 text-blue-500" />Edit Bill
+                                      </Link>
+                                    </DropdownMenuItem>
+                                  ) : canCreate && (
+                                    <DropdownMenuItem asChild>
+                                      <Link href={billHrefFor(p, 0)} className="flex items-center gap-2">
+                                        <Receipt className="h-3.5 w-3.5" />Create Bill
+                                      </Link>
+                                    </DropdownMenuItem>
+                                  )}
+                                  {first?.reportStatus === "completed" && (
+                                    <DropdownMenuItem className="text-green-700" onClick={() => shareOnWhatsApp(p, 0)}>
+                                      <Share2 className="h-3.5 w-3.5" />Share Report
+                                    </DropdownMenuItem>
+                                  )}
+                                </DropdownMenuContent>
+                              </DropdownMenu>
+                            </div>
+                          </div>
+
+                          {/* Contact, Address & Referrer metadata */}
+                          <div className="space-y-1 text-xs text-muted-foreground">
+                            <div className="flex items-center gap-1.5">
+                              <Phone className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                              <span>{p.contact}</span>
+                              <span className="text-slate-300">|</span>
+                              <span>Ref: <span className="font-medium text-slate-700">{p.referredBy || "Self"}</span></span>
                             </div>
                             {p.address && (
-                              <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-0.5">
-                                <MapPin className="h-3 w-3" />{p.address}
+                              <div className="flex items-center gap-1.5 pt-0.5">
+                                <MapPin className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                                <span>{p.address}</span>
                               </div>
                             )}
-                          </TableCell>
-                          <TableCell className="text-sm hidden md:table-cell">{p.referredBy || "Self"}</TableCell>
-                          <TableCell className="text-xs text-muted-foreground max-w-[140px]">{p.study}</TableCell>
-                          <TableCell><ReportStatusBadge status={p.reportStatus} /></TableCell>
-                          <TableCell>
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" size="icon" className="h-8 w-8">
-                                  <MoreHorizontal className="h-4 w-4" />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end" className="w-52">
+                          </div>
 
-                                {/* ── Patient info ── */}
-                                <DropdownMenuItem
-                                  className="flex items-center gap-2"
-                                  onClick={() => setViewingPatient(p)}
+                          {/* Studies detail section */}
+                          <div className="bg-slate-50 rounded-lg p-2.5 space-y-2">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="font-medium text-slate-700 truncate">
+                                Study: {first?.name ?? p.study}
+                              </span>
+                              {pStudies.length > 1 && (
+                                <button
+                                  onClick={() => toggleCollapsed(p._id)}
+                                  className="inline-flex items-center gap-1 text-[10px] bg-blue-100 hover:bg-blue-200 text-blue-700 px-1.5 py-0.5 rounded font-medium transition-colors"
                                 >
-                                  <User className="h-3.5 w-3.5 text-primary" />View Patient
-                                </DropdownMenuItem>
-                                {canEdit && (
-                                  <DropdownMenuItem
-                                    className="flex items-center gap-2"
-                                    onClick={() => setEditingPatient(p)}
-                                  >
-                                    <Pencil className="h-3.5 w-3.5 text-blue-500" />Edit Patient
-                                  </DropdownMenuItem>
-                                )}
-                                {editCount > 0 && (
-                                  <DropdownMenuItem
-                                    className="flex items-center gap-2"
-                                    onClick={() => setHistoryPatient(p)}
-                                  >
-                                    <History className="h-3.5 w-3.5 text-amber-500" />
-                                    Edit History
-                                    <span className="ml-auto text-[10px] bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded font-medium">
-                                      {editCount}
-                                    </span>
-                                  </DropdownMenuItem>
-                                )}
+                                  {isCollapsed ? `+${pStudies.length - 1} more` : "Collapse"}
+                                </button>
+                              )}
+                            </div>
 
-                                <DropdownMenuSeparator />
-
-                                {/* ── Report ── */}
-                                <DropdownMenuItem
-                                  className="flex items-center gap-2"
-                                  onClick={() => p.reportStatus === "completed" && setViewReport(p)}
-                                  disabled={p.reportStatus !== "completed"}
-                                >
-                                  <FileText className="h-3.5 w-3.5" />View Report
-                                </DropdownMenuItem>
-
-                                <DropdownMenuSeparator />
-
-                                {/* ── Bill ── */}
-                                {p.reportStatus === "completed" && (
-                                  <DropdownMenuItem className="flex items-center gap-2" onClick={() => setViewBill(p)}>
-                                    <Printer className="h-3.5 w-3.5" />Print Bill
-                                  </DropdownMenuItem>
-                                )}
-                                {p.billId ? (
-                                  <DropdownMenuItem asChild>
-                                    <Link href={`/billing/new?billId=${p.billId}`} className="flex items-center gap-2">
-                                      <Receipt className="h-3.5 w-3.5 text-blue-500" />Edit Bill
-                                    </Link>
-                                  </DropdownMenuItem>
-                                ) : canCreate && (
-                                  <DropdownMenuItem asChild>
-                                    <Link href="/billing/new" className="flex items-center gap-2">
-                                      <Receipt className="h-3.5 w-3.5" />Create Bill
-                                    </Link>
-                                  </DropdownMenuItem>
-                                )}
-                                <DropdownMenuItem
-                                  className="flex items-center gap-2 text-green-700"
-                                  onClick={() => {
-                                    const pdfUrl = p.reportSlug ? `${window.location.origin}/${p.reportSlug}/pdf` : `${window.location.origin}/api/patients/${p._id}/pdf`
-                                    const msg = `Dear ${p.name},\n\nYour *${p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
-                                    window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
-                                  }}>
-                                  <Share2 className="h-3.5 w-3.5" />Share Report
-                                </DropdownMenuItem>
-
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </TableCell>
-                        </TableRow>
+                            {/* Threaded studies */}
+                            {!isCollapsed && pStudies.slice(1).map((s, sidx) => {
+                              const realIdx = sidx + 1
+                              return (
+                                <div key={realIdx} className="border-t border-slate-200/60 pt-2 flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] bg-slate-200 text-slate-600 px-1 py-0.2 rounded">same patient</span>
+                                    <span className="text-xs text-slate-600 font-medium">{s.name}</span>
+                                    <span className="text-[9px] text-slate-400">{realIdx + 1}/{pStudies.length}</span>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    <ReportStatusBadge status={s.reportStatus} />
+                                    <DropdownMenu>
+                                      <DropdownMenuTrigger asChild>
+                                        <Button variant="ghost" size="icon" className="h-6 w-6">
+                                          <MoreHorizontal className="h-3 w-3" />
+                                        </Button>
+                                      </DropdownMenuTrigger>
+                                      <DropdownMenuContent align="end" className="w-52">
+                                        <DropdownMenuItem onClick={() => setViewingPatient(p)}>
+                                          <User className="h-3.5 w-3.5 text-primary" />View Patient
+                                        </DropdownMenuItem>
+                                        <DropdownMenuSeparator />
+                                        {s.reportStatus === "completed" ? (
+                                          <>
+                                            <DropdownMenuItem onClick={() => setViewReport({ p, sidx: realIdx })}>
+                                              <FileText className="h-3.5 w-3.5" />View Report
+                                            </DropdownMenuItem>
+                                            <DropdownMenuItem asChild>
+                                              <Link href={buildFillHref(p, realIdx, "edit")} className="flex items-center gap-2">
+                                                <Pencil className="h-3.5 w-3.5 text-blue-500" />Edit Report
+                                              </Link>
+                                            </DropdownMenuItem>
+                                          </>
+                                        ) : (
+                                          <DropdownMenuItem asChild>
+                                            <Link href={buildFillHref(p, realIdx)} className="flex items-center gap-2">
+                                              <ClipboardEdit className="h-3.5 w-3.5 text-blue-500" />Fill Report
+                                            </Link>
+                                          </DropdownMenuItem>
+                                        )}
+                                        <DropdownMenuSeparator />
+                                        {s.reportStatus === "completed" && (
+                                          <DropdownMenuItem onClick={() => setViewBill({ ...p, charges: s.charges || 0, paid: s.paid || 0, discount: s.discount || 0, paymentMode: s.paymentMode || "Cash", billId: s.billId?.toString() })}>
+                                            <Printer className="h-3.5 w-3.5" />Print Bill
+                                          </DropdownMenuItem>
+                                        )}
+                                        {s.billId ? (
+                                          <DropdownMenuItem asChild>
+                                            <Link href={`/billing/new?billId=${s.billId}`} className="flex items-center gap-2">
+                                              <Receipt className="h-3.5 w-3.5 text-blue-500" />Edit Bill
+                                            </Link>
+                                          </DropdownMenuItem>
+                                        ) : canCreate && (
+                                          <DropdownMenuItem asChild>
+                                            <Link href={billHrefFor(p, realIdx)} className="flex items-center gap-2">
+                                              <Receipt className="h-3.5 w-3.5" />Create Bill
+                                            </Link>
+                                          </DropdownMenuItem>
+                                        )}
+                                        {s.reportStatus === "completed" && (
+                                          <DropdownMenuItem className="text-green-700" onClick={() => shareOnWhatsApp(p, realIdx)}>
+                                            <Share2 className="h-3.5 w-3.5" />Share Report
+                                          </DropdownMenuItem>
+                                        )}
+                                      </DropdownMenuContent>
+                                    </DropdownMenu>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
                       )
                     })}
-                  </Fragment>
+                  </div>
                 ))}
-              </TableBody>
-            </Table>
-            </div>
+              </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -1229,7 +1853,6 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
 export default function PatientsPage() {
   const { user } = useRole()
   if (!user) return null
-  if (user.role === "doctor") return <DoctorPatientsView />
   return (
     <AllPatientsView
       canCreate={user.permissions.patients.create}

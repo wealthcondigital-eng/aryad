@@ -122,29 +122,12 @@ function getSampleContent(study: string): Record<string, string> {
 }
 
 // ─── Print logic ──────────────────────────────────────────────────────────────
+// Print output matches the Word file: starts directly at the study heading
+// (no letterhead / patient block — reports print on pre-printed stationery).
 function buildPrintHtml(data: ReportViewerProps): string {
-  const { name, age, gender, contact, referredBy, study, date, srNo } = data
+  const { name, study } = data
   const fields  = getFields(study)
   const content = data.reportContent ?? getSampleContent(study)
-
-  const infoRows = [
-    ["NAME",    name.toUpperCase()],
-    ["DATE",    date ?? new Date().toLocaleDateString("en-IN")],
-    ["AGE",     `${age} YRS`],
-    ["REF. BY", (referredBy || "SELF").toUpperCase()],
-    ["SEX",     gender.toUpperCase()],
-    ["SR. NO",  `#${srNo}`],
-  ]
-
-  const infoHtml = infoRows.reduce<string[][][]>((rows, item, i) => {
-    if (i % 2 === 0) rows.push([item])
-    else rows[rows.length - 1].push(item)
-    return rows
-  }, []).map((pair) => `
-    <div class="info-row-pair">
-      ${pair.map(([lbl, val]) => `<div class="info-cell"><span class="ilabel">${lbl}:</span><span class="ivalue">${val}</span></div>`).join("")}
-    </div>
-  `).join("")
 
   const fieldsHtml = fields.map((f) => `
     <div class="field">
@@ -161,35 +144,21 @@ function buildPrintHtml(data: ReportViewerProps): string {
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: Arial, Helvetica, sans-serif; font-size: 11pt; line-height: 1.5; padding: 15mm 20mm; color: #111; }
-    .header { text-align: center; padding-bottom: 10px; border-bottom: 2px solid #111; margin-bottom: 14px; }
-    .header h1 { font-size: 15pt; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; }
-    .header p { font-size: 9pt; color: #555; margin-top: 4px; }
-    .info-row-pair { display: flex; gap: 30px; margin-bottom: 3px; }
-    .info-cell { display: flex; flex: 1; gap: 6px; font-size: 9pt; }
-    .ilabel { font-weight: bold; min-width: 56px; }
-    .ivalue { flex: 1; }
-    .info-block { border-bottom: 1px solid #aaa; padding-bottom: 10px; margin-bottom: 12px; }
-    .study-title { text-align: center; font-weight: bold; font-size: 12pt; text-transform: uppercase; text-decoration: underline; margin: 12px 0 14px; }
+    .study-title { text-align: center; font-weight: bold; font-size: 12pt; text-transform: uppercase; text-decoration: underline; margin: 12px 0 18px; }
     .field { margin-bottom: 12px; }
     .field-label { font-weight: bold; text-transform: uppercase; font-size: 9.5pt; }
     .field-value { margin-top: 3px; padding-left: 10px; font-size: 9pt; white-space: pre-line; color: #333; }
-    .impression { border: 1px solid #aaa; padding: 8px 12px; background: #f7f7f7; margin: 14px 0; }
-    .imp-label { font-weight: bold; text-transform: uppercase; font-size: 9.5pt; }
-    .imp-value { margin-top: 3px; font-size: 9pt; }
-    .sigs { display: flex; gap: 30px; margin-top: 35px; border-top: 1px dashed #aaa; padding-top: 18px; }
-    .sig { flex: 1; text-align: center; }
-    .sig-line { border-bottom: 1px solid #888; height: 30px; margin: 0 20px 6px; }
-    .sig-name { font-weight: bold; font-size: 9pt; text-transform: uppercase; }
-    .sig-title { font-size: 8pt; color: #666; margin-top: 2px; }
+    .impression { margin: 14px 0; }
+    .imp-label { font-weight: bold; text-decoration: underline; text-transform: uppercase; font-size: 9.5pt; }
+    .imp-value { margin-top: 3px; font-size: 9pt; font-weight: bold; }
+    .sigs { display: flex; gap: 30px; margin-top: 80px; }
+    .sig { flex: 1; }
+    .sig-name { font-weight: bold; font-size: 10pt; text-transform: uppercase; }
+    .sig-title { font-size: 8pt; color: #333; margin-top: 2px; text-transform: uppercase; }
     @media print { body { padding: 8mm 12mm; } }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>Aarya Diagnostics Center</h1>
-    <p>123, Medical Complex, Main Road, City &nbsp;·&nbsp; Tel: 9876543210 &nbsp;·&nbsp; aaryaone45@outlook.com</p>
-  </div>
-  <div class="info-block">${infoHtml}</div>
   <div class="study-title">${study}</div>
   <div class="fields">${fieldsHtml}</div>
   <div class="impression">
@@ -198,12 +167,10 @@ function buildPrintHtml(data: ReportViewerProps): string {
   </div>
   <div class="sigs">
     <div class="sig">
-      <div class="sig-line"></div>
       <p class="sig-name">${data.reportingDoctor ?? "DR. PRADNYA GORE"}</p>
       <p class="sig-title">Consultant Radiologist</p>
     </div>
     <div class="sig">
-      <div class="sig-line"></div>
       <p class="sig-name">DR. RAMNATH GHUTE</p>
       <p class="sig-title">Consultant Radiologist</p>
       <p class="sig-title">M.D. Radiology</p>
@@ -300,11 +267,6 @@ export function ReportDocViewer(props: ReportViewerProps) {
         <div className="flex-1 overflow-y-auto px-6 py-4">
           <div className="border border-dashed border-slate-300 rounded-xl p-6 bg-white text-sm space-y-4">
 
-            {/* Center header */}
-            <div className="text-center pb-3 border-b-2 border-slate-800">
-              <h2 className="text-lg font-bold uppercase tracking-widest">Aarya Diagnostics Center</h2>
-              <p className="text-xs text-slate-500 mt-1">123, Medical Complex, Main Road, City · Tel: 9876543210</p>
-            </div>
 
             {/* Patient info grid */}
             <div className="text-xs border-b border-slate-200 pb-3 space-y-1">
@@ -348,7 +310,7 @@ export function ReportDocViewer(props: ReportViewerProps) {
             </div>
 
             {/* Signatures */}
-            <div className="grid grid-cols-2 gap-4 pt-4 border-t border-dashed border-slate-300 text-xs text-center">
+            <div className="grid grid-cols-2 gap-4 pt-16 border-t border-dashed border-slate-300 text-xs text-center">
               <div className="space-y-1">
                 <div className="h-8 border-b border-slate-400 mx-4" />
                 <p className="font-bold uppercase">{props.reportingDoctor ?? "DR. PRADNYA GORE"}</p>

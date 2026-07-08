@@ -2,7 +2,9 @@
 
 import { useState, useEffect, useCallback } from "react"
 import Link from "next/link"
-import { Plus, Search, Filter, MoreHorizontal, Printer, Pencil, History, X, Clock, Check } from "lucide-react"
+import { Plus, Search, Filter, MoreHorizontal, Printer, Pencil, History, X, Clock, Check, Eye } from "lucide-react"
+import { BillDocViewer } from "@/components/bill-doc-viewer"
+import { useRole } from "@/lib/role-context"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -28,6 +30,9 @@ interface BillDoc {
   _id: string
   srNo: number
   patientName: string
+  age?: number
+  gender?: string
+  contact?: string
   referredBy: string
   items: { study: string; quantity: number; price: number }[]
   charges: number
@@ -212,21 +217,22 @@ function printBillReceipt(b: BillDoc, index: number) {
     table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
     th { background: #f0f0f0; font-weight: bold; text-transform: uppercase; text-align: center; border: 1px solid #111; padding: 4px 6px; }
     .total-row td { font-weight: bold; background: #f9f9f9; }
+    .patient-info { margin-bottom: 8px; font-size: 8.5pt; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; border-bottom: 1.5px solid #111; padding-bottom: 6px; }
+    .patient-info div { margin-bottom: 1px; }
+    .patient-info strong { font-weight: bold; }
   </style>
 </head>
 <body>
-  <div style="text-align:center;margin-bottom:10px;">
-    <img src="/logo.jpeg" style="width:72px;height:72px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" />
-    <h1 style="font-size:15pt;font-weight:bold;text-transform:uppercase;letter-spacing:2px;">Aarya Diagnostic Center</h1>
-    <p style="font-size:8.5pt;color:#333;line-height:1.6;">Shop no - 5, K. K. Smruti Building, New Maneklal Estate, S.N. Mehta Road, Ghatkopar (W) 400086<br>Contact no - 9819022444 &nbsp;&nbsp; aaryadiagnosticsmumbai@gmail.com</p>
-  </div>
-
+  <!-- No clinic letterhead — receipts print on pre-printed stationery -->
   <div style="border-top:2.5px solid #111;border-bottom:2.5px solid #111;padding:2px 0;text-align:center;font-weight:bold;font-size:9.5pt;text-transform:uppercase;letter-spacing:1px;margin:8px 0;">Payment Receipt</div>
 
-  <div style="margin-bottom:8px;font-size:9.5pt;">
-    <p><strong>Name: ${b.patientName.toUpperCase()}</strong></p>
-    ${b.srNo ? `<p>SR No: #${b.srNo}</p>` : ""}
-    ${b.referredBy ? `<p>Referred By: ${b.referredBy}</p>` : ""}
+  <div class="patient-info">
+    <div><strong>NAME:</strong> ${b.patientName.toUpperCase()}</div>
+    <div><strong>DATE:</strong> ${dateStr}</div>
+    <div><strong>AGE / SEX:</strong> ${b.age || "—"} YRS &nbsp;/&nbsp; ${(b.gender || "—").toUpperCase()}</div>
+    <div><strong>MOBILE:</strong> ${b.contact || "—"}</div>
+    <div><strong>REF. BY:</strong> ${(b.referredBy || "Self").toUpperCase()}</div>
+    <div><strong>SR. NO:</strong> #${b.srNo || "—"}</div>
   </div>
 
   <table style="margin-bottom:8px;">
@@ -260,8 +266,7 @@ function printBillReceipt(b: BillDoc, index: number) {
 </body>
 </html>`
 
-  const absoluteHtml = html.replace('src="/logo.jpeg"', `src="${window.location.origin}/logo.jpeg"`)
-  const blob = new Blob([absoluteHtml], { type: "text/html" })
+  const blob = new Blob([html], { type: "text/html" })
   const url  = URL.createObjectURL(blob)
   const win  = window.open(url, "_blank", "width=620,height=800")
   if (!win) { alert("Please allow pop-ups to print."); URL.revokeObjectURL(url); return }
@@ -280,120 +285,225 @@ function BillsTable({
   allBills,
   onMarkPaid,
   onViewHistory,
+  onViewBill,
 }: {
   data: BillDoc[]
   allBills: BillDoc[]
   onMarkPaid: (id: string) => void
   onViewHistory: (b: BillDoc) => void
+  onViewBill: (b: BillDoc, index: number) => void
 }) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Bill / Patient</TableHead>
-          <TableHead>Studies</TableHead>
-          <TableHead>Date</TableHead>
-          <TableHead className="text-right">Total</TableHead>
-          <TableHead className="text-right">Paid</TableHead>
-          <TableHead>Mode</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead className="w-10"></TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
+    <>
+      {/* Desktop view: Table */}
+      <div className="hidden md:block overflow-x-auto">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Bill / Patient</TableHead>
+              <TableHead>Studies</TableHead>
+              <TableHead>Date</TableHead>
+              <TableHead className="text-right">Total</TableHead>
+              <TableHead className="text-right">Paid</TableHead>
+              <TableHead>Mode</TableHead>
+              <TableHead>Status</TableHead>
+              <TableHead className="w-10"></TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {data.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={8} className="text-center py-10 text-muted-foreground text-sm">
+                  No bills found.
+                </TableCell>
+              </TableRow>
+            )}
+            {data.map((b) => {
+              const status = billStatus(b)
+              // find original index in allBills for stable bill number
+              const origIdx = allBills.findIndex((x) => x._id === b._id)
+              const bNo = billNo(b, origIdx >= 0 ? origIdx : 0)
+              return (
+                <TableRow key={b._id}>
+                  <TableCell>
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <p className="font-medium text-sm">{b.patientName}</p>
+                        {b.editHistory.length > 0 && (
+                          <span className="inline-flex items-center gap-0.5 text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium">
+                            <Pencil className="h-2.5 w-2.5" />edited
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">{bNo} · {b.referredBy || "Self"}</p>
+                      {b.editHistory.length > 0 && b.editHistory[0] && (
+                        <p className="text-[10px] text-blue-500 mt-0.5">
+                          Last edit: {b.editHistory[0].editor} · {formatDate(b.editHistory[0].editedAt)}
+                        </p>
+                      )}
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="flex flex-wrap gap-1">
+                      {b.items.map((s, i) => (
+                        <Badge key={i} variant="secondary" className="text-xs">{s.study}</Badge>
+                      ))}
+                    </div>
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">
+                    {formatDate(b.billDate || b.createdAt)}
+                  </TableCell>
+                  <TableCell className="text-right font-medium text-sm">&#8377;{b.charges.toLocaleString()}</TableCell>
+                  <TableCell className="text-right text-sm">&#8377;{b.paid.toLocaleString()}</TableCell>
+                  <TableCell className="text-sm">{b.paymentMode || "—"}</TableCell>
+                  <TableCell>
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium capitalize ${statusBadgeClass[status]}`}>
+                      {status}
+                    </span>
+                  </TableCell>
+                  <TableCell>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-8 w-8">
+                          <MoreHorizontal className="h-4 w-4" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => onViewBill(b, origIdx >= 0 ? origIdx : 0)}>
+                          <Eye className="h-3.5 w-3.5 mr-2" />
+                          View Bill
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => printBillReceipt(b, origIdx >= 0 ? origIdx : 0)}>
+                          <Printer className="h-3.5 w-3.5 mr-2" />
+                          Print Receipt
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem asChild>
+                          <Link href={`/billing/new?billId=${b._id}`}>Edit Bill</Link>
+                        </DropdownMenuItem>
+                        {b.editHistory.length > 0 && (
+                          <DropdownMenuItem onClick={() => onViewHistory(b)}>
+                            <History className="h-3.5 w-3.5 mr-2 text-blue-500" />
+                            View Edit History
+                          </DropdownMenuItem>
+                        )}
+                        {status !== "paid" && (
+                          <DropdownMenuItem onClick={() => onMarkPaid(b._id)}>
+                            Mark as Paid
+                          </DropdownMenuItem>
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      </div>
+
+      {/* Mobile view: Cards list */}
+      <div className="block md:hidden divide-y divide-border px-4 py-1">
         {data.length === 0 && (
-          <TableRow>
-            <TableCell colSpan={8} className="text-center py-10 text-muted-foreground text-sm">
-              No bills found.
-            </TableCell>
-          </TableRow>
+          <p className="text-center py-10 text-muted-foreground text-sm">No bills found.</p>
         )}
         {data.map((b) => {
           const status = billStatus(b)
-          // find original index in allBills for stable bill number
           const origIdx = allBills.findIndex((x) => x._id === b._id)
           const bNo = billNo(b, origIdx >= 0 ? origIdx : 0)
           return (
-            <TableRow key={b._id}>
-              <TableCell>
+            <div key={b._id} className="py-4 space-y-2.5">
+              <div className="flex items-start justify-between gap-2">
                 <div>
-                  <div className="flex items-center gap-1.5">
-                    <p className="font-medium text-sm">{b.patientName}</p>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <p className="font-semibold text-sm text-slate-800">{b.patientName}</p>
                     {b.editHistory.length > 0 && (
-                      <span className="inline-flex items-center gap-0.5 text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium">
-                        <Pencil className="h-2.5 w-2.5" />edited
+                      <span className="inline-flex items-center gap-0.5 text-[9px] bg-blue-100 text-blue-700 px-1 py-0.2 rounded font-medium">
+                        edited
                       </span>
                     )}
                   </div>
-                  <p className="text-xs text-muted-foreground">{bNo} · {b.referredBy || "Self"}</p>
-                  {b.editHistory.length > 0 && b.editHistory[0] && (
-                    <p className="text-[10px] text-blue-500 mt-0.5">
-                      Last edit: {b.editHistory[0].editor} · {formatDate(b.editHistory[0].editedAt)}
-                    </p>
-                  )}
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {bNo} · {formatDate(b.billDate || b.createdAt)}
+                  </p>
                 </div>
-              </TableCell>
-              <TableCell>
-                <div className="flex flex-wrap gap-1">
-                  {b.items.map((s, i) => (
-                    <Badge key={i} variant="secondary" className="text-xs">{s.study}</Badge>
-                  ))}
+                <div className="flex items-center gap-1.5">
+                  <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold capitalize ${statusBadgeClass[status]}`}>
+                    {status}
+                  </span>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon" className="h-7 w-7">
+                        <MoreHorizontal className="h-4 w-4" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem onClick={() => onViewBill(b, origIdx >= 0 ? origIdx : 0)}>
+                        <Eye className="h-3.5 w-3.5 mr-2" />
+                        View Bill
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => printBillReceipt(b, origIdx >= 0 ? origIdx : 0)}>
+                        <Printer className="h-3.5 w-3.5 mr-2" />
+                        Print Receipt
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem asChild>
+                        <Link href={`/billing/new?billId=${b._id}`}>Edit Bill</Link>
+                      </DropdownMenuItem>
+                      {b.editHistory.length > 0 && (
+                        <DropdownMenuItem onClick={() => onViewHistory(b)}>
+                          <History className="h-3.5 w-3.5 mr-2 text-blue-500" />
+                          View Edit History
+                        </DropdownMenuItem>
+                      )}
+                      {status !== "paid" && (
+                        <DropdownMenuItem onClick={() => onMarkPaid(b._id)}>
+                          Mark as Paid
+                        </DropdownMenuItem>
+                      )}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </div>
-              </TableCell>
-              <TableCell className="text-sm text-muted-foreground">
-                {formatDate(b.billDate || b.createdAt)}
-              </TableCell>
-              <TableCell className="text-right font-medium text-sm">&#8377;{b.charges.toLocaleString()}</TableCell>
-              <TableCell className="text-right text-sm">&#8377;{b.paid.toLocaleString()}</TableCell>
-              <TableCell className="text-sm">{b.paymentMode || "—"}</TableCell>
-              <TableCell>
-                <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium capitalize ${statusBadgeClass[status]}`}>
-                  {status}
+              </div>
+
+              {/* Studies */}
+              <div className="flex flex-wrap gap-1">
+                {b.items.map((s, i) => (
+                  <Badge key={i} variant="secondary" className="text-[10px] py-0.2 px-1.5">{s.study}</Badge>
+                ))}
+              </div>
+
+              {/* Pricing details */}
+              <div className="flex items-center justify-between text-xs pt-1">
+                <span className="text-muted-foreground">
+                  Ref: <span className="font-medium text-slate-700">{b.referredBy || "Self"}</span>
                 </span>
-              </TableCell>
-              <TableCell>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon" className="h-8 w-8">
-                      <MoreHorizontal className="h-4 w-4" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem onClick={() => printBillReceipt(b, origIdx >= 0 ? origIdx : 0)}>
-                      <Printer className="h-3.5 w-3.5 mr-2" />
-                      Print Receipt
-                    </DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem asChild>
-                      <Link href={`/billing/new?billId=${b._id}`}>Edit Bill</Link>
-                    </DropdownMenuItem>
-                    {b.editHistory.length > 0 && (
-                      <DropdownMenuItem onClick={() => onViewHistory(b)}>
-                        <History className="h-3.5 w-3.5 mr-2 text-blue-500" />
-                        View Edit History
-                      </DropdownMenuItem>
-                    )}
-                    {status !== "paid" && (
-                      <DropdownMenuItem onClick={() => onMarkPaid(b._id)}>
-                        Mark as Paid
-                      </DropdownMenuItem>
-                    )}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </TableCell>
-            </TableRow>
+                <div className="flex items-center gap-3">
+                  <span>
+                    Total: <span className="font-semibold text-slate-800">₹{b.charges.toLocaleString()}</span>
+                  </span>
+                  <span>
+                    Paid: <span className="font-semibold text-green-600">₹{b.paid.toLocaleString()}</span>
+                  </span>
+                  <span className="text-slate-400">|</span>
+                  <span className="text-muted-foreground text-[10px] uppercase font-medium">{b.paymentMode || "Cash"}</span>
+                </div>
+              </div>
+            </div>
           )
         })}
-      </TableBody>
-    </Table>
+      </div>
+    </>
   )
 }
 
 export default function BillingPage() {
+  const { user } = useRole()
   const [bills,        setBills]       = useState<BillDoc[]>([])
   const [loading,      setLoading]     = useState(true)
   const [search,       setSearch]      = useState("")
   const [historyBill,  setHistoryBill] = useState<BillDoc | null>(null)
+  const [viewBill,     setViewBill]    = useState<{ bill: BillDoc; index: number } | null>(null)
   const [statusFilter, setStatusFilter] = useState<"all" | "paid" | "pending" | "partial">("all")
 
   const fetchBills = useCallback(() => {
@@ -414,7 +524,7 @@ export default function BillingPage() {
       await fetch(`/api/billing/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ editor: "Receptionist", paid: bill.charges }),
+        body: JSON.stringify({ editor: user?.name || "Staff", paid: bill.charges }),
       })
       fetchBills()
     } catch {
@@ -442,6 +552,28 @@ export default function BillingPage() {
   return (
     <div className="space-y-6">
       {historyBill && <EditHistoryModal bill={historyBill} onClose={() => setHistoryBill(null)} />}
+      {viewBill && (
+        <BillDocViewer
+          open
+          onClose={() => setViewBill(null)}
+          id={viewBill.bill._id}
+          srNo={viewBill.bill.srNo}
+          name={viewBill.bill.patientName}
+          age={viewBill.bill.age ?? "—"}
+          gender={viewBill.bill.gender || "—"}
+          contact={viewBill.bill.contact || ""}
+          referredBy={viewBill.bill.referredBy}
+          study={viewBill.bill.items.map((i) => i.study).join(", ")}
+          items={viewBill.bill.items}
+          billNo={billNo(viewBill.bill, viewBill.index)}
+          charges={viewBill.bill.charges}
+          discount={viewBill.bill.discount}
+          paid={viewBill.bill.paid}
+          paymentMode={viewBill.bill.paymentMode}
+          date={(viewBill.bill.billDate || viewBill.bill.createdAt)?.split("T")[0]}
+          editHistory={viewBill.bill.editHistory}
+        />
+      )}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Billing</h1>
@@ -530,75 +662,89 @@ export default function BillingPage() {
         </CardHeader>
         <CardContent className="p-0">
           {loading ? (
-            <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Bill / Patient</TableHead>
-                  <TableHead>Studies</TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead className="text-right">Total</TableHead>
-                  <TableHead className="text-right">Paid</TableHead>
-                  <TableHead>Mode</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="w-10"></TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {[...Array(6)].map((_, i) => (
-                  <TableRow key={i}>
-                    {/* Bill / Patient — two lines */}
-                    <TableCell>
-                      <Skeleton className="h-4 w-32 mb-1.5" />
-                      <Skeleton className="h-3 w-24" />
-                    </TableCell>
-                    {/* Studies — badge pill shape */}
-                    <TableCell>
-                      <Skeleton className="h-5 w-28 rounded-full" />
-                    </TableCell>
-                    {/* Date */}
-                    <TableCell>
-                      <Skeleton className="h-4 w-20" />
-                    </TableCell>
-                    {/* Total */}
-                    <TableCell className="text-right">
-                      <Skeleton className="h-4 w-14 ml-auto" />
-                    </TableCell>
-                    {/* Paid */}
-                    <TableCell className="text-right">
-                      <Skeleton className="h-4 w-12 ml-auto" />
-                    </TableCell>
-                    {/* Mode */}
-                    <TableCell>
-                      <Skeleton className="h-4 w-16" />
-                    </TableCell>
-                    {/* Status — badge pill shape */}
-                    <TableCell>
+            <>
+              {/* Desktop skeleton */}
+              <div className="hidden md:block overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Bill / Patient</TableHead>
+                      <TableHead>Studies</TableHead>
+                      <TableHead>Date</TableHead>
+                      <TableHead className="text-right">Total</TableHead>
+                      <TableHead className="text-right">Paid</TableHead>
+                      <TableHead>Mode</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead className="w-10"></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {[...Array(6)].map((_, i) => (
+                      <TableRow key={i}>
+                        <TableCell>
+                          <Skeleton className="h-4 w-32 mb-1.5" />
+                          <Skeleton className="h-3 w-24" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-5 w-28 rounded-full" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-4 w-20" />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Skeleton className="h-4 w-14 ml-auto" />
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Skeleton className="h-4 w-12 ml-auto" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-4 w-16" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-5 w-14 rounded-full" />
+                        </TableCell>
+                        <TableCell>
+                          <Skeleton className="h-8 w-8 rounded-md" />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              {/* Mobile skeleton */}
+              <div className="block md:hidden divide-y divide-border px-4 py-1">
+                {[...Array(4)].map((_, i) => (
+                  <div key={i} className="py-4 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <Skeleton className="h-4 w-28" />
                       <Skeleton className="h-5 w-14 rounded-full" />
-                    </TableCell>
-                    {/* Actions icon */}
-                    <TableCell>
-                      <Skeleton className="h-8 w-8 rounded-md" />
-                    </TableCell>
-                  </TableRow>
+                    </div>
+                    <Skeleton className="h-3 w-40" />
+                    <div className="flex gap-1.5">
+                      <Skeleton className="h-5 w-16 rounded-full" />
+                      <Skeleton className="h-5 w-16 rounded-full" />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <Skeleton className="h-3.5 w-24" />
+                      <Skeleton className="h-3.5 w-32" />
+                    </div>
+                  </div>
                 ))}
-              </TableBody>
-            </Table>
-            </div>
+              </div>
+            </>
           ) : (
-            <div className="overflow-x-auto">
-              <BillsTable
-                data={
-                  statusFilter === "all"     ? filtered :
-                  statusFilter === "paid"    ? paid :
-                  statusFilter === "pending" ? pending :
-                  partial
-                }
-                allBills={bills}
-                onMarkPaid={handleMarkPaid}
-                onViewHistory={setHistoryBill}
-              />
-            </div>
+            <BillsTable
+              data={
+                statusFilter === "all"     ? filtered :
+                statusFilter === "paid"    ? paid :
+                statusFilter === "pending" ? pending :
+                partial
+              }
+              allBills={bills}
+              onMarkPaid={handleMarkPaid}
+              onViewHistory={setHistoryBill}
+              onViewBill={(bill, index) => setViewBill({ bill, index })}
+            />
           )}
         </CardContent>
       </Card>

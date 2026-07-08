@@ -22,6 +22,19 @@ import { useRole } from "@/lib/role-context"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { motion } from "motion/react"
 
+interface StudyEntry {
+  name: string
+  category?: string
+  reportStatus: "pending" | "in_progress" | "completed"
+  reportBody?: string
+  reportSlug?: string
+  billId?: string
+  charges?: number
+  paid?: number
+  discount?: number
+  paymentMode?: string
+}
+
 interface PatientDoc {
   _id: string
   srNo: number
@@ -31,10 +44,33 @@ interface PatientDoc {
   contact: string
   referredBy: string
   study: string
+  studies?: StudyEntry[]
   reportStatus: "pending" | "in_progress" | "completed"
-  reportDocx?: string
   reportSlug?: string
   createdAt: string
+}
+
+// One table row per study of a patient — each study has its own report
+interface ReportRow {
+  p: PatientDoc
+  sidx: number
+  study: string
+  status: "pending" | "in_progress" | "completed"
+  slug?: string
+}
+
+function toRows(patients: PatientDoc[]): ReportRow[] {
+  return patients.flatMap((p) => {
+    const entries: StudyEntry[] = p.studies?.length
+      ? p.studies
+      : [{ name: p.study, reportStatus: p.reportStatus, reportSlug: p.reportSlug }]
+    return entries.map((s, sidx) => ({
+      p, sidx,
+      study:  s.name,
+      status: s.reportStatus ?? "pending",
+      slug:   s.reportSlug || (sidx === 0 ? p.reportSlug : undefined),
+    }))
+  })
 }
 
 function monthOf(d: string) {
@@ -44,20 +80,32 @@ function dateOf(d: string) {
   return new Date(d).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
 }
 
-function fillReportHref(p: PatientDoc, mode: "fill" | "edit" = "fill") {
+function fillReportHref(r: ReportRow, mode: "fill" | "edit" = "fill") {
   const params = new URLSearchParams({
-    id:      p._id,
-    patient: p.name,
-    study:   p.study,
-    refBy:   p.referredBy || "Self",
-    date:    dateOf(p.createdAt),
-    age:     String(p.age),
-    gender:  p.gender,
-    srNo:    String(p.srNo),
-    contact: p.contact,
+    id:      r.p._id,
+    sidx:    String(r.sidx),
+    patient: r.p.name,
+    study:   r.study,
+    refBy:   r.p.referredBy || "Self",
+    date:    dateOf(r.p.createdAt),
+    age:     String(r.p.age),
+    gender:  r.p.gender,
+    srNo:    String(r.p.srNo),
+    contact: r.p.contact,
     ...(mode === "edit" ? { load: "1" } : {}),
   })
   return `/reports/new?${params}`
+}
+
+function pdfUrlFor(r: ReportRow) {
+  return r.slug
+    ? `${window.location.origin}/${r.slug}/pdf`
+    : `${window.location.origin}/api/patients/${r.p._id}/pdf?sidx=${r.sidx}`
+}
+
+function whatsAppShare(r: ReportRow) {
+  const msg = `Dear ${r.p.name},\n\nYour *${r.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrlFor(r)}`
+  window.open(`https://wa.me/91${r.p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -95,11 +143,11 @@ function parseHtml(html: string): Seg[] {
   return segs
 }
 
-// ── Generate DOCX base64 from patient data + report HTML ─────────────────────
+// ── Generate DOCX base64 (fallback when no stored DOCX) ──────────────────────
+// Matches the clinic Word format: starts at the study heading, no letterhead.
 
-async function generateDocxBase64(p: PatientDoc, reportHtml: string): Promise<string> {
-  const { Document, Packer, Paragraph, TextRun, AlignmentType } = await import("docx")
-  const date = new Date(p.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
+async function generateDocxBase64(r: ReportRow, reportHtml: string): Promise<string> {
+  const { Document, Packer, Paragraph, TextRun, AlignmentType, Table, TableRow, TableCell, WidthType, BorderStyle } = await import("docx")
 
   const cleanHtml = reportHtml.replace(
     /<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1"
@@ -110,7 +158,7 @@ async function generateDocxBase64(p: PatientDoc, reportHtml: string): Promise<st
     const paras: InstanceType<typeof Paragraph>[] = []
     let line: InstanceType<typeof TextRun>[] = []
     const flush = () => {
-      paras.push(new Paragraph({ children: line.length ? line : [new TextRun({ text: "", size })] }))
+      paras.push(new Paragraph({ children: line.length ? line : [new TextRun({ text: "", size })], spacing: { after: 80 } }))
       line = []
     }
     segs.forEach((s) => {
@@ -121,25 +169,53 @@ async function generateDocxBase64(p: PatientDoc, reportHtml: string): Promise<st
     return paras.length ? paras : [new Paragraph({ children: [new TextRun({ text: "", size })] })]
   }
 
-  const infoLines: [string, string][] = [["NAME", p.name.toUpperCase()], ["DATE", date]]
-  if (p.age)     infoLines.push(["AGE",    `${p.age} YRS`])
-  if (p.contact) infoLines.push(["MOBILE", p.contact])
-  infoLines.push(["REF. BY", (p.referredBy || "SELF").toUpperCase()])
-  if (p.gender)  infoLines.push(["SEX",    p.gender.toUpperCase()])
-  if (p.srNo)    infoLines.push(["SR. NO", `#${p.srNo}`])
+  const noBorders = {
+    top: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+    bottom: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+    left: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+    right: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+    insideHorizontal: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+    insideVertical: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
+  }
 
   const children = [
-    new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "AARYA DIAGNOSTICS CENTER", bold: true, size: 32 })] }),
-    new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: "Shop No. 5, K. K. Smruti Building, S.N. Mehta Road, Ghatkopar (W) 400086  ·  Tel: 9819022444", size: 18, color: "666666" })] }),
-    new Paragraph({ children: [new TextRun("")] }),
-    ...infoLines.map(([l, v]) => new Paragraph({ children: [new TextRun({ text: `${l}: `, bold: true, size: 20 }), new TextRun({ text: v, size: 20 })] })),
-    new Paragraph({ children: [new TextRun("")] }),
-    new Paragraph({ alignment: AlignmentType.CENTER, children: [new TextRun({ text: p.study.toUpperCase(), bold: true, size: 24, underline: {} })] }),
-    new Paragraph({ children: [new TextRun("")] }),
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      children: [new TextRun({ text: r.study.toUpperCase(), bold: true, size: 26, underline: {} })],
+      spacing: { before: 120, after: 240 },
+    }),
     ...makeParas(cleanHtml),
+    new Paragraph({ children: [new TextRun("")], spacing: { before: 560 } }),
+    new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      borders: noBorders,
+      rows: [
+        new TableRow({
+          children: [
+            new TableCell({
+              width: { size: 50, type: WidthType.PERCENTAGE },
+              children: [
+                new Paragraph({ children: [new TextRun({ text: "DR. PRADNYA GORE", bold: true, size: 20 })], spacing: { after: 40 } }),
+                new Paragraph({ children: [new TextRun({ text: "CONSULTANT RADIOLOGIST", size: 16 })] }),
+              ],
+            }),
+            new TableCell({
+              width: { size: 50, type: WidthType.PERCENTAGE },
+              children: [
+                new Paragraph({ children: [new TextRun({ text: "DR. RAMNATH GHUTE", bold: true, size: 20 })], spacing: { after: 40 } }),
+                new Paragraph({ children: [new TextRun({ text: "CONSULTANT RADIOLOGIST", size: 16 })] }),
+                new Paragraph({ children: [new TextRun({ text: "M.D. RADIOLOGY", size: 16 })] }),
+              ],
+            }),
+          ],
+        }),
+      ],
+    }),
   ]
 
-  return await Packer.toBase64String(new Document({ sections: [{ children }] }))
+  return await Packer.toBase64String(new Document({
+    sections: [{ properties: { page: { margin: { top: 1080, bottom: 1080, left: 1440, right: 1440 } } }, children }],
+  }))
 }
 
 // ── Decode base64 DOCX and trigger download ───────────────────────────────────
@@ -156,58 +232,76 @@ function downloadDocx(base64: string, filename: string) {
   document.body.removeChild(a); URL.revokeObjectURL(url)
 }
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+// ── Fetch the report body for one study of a patient ─────────────────────────
 
-async function printReportDirect(p: PatientDoc) {
-  // Try localStorage first, then API
-  let reportBody = ""
-  const key = `aarya_report_${p.srNo || p.name.replace(/\s+/g, "_")}`
+async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: string }> {
+  // localStorage draft first (kept per study)
+  const key = `aarya_report_${r.p.srNo || r.p.name.replace(/\s+/g, "_")}${r.sidx > 0 ? `_s${r.sidx}` : ""}`
+  let body = ""
   try {
     const saved = JSON.parse(localStorage.getItem(key) || "null")
-    if (saved?.body) reportBody = saved.body
+    if (saved?.body) body = saved.body
   } catch {}
-  if (!reportBody) {
-    try {
-      const res = await fetch(`/api/patients/${p._id}`)
-      const d   = await res.json()
-      reportBody = d.patient?.reportBody ?? ""
-    } catch {}
-  }
 
-  const date    = new Date(p.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
+  let docx = ""
+  try {
+    const res = await fetch(`/api/patients/${r.p._id}`)
+    const d   = await res.json()
+    const entry = d.patient?.studies?.[r.sidx]
+    if (!body) body = entry?.reportBody || d.patient?.reportBody || ""
+    docx = entry?.reportDocx || (r.sidx === 0 ? d.patient?.reportDocx : "") || ""
+  } catch {}
+
+  return { body, docx }
+}
+
+// ── Print a submitted report directly ────────────────────────────────────────
+
+// Print output matches the Word file: starts directly at the study heading
+// (no letterhead / patient block — reports print on pre-printed stationery).
+async function printReportDirect(r: ReportRow) {
+  const { body: reportBody } = await fetchStudyReport(r)
+  const p = r.p
+
   const cleanBody = reportBody.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
-  const body    = cleanBody || "<em style='color:#aaa;font-size:12px'>No report content saved.</em>"
-
-  const infoData: [string, string][] = [["NAME", p.name.toUpperCase()], ["DATE", date]]
-  if (p.age)     infoData.push(["AGE",    `${p.age} YRS`])
-  if (p.contact) infoData.push(["MOBILE", p.contact])
-  infoData.push(["REF. BY", (p.referredBy || "SELF").toUpperCase()])
-  if (p.gender)  infoData.push(["SEX",    p.gender.toUpperCase()])
-  if (p.srNo)    infoData.push(["SR. NO", `#${p.srNo}`])
-
-  const infoHtml = infoData
-    .reduce<[string, string][][]>((rows, item, i) => {
-      if (i % 2 === 0) rows.push([item]); else rows[rows.length - 1].push(item)
-      return rows
-    }, [])
-    .map((pair) =>
-      `<div style="display:flex;gap:30px;margin-bottom:3px;">${pair
-        .map(([l, v]) => `<div style="display:flex;flex:1;gap:6px;font-size:9pt;"><span style="font-weight:bold;min-width:56px;">${l}:</span><span>${v}</span></div>`)
-        .join("")}</div>`
-    ).join("")
+  const body      = cleanBody || "<em style='color:#aaa;font-size:12px'>No report content saved.</em>"
 
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Report – ${p.name}</title>
 <style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.5;padding:15mm 20mm;color:#111;}@media print{body{padding:8mm 12mm;}}</style>
 </head><body>
-<div style="text-align:center;padding-bottom:10px;border-bottom:2px solid #111;margin-bottom:14px;">
-  <img src="${window.location.origin}/logo.jpeg" style="width:60px;height:60px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" />
-  <h1 style="font-size:15pt;font-weight:bold;text-transform:uppercase;letter-spacing:2px;">Aarya Diagnostics Center</h1>
-  <p style="font-size:9pt;color:#555;margin-top:4px;">Shop No. 5, K. K. Smruti Building, S.N. Mehta Road, Ghatkopar (W) 400086</p>
-  <p style="font-size:9pt;color:#555;">Tel: 9819022444 &nbsp;·&nbsp; aaryadiagnosticsmumbai@gmail.com</p>
+<div style="border-bottom: 1.5px solid #111; padding-bottom: 8px; margin-bottom: 14px; font-family: Arial, sans-serif; font-size: 9pt;">
+  <table style="width: 100%; border-collapse: collapse; border: none;">
+    <tr style="border: none;">
+      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>NAME:</strong> ${p.name.toUpperCase()}</td>
+      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>DATE:</strong> ${dateOf(p.createdAt)}</td>
+    </tr>
+    <tr style="border: none;">
+      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>AGE:</strong> ${p.age} YRS</td>
+      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>MOBILE:</strong> ${p.contact}</td>
+    </tr>
+    <tr style="border: none;">
+      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>REF. BY:</strong> ${(p.referredBy || "Self").toUpperCase()}</td>
+      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>SEX:</strong> ${p.gender.toUpperCase()}</td>
+    </tr>
+    <tr style="border: none;">
+      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>SR. NO:</strong> #${p.srNo}</td>
+      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"></td>
+    </tr>
+  </table>
 </div>
-<div style="border-bottom:1px solid #aaa;padding-bottom:10px;margin-bottom:12px;">${infoHtml}</div>
-<div style="text-align:center;font-weight:bold;font-size:12pt;text-transform:uppercase;text-decoration:underline;margin:12px 0 14px;">${p.study}</div>
+<div style="text-align:center;font-weight:bold;font-size:12pt;text-transform:uppercase;text-decoration:underline;margin:12px 0 18px;">${r.study}</div>
 <div style="font-size:10pt;line-height:1.6;">${body}</div>
+<div style="display:flex;gap:30px;margin-top:50px;">
+  <div style="flex:1;">
+    <p style="font-weight:bold;font-size:10pt;text-transform:uppercase;">DR. PRADNYA GORE</p>
+    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">Consultant Radiologist</p>
+  </div>
+  <div style="flex:1;">
+    <p style="font-weight:bold;font-size:10pt;text-transform:uppercase;">DR. RAMNATH GHUTE</p>
+    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">Consultant Radiologist</p>
+    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">M.D. Radiology</p>
+  </div>
+</div>
 </body></html>`
 
   const blob = new Blob([html], { type: "text/html" })
@@ -225,40 +319,35 @@ export default function ReportsPage() {
   const [search,       setSearch]       = useState("")
   const [monthFilter,  setMonthFilter]  = useState("All Months")
   const [statusFilter, setStatusFilter] = useState("all")
-  const [viewing,      setViewing]      = useState<PatientDoc | null>(null)
-  const [printingId,   setPrintingId]   = useState<string | null>(null)
-  const [downloadingId, setDownloadingId] = useState<string | null>(null)
+  const [viewing,      setViewing]      = useState<ReportRow | null>(null)
+  const [printingKey,   setPrintingKey]   = useState<string | null>(null)
+  const [downloadingKey, setDownloadingKey] = useState<string | null>(null)
 
-  const handlePrint = async (p: PatientDoc) => {
-    setPrintingId(p._id)
-    await printReportDirect(p)
-    setPrintingId(null)
+  const rowKey = (r: ReportRow) => `${r.p._id}_${r.sidx}`
+
+  const handlePrint = async (r: ReportRow) => {
+    setPrintingKey(rowKey(r))
+    await printReportDirect(r)
+    setPrintingKey(null)
   }
 
-  const handleDownloadDocx = async (p: PatientDoc) => {
-    setDownloadingId(p._id)
+  const handleDownloadDocx = async (r: ReportRow) => {
+    setDownloadingKey(rowKey(r))
     try {
-      const res  = await fetch(`/api/patients/${p._id}`)
-      const data = await res.json()
-      const patient = data.patient ?? {}
-
-      let base64: string = patient.reportDocx ?? ""
-
-      // Fallback: generate DOCX on-the-fly from saved report body
+      const { body, docx } = await fetchStudyReport(r)
+      let base64 = docx
       if (!base64) {
-        const reportBody: string = patient.reportBody ?? ""
-        if (!reportBody) {
-          alert("No report content found. The doctor has not submitted a report yet.")
+        if (!body) {
+          alert("No report content found. The report has not been submitted yet.")
           return
         }
-        base64 = await generateDocxBase64(p, reportBody)
+        base64 = await generateDocxBase64(r, body)
       }
-
-      downloadDocx(base64, `Report_${p.name.replace(/\s+/g, "_")}.docx`)
+      downloadDocx(base64, `Report_${r.p.name.replace(/\s+/g, "_")}_${r.study.replace(/[^A-Za-z0-9]+/g, "_")}.docx`)
     } catch {
       alert("Failed to download. Please try again.")
     } finally {
-      setDownloadingId(null)
+      setDownloadingKey(null)
     }
   }
 
@@ -270,40 +359,59 @@ export default function ReportsPage() {
       .finally(() => setLoading(false))
   }, [])
 
-  const isDoctor       = user?.role === "doctor"
-  const isReceptionist = user?.role === "receptionist"
+  // Everyone (receptionist, doctor, admin) can create and edit reports now
+  const canCreate = user?.permissions.reports.create ?? false
 
-  const uniqueMonths = Array.from(new Set(patients.map((p) => monthOf(p.createdAt))))
+  const allRows = toRows(patients)
+
+  const uniqueMonths = Array.from(new Set(allRows.map((r) => monthOf(r.p.createdAt))))
   const MONTHS = ["All Months", ...uniqueMonths]
 
-  const filtered = patients.filter((p) => {
+  const filtered = allRows.filter((r) => {
     const matchSearch = !search ||
-      p.name.toLowerCase().includes(search.toLowerCase()) ||
-      p.study.toLowerCase().includes(search.toLowerCase())
-    const matchMonth  = monthFilter === "All Months" || monthOf(p.createdAt) === monthFilter
-    const apiStatus   = p.reportStatus === "completed" ? "submitted" : p.reportStatus
+      r.p.name.toLowerCase().includes(search.toLowerCase()) ||
+      r.study.toLowerCase().includes(search.toLowerCase())
+    const matchMonth  = monthFilter === "All Months" || monthOf(r.p.createdAt) === monthFilter
+    const apiStatus   = r.status === "completed" ? "submitted" : r.status
     const matchStatus = statusFilter === "all" || apiStatus === statusFilter
     return matchSearch && matchMonth && matchStatus
   })
 
-  const submitted  = patients.filter((p) => p.reportStatus === "completed").length
-  const inProgress = patients.filter((p) => p.reportStatus === "in_progress").length
-  const pending    = patients.filter((p) => p.reportStatus === "pending").length
+  // Group contiguous rows by patient for visual threading
+  const groupedRows = filtered.reduce<{ patient: PatientDoc; rows: ReportRow[] }[]>((acc, r) => {
+    const last = acc[acc.length - 1]
+    if (last && last.patient._id === r.p._id) {
+      last.rows.push(r)
+    } else {
+      acc.push({ patient: r.p, rows: [r] })
+    }
+    return acc
+  }, [])
+
+  const submitted  = allRows.filter((r) => r.status === "completed").length
+  const inProgress = allRows.filter((r) => r.status === "in_progress").length
+  const pending    = allRows.filter((r) => r.status === "pending").length
 
   return (
     <>
       {/* View modal */}
-      {viewing && <ReportViewModal patient={viewing} onClose={() => setViewing(null)} />}
+      {viewing && (
+        <ReportViewModal
+          patient={{ ...viewing.p, study: viewing.study }}
+          sidx={viewing.sidx}
+          onClose={() => setViewing(null)}
+        />
+      )}
 
       <div className="space-y-5">
         <div>
           <h1 className="text-2xl font-bold">Reports</h1>
-          <p className="text-muted-foreground text-sm mt-0.5">Diagnostic reports for all patients</p>
+          <p className="text-muted-foreground text-sm mt-0.5">Each study has its own separate report — a patient can have several</p>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           {[
-            { border: "border-l-green-500",  label: "Submitted",   val: submitted,   extra: isReceptionist && <p className="text-xs text-green-600 mt-0.5">Ready to print</p> },
+            { border: "border-l-green-500",  label: "Submitted",   val: submitted,   extra: <p className="text-xs text-green-600 mt-0.5">Ready to print</p> },
             { border: "border-l-yellow-500", label: "In Progress", val: inProgress,  extra: null },
             { border: "border-l-slate-400",  label: "Pending",     val: pending,     extra: null },
           ].map(({ border, label, val, extra }, i) => (
@@ -331,26 +439,28 @@ export default function ReportsPage() {
                 <CardTitle className="text-base">All Reports</CardTitle>
                 <CardDescription>{loading ? "Loading..." : `${filtered.length} reports`}</CardDescription>
               </div>
-              <div className="flex flex-wrap gap-2">
-                <div className="relative w-48">
+              <div className="flex flex-col sm:flex-row gap-2.5 sm:items-center justify-end w-full sm:w-auto">
+                <div className="relative w-full sm:w-48">
                   <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                  <Input placeholder="Patient or study..." className="pl-9 h-9" value={search} onChange={(e) => setSearch(e.target.value)} />
+                  <Input placeholder="Patient or study..." className="pl-9 h-9 w-full" value={search} onChange={(e) => setSearch(e.target.value)} />
                 </div>
-                <Select value={monthFilter} onValueChange={setMonthFilter}>
-                  <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {MONTHS.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-                <Select value={statusFilter} onValueChange={setStatusFilter}>
-                  <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All Status</SelectItem>
-                    <SelectItem value="submitted">Submitted</SelectItem>
-                    <SelectItem value="in_progress">In Progress</SelectItem>
-                    <SelectItem value="pending">Pending</SelectItem>
-                  </SelectContent>
-                </Select>
+                <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center">
+                  <Select value={monthFilter} onValueChange={setMonthFilter}>
+                    <SelectTrigger className="h-9 w-full sm:w-36"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {MONTHS.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  <Select value={statusFilter} onValueChange={setStatusFilter}>
+                    <SelectTrigger className="h-9 w-full sm:w-36"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Status</SelectItem>
+                      <SelectItem value="submitted">Submitted</SelectItem>
+                      <SelectItem value="in_progress">In Progress</SelectItem>
+                      <SelectItem value="pending">Pending</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
             </div>
           </CardHeader>
@@ -382,162 +492,237 @@ export default function ReportsPage() {
                 ))}
               </div>
             ) : (
-              <div className="divide-y divide-border">
-                {filtered.length === 0 && (
+              <div className="px-4 pb-4 pt-1 space-y-3">
+                {groupedRows.length === 0 && (
                   <p className="text-center py-10 text-muted-foreground text-sm">No reports match your filters.</p>
                 )}
-                {filtered.map((p) => (
-                  <div key={p._id} className="flex items-center gap-4 px-5 py-4 hover:bg-muted/30 transition-colors">
-                    <div className="h-10 w-10 rounded-xl bg-purple-50 flex items-center justify-center shrink-0">
-                      <FileText className="h-5 w-5 text-purple-600" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap mb-1.5">
-                        <p className="font-semibold text-sm leading-none">{p.name}</p>
-                        <StatusBadge status={p.reportStatus} />
-                      </div>
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                          <Activity className="h-3 w-3 text-purple-400 shrink-0" />
-                          {p.study}
-                        </span>
-                        <span className="text-muted-foreground/30 text-xs hidden sm:inline">|</span>
-                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                          <User className="h-3 w-3 text-blue-400 shrink-0" />
-                          {p.referredBy || "Self"}
-                        </span>
-                        <span className="text-muted-foreground/30 text-xs hidden sm:inline">|</span>
-                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                          <Hash className="h-3 w-3 text-gray-400 shrink-0" />
-                          {p.srNo}
-                        </span>
-                        <span className="text-muted-foreground/30 text-xs hidden sm:inline">|</span>
-                        <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                          <CalendarDays className="h-3 w-3 text-green-400 shrink-0" />
-                          {dateOf(p.createdAt)}
-                        </span>
-                      </div>
-                    </div>
+                {groupedRows.map(({ patient, rows }) => {
+                  const first = rows[0]
+                  return (
+                    <div key={patient._id} className="rounded-xl border bg-background shadow-sm overflow-hidden">
+                      {/* Main patient row */}
+                      <div key={rowKey(first)} className="relative flex items-center gap-3 sm:gap-4 px-3 sm:px-5 py-4 hover:bg-muted/30 transition-colors">
+                        {rows.length > 1 && (
+                          <div className="absolute left-[31px] sm:left-[39px] top-[44px] bottom-0 w-0.5 bg-slate-200" />
+                        )}
+                        <div className="h-10 w-10 rounded-xl bg-purple-50 flex items-center justify-center shrink-0 relative z-10">
+                          <FileText className="h-5 w-5 text-purple-600" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap mb-1.5">
+                            <p className="font-semibold text-sm leading-none">{first.p.name}</p>
+                            <StatusBadge status={first.status} />
+                            {(first.p.studies?.length ?? 0) > 1 && (
+                              <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded font-medium">
+                                study {first.sidx + 1}/{first.p.studies!.length}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                              <Activity className="h-3 w-3 text-purple-400 shrink-0" />
+                              {first.study}
+                            </span>
+                            <span className="text-muted-foreground/30 text-xs hidden sm:inline">|</span>
+                            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                              <User className="h-3 w-3 text-blue-400 shrink-0" />
+                              {first.p.referredBy || "Self"}
+                            </span>
+                            <span className="text-muted-foreground/30 text-xs hidden sm:inline">|</span>
+                            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                              <Hash className="h-3 w-3 text-gray-400 shrink-0" />
+                              {first.p.srNo}
+                            </span>
+                            <span className="text-muted-foreground/30 text-xs hidden sm:inline">|</span>
+                            <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                              <CalendarDays className="h-3 w-3 text-green-400 shrink-0" />
+                              {dateOf(first.p.createdAt)}
+                            </span>
+                          </div>
+                        </div>
 
-                    <div className="flex items-center gap-1 shrink-0">
-                      {/* Receptionist: view (modal) + print + share */}
-                      {isReceptionist && p.reportStatus === "completed" && (
-                        <>
-                          <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => setViewing(p)}>
-                            <Eye className="h-3 w-3" />View
-                          </Button>
-                          <Button
-                            variant="outline" size="sm" className="h-7 text-xs gap-1"
-                            onClick={() => handlePrint(p)}
-                            disabled={printingId === p._id}
-                          >
-                            {printingId === p._id
-                              ? <Loader2 className="h-3 w-3 animate-spin" />
-                              : <Printer className="h-3 w-3" />}
-                            Print
-                          </Button>
-                          <Button size="sm" className="h-7 text-xs gap-1 bg-green-600 hover:bg-green-700"
-                            onClick={() => {
-                              const pdfUrl = p.reportSlug ? `${window.location.origin}/${p.reportSlug}/pdf` : `${window.location.origin}/api/patients/${p._id}/pdf`
-                              const msg = `Dear ${p.name},\n\nYour *${p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
-                              window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
-                            }}>
-                            <Share2 className="h-3 w-3" />
-                          </Button>
-                        </>
-                      )}
-
-                      {/* Doctor: fill / continue or view (modal) + edit */}
-                      {isDoctor && p.reportStatus !== "completed" && (
-                        <Button asChild size="sm" className="h-7 text-xs bg-blue-600 hover:bg-blue-700">
-                          <Link href={fillReportHref(p)}>
-                            {p.reportStatus === "in_progress" ? "Continue" : "Fill Report"}
-                          </Link>
-                        </Button>
-                      )}
-                      {isDoctor && p.reportStatus === "completed" && (
-                        <>
-                          <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => setViewing(p)}>
-                            <Eye className="h-3 w-3" />View
-                          </Button>
-                          <Button asChild variant="outline" size="sm" className="h-7 text-xs gap-1">
-                            <Link href={fillReportHref(p, "edit")}><FileText className="h-3 w-3" />Edit</Link>
-                          </Button>
-                        </>
-                      )}
-                      {isDoctor && (
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-8 w-8">
-                              {downloadingId === p._id
-                                ? <Loader2 className="h-4 w-4 animate-spin" />
-                                : <MoreHorizontal className="h-4 w-4" />}
+                        <div className="flex items-center gap-1 shrink-0">
+                          {/* Fill / continue — available to every role */}
+                          {canCreate && first.status !== "completed" && (
+                            <Button asChild size="sm" className="h-7 text-xs bg-blue-600 hover:bg-blue-700">
+                              <Link href={fillReportHref(first)}>
+                                {first.status === "in_progress" ? "Continue" : "Fill Report"}
+                              </Link>
                             </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem
-                              className="flex items-center gap-2"
-                              disabled={downloadingId === p._id || p.reportStatus !== "completed"}
-                              onClick={() => handleDownloadDocx(p)}
-                            >
-                              <Download className="h-3.5 w-3.5" />Download DOCX
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem className="flex items-center gap-2 text-green-700"
-                              onClick={() => {
-                                const pdfUrl = p.reportSlug ? `${window.location.origin}/${p.reportSlug}/pdf` : `${window.location.origin}/api/patients/${p._id}/pdf`
-                                const msg = `Dear ${p.name},\n\nYour *${p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
-                                window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
-                              }}>
-                              <Share2 className="h-3.5 w-3.5" />Share on WhatsApp
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      )}
+                          )}
 
-                      {/* Admin: all options */}
-                      {!isDoctor && !isReceptionist && (
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-8 w-8">
-                              {downloadingId === p._id
-                                ? <Loader2 className="h-4 w-4 animate-spin" />
-                                : <MoreHorizontal className="h-4 w-4" />}
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem className="flex items-center gap-2" onClick={() => setViewing(p)}>
-                              <Eye className="h-3.5 w-3.5" />View Report
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              className="flex items-center gap-2"
-                              onClick={() => handlePrint(p)}
-                              disabled={p.reportStatus !== "completed"}
-                            >
-                              <Printer className="h-3.5 w-3.5" />Print
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              className="flex items-center gap-2"
-                              disabled={downloadingId === p._id || p.reportStatus !== "completed"}
-                              onClick={() => handleDownloadDocx(p)}
-                            >
-                              <Download className="h-3.5 w-3.5" />Download DOCX
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem className="flex items-center gap-2 text-green-700"
-                              onClick={() => {
-                                const pdfUrl = p.reportSlug ? `${window.location.origin}/${p.reportSlug}/pdf` : `${window.location.origin}/api/patients/${p._id}/pdf`
-                                const msg = `Dear ${p.name},\n\nYour *${p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
-                                window.open(`https://wa.me/91${p.contact}?text=${encodeURIComponent(msg)}`, "_blank")
-                              }}>
-                              <Share2 className="h-3.5 w-3.5" />Share on WhatsApp
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      )}
+                          {first.status === "completed" && (
+                            <>
+                              <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => setViewing(first)}>
+                                <Eye className="h-3 w-3" />View
+                              </Button>
+                              {canCreate && (
+                                <Button asChild variant="outline" size="sm" className="hidden sm:flex h-7 text-xs gap-1">
+                                  <Link href={fillReportHref(first, "edit")}><FileText className="h-3 w-3" />Edit</Link>
+                                </Button>
+                              )}
+                              <Button
+                                variant="outline" size="sm" className="hidden sm:flex h-7 text-xs gap-1"
+                                onClick={() => handlePrint(first)}
+                                disabled={printingKey === rowKey(first)}
+                              >
+                                {printingKey === rowKey(first)
+                                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                                  : <Printer className="h-3 w-3" />}
+                                Print
+                              </Button>
+                              <Button size="sm" className="hidden sm:flex h-7 text-xs gap-1 bg-green-600 hover:bg-green-700" onClick={() => whatsAppShare(first)}>
+                                <Share2 className="h-3 w-3" />
+                              </Button>
+                            </>
+                          )}
+
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon" className="h-8 w-8">
+                                {downloadingKey === rowKey(first)
+                                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                                  : <MoreHorizontal className="h-4 w-4" />}
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                className="flex items-center gap-2"
+                                onClick={() => first.status === "completed" && setViewing(first)}
+                                disabled={first.status !== "completed"}
+                              >
+                                <Eye className="h-3.5 w-3.5" />View Report
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                className="flex items-center gap-2"
+                                disabled={downloadingKey === rowKey(first) || first.status !== "completed"}
+                                onClick={() => handleDownloadDocx(first)}
+                              >
+                                <Download className="h-3.5 w-3.5" />Download DOCX
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem className="flex items-center gap-2 text-green-700" onClick={() => whatsAppShare(first)}>
+                                <Share2 className="h-3.5 w-3.5" />Share on WhatsApp
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+                      </div>
+
+                      {/* Nested study rows (2nd study onwards) — threaded under the patient */}
+                      {rows.slice(1).map((r, idx) => (
+                        <div key={rowKey(r)} className="relative flex items-center gap-2 sm:gap-4 pl-10 sm:pl-[56px] pr-3 sm:pr-5 py-3 bg-slate-50 hover:bg-slate-100/80 transition-colors border-t border-border/60">
+                          {idx < rows.length - 2 && (
+                            <div className="absolute left-[31px] sm:left-[39px] top-0 bottom-0 w-0.5 bg-slate-200" />
+                          )}
+                          <div className="absolute left-[31px] sm:left-[39px] top-0 w-3.5 sm:w-[18px] h-[26px] border-l-2 border-b-2 border-slate-200 rounded-bl-lg" />
+                          
+                          <div className="h-7 w-7 rounded-lg bg-purple-100/50 flex items-center justify-center shrink-0 relative z-10">
+                            <FileText className="h-4 w-4 text-purple-500" />
+                          </div>
+                          
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap mb-1">
+                              <p className="font-medium text-sm text-slate-700">{r.p.name}</p>
+                              <StatusBadge status={r.status} />
+                              <span className="text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded font-medium">
+                                study {r.sidx + 1}/{r.p.studies?.length || 1}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <Activity className="h-3 w-3 text-purple-400 shrink-0" />
+                                {r.study}
+                              </span>
+                              <span className="text-muted-foreground/30 text-[10px]">|</span>
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <User className="h-3 w-3 text-blue-400 shrink-0" />
+                                {r.p.referredBy || "Self"}
+                              </span>
+                              <span className="text-muted-foreground/30 text-[10px]">|</span>
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <Hash className="h-3 w-3 text-gray-400 shrink-0" />
+                                {r.p.srNo}
+                              </span>
+                              <span className="text-muted-foreground/30 text-[10px]">|</span>
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                                <CalendarDays className="h-3 w-3 text-green-400 shrink-0" />
+                                {dateOf(r.p.createdAt)}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0">
+                            {/* Fill / continue — available to every role */}
+                            {canCreate && r.status !== "completed" && (
+                              <Button asChild size="sm" className="h-7 text-xs bg-blue-600 hover:bg-blue-700">
+                                <Link href={fillReportHref(r)}>
+                                  {r.status === "in_progress" ? "Continue" : "Fill Report"}
+                                </Link>
+                              </Button>
+                            )}
+
+                            {r.status === "completed" && (
+                              <>
+                                <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={() => setViewing(r)}>
+                                  <Eye className="h-3 w-3" />View
+                                </Button>
+                                {canCreate && (
+                                  <Button asChild variant="outline" size="sm" className="hidden sm:flex h-7 text-xs gap-1">
+                                    <Link href={fillReportHref(r, "edit")}><FileText className="h-3 w-3" />Edit</Link>
+                                  </Button>
+                                )}
+                                <Button
+                                  variant="outline" size="sm" className="hidden sm:flex h-7 text-xs gap-1"
+                                  onClick={() => handlePrint(r)}
+                                  disabled={printingKey === rowKey(r)}
+                                >
+                                  {printingKey === rowKey(r)
+                                    ? <Loader2 className="h-3 w-3 animate-spin" />
+                                    : <Printer className="h-3 w-3" />}
+                                  Print
+                                </Button>
+                                <Button size="sm" className="hidden sm:flex h-7 text-xs gap-1 bg-green-600 hover:bg-green-700" onClick={() => whatsAppShare(r)}>
+                                  <Share2 className="h-3 w-3" />
+                                </Button>
+                              </>
+                            )}
+
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <Button variant="ghost" size="icon" className="h-8 w-8">
+                                  {downloadingKey === rowKey(r)
+                                    ? <Loader2 className="h-4 w-4 animate-spin" />
+                                    : <MoreHorizontal className="h-4 w-4" />}
+                                </Button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuItem
+                                  className="flex items-center gap-2"
+                                  onClick={() => r.status === "completed" && setViewing(r)}
+                                  disabled={r.status !== "completed"}
+                                >
+                                  <Eye className="h-3.5 w-3.5" />View Report
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  className="flex items-center gap-2"
+                                  disabled={downloadingKey === rowKey(r) || r.status !== "completed"}
+                                  onClick={() => handleDownloadDocx(r)}
+                                >
+                                  <Download className="h-3.5 w-3.5" />Download DOCX
+                                </DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem className="flex items-center gap-2 text-green-700" onClick={() => whatsAppShare(r)}>
+                                  <Share2 className="h-3.5 w-3.5" />Share on WhatsApp
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </CardContent>

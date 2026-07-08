@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react"
 import { Input } from "@/components/ui/input"
-import { STUDY_CATALOGUE, autoCategory } from "@/lib/study-catalogue"
+import { autoCategory } from "@/lib/study-catalogue"
 
 // ─── Shared doctor list (persisted in localStorage) ──────────────────────────
 export const INITIAL_DOCTORS = [
@@ -86,11 +86,7 @@ export function ComboInput({
 const CAT_COLORS: Record<string, string> = {
   "Sonography":  "bg-blue-100 text-blue-700",
   "X-Ray":       "bg-orange-100 text-orange-700",
-  "Blood Test":  "bg-red-100 text-red-700",
   "Pathology":   "bg-purple-100 text-purple-700",
-  "MRI":         "bg-indigo-100 text-indigo-700",
-  "CT Scan":     "bg-cyan-100 text-cyan-700",
-  "Cardiology":  "bg-pink-100 text-pink-700",
   "Other":       "bg-gray-100 text-gray-600",
 }
 
@@ -113,13 +109,22 @@ export function StudyComboInput({
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
-  // Merge DB studies with catalogue — DB takes precedence for same name
-  const allStudies: StudyOption[] = (() => {
-    if (!dbStudies || dbStudies.length === 0) return STUDY_CATALOGUE
-    const dbNames = new Set(dbStudies.map((s) => s.name))
-    const catalogueOnly = STUDY_CATALOGUE.filter((s) => !dbNames.has(s.name))
-    return [...dbStudies, ...catalogueOnly]
-  })()
+  // Suggestions come only from the studies saved in the database.
+  // If the caller doesn't supply them, fetch once on mount.
+  const [fetchedStudies, setFetchedStudies] = useState<StudyOption[]>([])
+  useEffect(() => {
+    if (dbStudies) return
+    fetch("/api/studies")
+      .then((r) => r.json())
+      .then((d) => setFetchedStudies(
+        (d.studies || []).map((s: { name: string; price: number; category: string }) =>
+          ({ name: s.name, price: s.price, category: s.category }))
+      ))
+      .catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const allStudies: StudyOption[] = dbStudies ?? fetchedStudies
 
   const filtered = value.trim().length === 0
     ? allStudies

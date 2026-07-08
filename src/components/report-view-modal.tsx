@@ -4,6 +4,18 @@ import { useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { X, Printer, Share2, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { reportHeaderHtml, reportTitleHtml, drawPdfReportHeader, drawPdfReportTitle } from "@/lib/report-layout"
+import { REPORT_TEMPLATES } from "@/lib/report-templates"
+
+const getDisplayTitle = (studyName: string) => {
+  if (!studyName) return ""
+  for (const cat of Object.keys(REPORT_TEMPLATES)) {
+    const list = REPORT_TEMPLATES[cat as keyof typeof REPORT_TEMPLATES]
+    const found = list.find(t => t.name.toLowerCase() === studyName.toLowerCase())
+    if (found) return found.heading
+  }
+  return studyName
+}
 
 export interface ViewablePatient {
   _id: string
@@ -23,9 +35,11 @@ function dateOf(d: string) {
 
 export function ReportViewModal({
   patient,
+  sidx = 0,
   onClose,
 }: {
   patient: ViewablePatient
+  sidx?: number          // which study of the patient (each study has its own report)
   onClose: () => void
 }) {
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -37,9 +51,9 @@ export function ReportViewModal({
 
   useEffect(() => { setMounted(true) }, [])
 
-  // Load: localStorage first, then MongoDB fallback
+  // Load: localStorage first, then MongoDB fallback (per study)
   useEffect(() => {
-    const key = `aarya_report_${patient.srNo || patient.name.replace(/\s+/g, "_")}`
+    const key = `aarya_report_${patient.srNo || patient.name.replace(/\s+/g, "_")}${sidx > 0 ? `_s${sidx}` : ""}`
     try {
       const saved = JSON.parse(localStorage.getItem(key) || "null")
       if (saved?.body) {
@@ -50,10 +64,10 @@ export function ReportViewModal({
     } catch {}
     fetch(`/api/patients/${patient._id}`)
       .then((r) => r.json())
-      .then((d) => setReportBody(d.patient?.reportBody ?? ""))
+      .then((d) => setReportBody(d.patient?.studies?.[sidx]?.reportBody || d.patient?.reportBody || ""))
       .catch(() => setReportBody(""))
       .finally(() => setLoading(false))
-  }, [patient])
+  }, [patient, sidx])
 
   // Render HTML into the body div after load — strip edit-attribution markers for clean display
   useEffect(() => {
@@ -95,48 +109,26 @@ export function ReportViewModal({
       const ln = (pt: number) => pt * 0.352778 * 1.4
       const checkPage = (need = 8) => { if (y + need > 282) { doc.addPage(); y = 18 } }
 
-      doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(0)
-      doc.text("AARYA DIAGNOSTICS CENTER", W / 2, y, { align: "center" }); y += ln(16)
-      doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(100)
-      doc.text("Shop No. 5, K. K. Smruti Building, S.N. Mehta Road, Ghatkopar (W) 400086", W / 2, y, { align: "center" }); y += ln(8)
-      doc.text("Tel: 9819022444   ·   aaryadiagnosticsmumbai@gmail.com", W / 2, y, { align: "center" }); y += ln(8) + 2
-      doc.setDrawColor(0); doc.setLineWidth(0.5); doc.line(M, y, W - M, y); y += 5
-
-      doc.setTextColor(0)
-      const info: [string, string][] = [["NAME", patient.name.toUpperCase()], ["DATE", date]]
-      if (patient.age)     info.push(["AGE",    `${patient.age} YRS`])
-      if (patient.contact) info.push(["MOBILE", patient.contact])
-      info.push(["REF. BY", (patient.referredBy || "SELF").toUpperCase()])
-      if (patient.gender)  info.push(["SEX",    patient.gender.toUpperCase()])
-      if (patient.srNo)    info.push(["SR. NO", `#${patient.srNo}`])
-      for (let i = 0; i < info.length; i += 2) {
-        const [ll, lv] = info[i]
-        doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.text(`${ll}:`, M, y)
-        doc.setFont("helvetica", "normal"); doc.text(lv, M + doc.getTextWidth(`${ll}:`) + 1.5, y)
-        if (info[i + 1]) {
-          const [rl, rv] = info[i + 1]; const rx = W / 2 + 5
-          doc.setFont("helvetica", "bold"); doc.text(`${rl}:`, rx, y)
-          doc.setFont("helvetica", "normal"); doc.text(rv, rx + doc.getTextWidth(`${rl}:`) + 1.5, y)
-        }
-        y += ln(9) + 0.4
-      }
-      y += 2; doc.setDrawColor(180); doc.setLineWidth(0.2); doc.line(M, y, W - M, y); y += 7
-
-      doc.setFont("helvetica", "bold"); doc.setFontSize(12); doc.setTextColor(0)
-      doc.text(patient.study.toUpperCase(), W / 2, y, { align: "center" })
-      const sw = doc.getTextWidth(patient.study.toUpperCase())
-      doc.setDrawColor(0); doc.setLineWidth(0.3); doc.line((W - sw) / 2, y + 1, (W + sw) / 2, y + 1)
-      y += ln(12) + 5
+      // The PDF matches the printed report design: double-bordered patient
+      // info box, then the bordered underlined study heading
+      y = drawPdfReportHeader(doc, {
+        name: patient.name, refBy: patient.referredBy, date,
+        age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined,
+      })
+      y = drawPdfReportTitle(doc, getDisplayTitle(patient.study), y)
 
       const { renderHtmlToPdf } = await import("@/lib/pdf-html-renderer")
       y = renderHtmlToPdf(doc, bodyHtml, M, CW, y, checkPage, 5.5)
 
-      checkPage(24); y += 10
-      doc.setDrawColor(180); doc.setLineWidth(0.3); doc.line(M, y, M + 60, y); y += 4
+      // Two-doctor signature block, matching the Word format
+      checkPage(28); y += 22
       doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(0)
-      doc.text("DR. RAMESH MEHTA", M, y); y += ln(9)
-      doc.setFont("helvetica", "normal"); doc.setFontSize(8); doc.setTextColor(100)
-      doc.text("Consultant Radiologist", M, y)
+      doc.text("DR. PRADNYA GORE", M, y)
+      doc.text("DR. RAMNATH GHUTE", W / 2 + 5, y); y += ln(9)
+      doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(60)
+      doc.text("CONSULTANT RADIOLOGIST", M, y)
+      doc.text("CONSULTANT RADIOLOGIST", W / 2 + 5, y); y += ln(7.5)
+      doc.text("M.D. RADIOLOGY", W / 2 + 5, y)
 
       const pdfBlob   = doc.output("blob")
       const arrayBuf  = await pdfBlob.arrayBuffer()
@@ -147,13 +139,28 @@ export function ReportViewModal({
       const res  = await fetch(`/api/patients/${patient._id}`, {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ reportPdf: base64 }),
+        body:    JSON.stringify({ reportPdf: base64, studyIndex: sidx }),
       })
       const data = await res.json()
-      const slug = data?.patient?.reportSlug
+      const slug = data?.patient?.studies?.[sidx]?.reportSlug || data?.patient?.reportSlug
       const pdfUrl = slug
         ? `${window.location.origin}/${slug}/pdf`
-        : `${window.location.origin}/api/patients/${patient._id}/pdf`
+        : `${window.location.origin}/api/patients/${patient._id}/pdf?sidx=${sidx}`
+
+      // Mobile Direct Share
+      if (navigator.share && navigator.canShare) {
+        const file = new File([pdfBlob], `Report_${patient.name.replace(/\s+/g, "_")}.pdf`, { type: "application/pdf" })
+        if (navigator.canShare({ files: [file] })) {
+          await navigator.share({
+            files: [file],
+            title: `Report - ${patient.name}`,
+            text: `Dear ${patient.name}, your ${patient.study} report from Aarya Diagnostics Center is ready.`,
+          })
+          setShareLoading(false)
+          return
+        }
+      }
+
       const msg  = `Dear ${patient.name},\n\nYour *${patient.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
       const waUrl = num ? `https://wa.me/91${num}?text=${encodeURIComponent(msg)}` : `https://wa.me/?text=${encodeURIComponent(msg)}`
       setShareLoading(false)
@@ -164,42 +171,30 @@ export function ReportViewModal({
     setShareLoading(false)
   }
 
+  // Print output matches the printed report design: double-bordered patient
+  // info box, bordered underlined study heading, body and signatures.
   const handlePrint = () => {
     const stripEditMarks = (html: string) =>
       html.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
     const currentBody = stripEditMarks(bodyRef.current?.innerHTML || reportBody)
-    const infoRows: [string, string][] = [["NAME", patient.name.toUpperCase()], ["DATE", date]]
-    if (patient.age)     infoRows.push(["AGE",    `${patient.age} YRS`])
-    if (patient.contact) infoRows.push(["MOBILE", patient.contact])
-    infoRows.push(["REF. BY", (patient.referredBy || "SELF").toUpperCase()])
-    if (patient.gender)  infoRows.push(["SEX",    patient.gender.toUpperCase()])
-    if (patient.srNo)    infoRows.push(["SR. NO", `#${patient.srNo}`])
-
-    const infoHtml = infoRows
-      .reduce<[string, string][][]>((rows, item, i) => {
-        if (i % 2 === 0) rows.push([item])
-        else rows[rows.length - 1].push(item)
-        return rows
-      }, [])
-      .map(
-        (pair) => `<div style="display:flex;gap:30px;margin-bottom:3px;">${pair
-          .map(([l, v]) => `<div style="display:flex;flex:1;gap:6px;font-size:9pt;"><span style="font-weight:bold;min-width:56px;">${l}:</span><span>${v}</span></div>`)
-          .join("")}</div>`
-      )
-      .join("")
 
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Report – ${patient.name}</title>
 <style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.5;padding:15mm 20mm;color:#111;}@media print{body{padding:8mm 12mm;}}</style>
 </head><body>
-<div style="text-align:center;padding-bottom:10px;border-bottom:2px solid #111;margin-bottom:14px;">
-  <img src="${window.location.origin}/logo.jpeg" style="width:60px;height:60px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" />
-  <h1 style="font-size:15pt;font-weight:bold;text-transform:uppercase;letter-spacing:2px;">Aarya Diagnostics Center</h1>
-  <p style="font-size:9pt;color:#555;margin-top:4px;">Shop No. 5, K. K. Smruti Building, S.N. Mehta Road, Ghatkopar (W) 400086</p>
-  <p style="font-size:9pt;color:#555;">Tel: 9819022444 &nbsp;·&nbsp; aaryadiagnosticsmumbai@gmail.com</p>
-</div>
-<div style="border-bottom:1px solid #aaa;padding-bottom:10px;margin-bottom:12px;">${infoHtml}</div>
-<div style="text-align:center;font-weight:bold;font-size:12pt;text-transform:uppercase;text-decoration:underline;margin:12px 0 14px;">${patient.study}</div>
+${reportHeaderHtml({ name: patient.name, refBy: patient.referredBy, date, age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined })}
+${reportTitleHtml(getDisplayTitle(patient.study))}
 <div style="font-size:10pt;line-height:1.6;">${currentBody}</div>
+<div style="display:flex;gap:30px;margin-top:80px;">
+  <div style="flex:1;">
+    <p style="font-weight:bold;font-size:10pt;text-transform:uppercase;">DR. PRADNYA GORE</p>
+    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">Consultant Radiologist</p>
+  </div>
+  <div style="flex:1;">
+    <p style="font-weight:bold;font-size:10pt;text-transform:uppercase;">DR. RAMNATH GHUTE</p>
+    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">Consultant Radiologist</p>
+    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">M.D. Radiology</p>
+  </div>
+</div>
 </body></html>`
 
     const blob = new Blob([html], { type: "text/html" })
@@ -221,14 +216,14 @@ export function ReportViewModal({
       <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden mx-2 sm:mx-0">
 
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-3 border-b bg-white shrink-0">
-          <div>
-            <p className="font-semibold text-sm">{patient.name} — {patient.study}</p>
-            <p className="text-xs text-muted-foreground">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between px-4 sm:px-5 py-3 border-b bg-white shrink-0 gap-2 sm:gap-0">
+          <div className="min-w-0">
+            <p className="font-semibold text-sm truncate">{patient.name} — {patient.study}</p>
+            <p className="text-xs text-muted-foreground truncate">
               #{patient.srNo} · {date} · Ref: {patient.referredBy || "Self"}
             </p>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 justify-end shrink-0">
             <Button variant="outline" size="sm" className="h-7 text-xs gap-1" onClick={handlePrint}>
               <Printer className="h-3 w-3" />Print
             </Button>
@@ -249,39 +244,27 @@ export function ReportViewModal({
               <div className="h-6 w-6 rounded-full border-2 border-blue-600 border-t-transparent animate-spin" />
             </div>
           ) : (
-            <div className="max-w-[680px] mx-auto bg-white shadow-lg rounded-sm px-12 py-10">
+            <div className="max-w-[680px] mx-auto bg-white shadow-lg rounded-sm px-4 sm:px-12 py-6 sm:py-10">
 
-              {/* Letterhead */}
-              <div className="text-center pb-4 border-b-2 border-gray-900 mb-5">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src="/logo.jpeg" alt="Aarya" className="h-14 w-14 rounded-full object-cover mx-auto mb-2" />
-                <h1 className="text-lg font-bold uppercase tracking-widest text-gray-900">
-                  Aarya Diagnostics Center
-                </h1>
-                <p className="text-[10px] text-gray-500 mt-1">
-                  Shop No. 5, K. K. Smruti Building, S.N. Mehta Road, Ghatkopar (W) 400086
-                </p>
-                <p className="text-[10px] text-gray-500 mt-0.5">
-                  Tel: 9819022444 &nbsp;·&nbsp; aaryadiagnosticsmumbai@gmail.com
-                </p>
-              </div>
-
-              {/* Patient info */}
-              <div className="border-b border-gray-300 pb-3 mb-4">
-                <div className="grid grid-cols-2 gap-x-8 gap-y-1 text-xs text-gray-900">
-                  <div className="flex gap-2"><span className="font-bold w-16 shrink-0">NAME:</span><span>{patient.name.toUpperCase()}</span></div>
-                  <div className="flex gap-2"><span className="font-bold w-16 shrink-0">DATE:</span><span>{date}</span></div>
-                  {patient.age > 0 && <div className="flex gap-2"><span className="font-bold w-16 shrink-0">AGE:</span><span>{patient.age} YRS</span></div>}
-                  {patient.contact && <div className="flex gap-2"><span className="font-bold w-16 shrink-0">MOBILE:</span><span>{patient.contact}</span></div>}
-                  <div className="flex gap-2"><span className="font-bold w-16 shrink-0">REF. BY:</span><span>{(patient.referredBy || "SELF").toUpperCase()}</span></div>
-                  {patient.gender && <div className="flex gap-2"><span className="font-bold w-16 shrink-0">SEX:</span><span>{patient.gender.toUpperCase()}</span></div>}
-                  {patient.srNo > 0 && <div className="flex gap-2"><span className="font-bold w-16 shrink-0">SR. NO:</span><span>#{patient.srNo}</span></div>}
+              {/* Patient info — matches the printed report header */}
+              <div className="border-4 border-double border-gray-700 px-3 sm:px-4 py-2.5 sm:py-3 mb-5 flex flex-col sm:flex-row justify-between gap-3 sm:gap-4 text-xs font-bold text-gray-900">
+                <div className="space-y-1 min-w-0">
+                  <p className="truncate">NAME - {patient.name.toUpperCase()}</p>
+                  <p className="truncate">REF. BY - {(patient.referredBy || "SELF").toUpperCase()}</p>
+                  {patient.srNo > 0 && <p>SR. NO - #{patient.srNo}</p>}
+                </div>
+                <div className="space-y-1 shrink-0">
+                  <p>DATE - {date}</p>
+                  <p>AGE - {patient.age ? `${patient.age} YRS` : "—"}</p>
+                  <p>SEX - {(patient.gender || "—").toUpperCase()}</p>
                 </div>
               </div>
 
-              {/* Study title */}
-              <div className="text-center font-bold uppercase text-sm py-1 underline underline-offset-4 tracking-wide mb-5 text-gray-900">
-                {patient.study}
+              {/* Study title — boxed like the printed report */}
+              <div className="flex justify-center mb-5">
+                <div className="text-center font-bold uppercase text-sm py-1.5 px-8 border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900">
+                  {getDisplayTitle(patient.study)}
+                </div>
               </div>
 
               {/* Report body */}
@@ -289,6 +272,19 @@ export function ReportViewModal({
                 ref={bodyRef}
                 className="text-sm leading-relaxed text-gray-900 min-h-[200px]"
               />
+
+              {/* Two-doctor signature block — matches print / Word */}
+              <div className="mt-24 grid grid-cols-2 gap-8 select-none text-gray-900">
+                <div>
+                  <p className="font-bold text-xs uppercase">DR. PRADNYA GORE</p>
+                  <p className="text-[10px] uppercase text-gray-600 mt-0.5">Consultant Radiologist</p>
+                </div>
+                <div>
+                  <p className="font-bold text-xs uppercase">DR. RAMNATH GHUTE</p>
+                  <p className="text-[10px] uppercase text-gray-600 mt-0.5">Consultant Radiologist</p>
+                  <p className="text-[10px] uppercase text-gray-600">M.D. Radiology</p>
+                </div>
+              </div>
             </div>
           )}
         </div>
