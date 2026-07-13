@@ -1,12 +1,14 @@
 "use client"
 
-import { Suspense, useRef, useState, useEffect } from "react"
+import { Suspense, useRef, useState, useEffect, useCallback } from "react"
 import { useSearchParams } from "next/navigation"
 import Link from "next/link"
 import {
   ArrowLeft, Download, CheckCircle2, Loader2,
   Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
   List, Share2, Pencil, LayoutTemplate, Minus, Plus, ChevronDown, ChevronUp,
+  ChevronLeft, ChevronRight,
+  Search, X, Upload, PenTool,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -18,7 +20,10 @@ import { ComboInput, StudyComboInput, getSavedDoctors, saveDoctor } from "@/comp
 import { useRole } from "@/lib/role-context"
 import { motion, AnimatePresence } from "framer-motion"
 import { REPORT_TEMPLATES, ReportTemplate, TemplateCategory } from "@/lib/report-templates"
-import { reportHeaderHtml, reportTitleHtml, drawPdfReportHeader, drawPdfReportTitle } from "@/lib/report-layout"
+import { reportHeaderHtml, reportTitleHtml, printShellHtml, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX } from "@/lib/report-layout"
+import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, dataUrlToBytes, imageFormat, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
+import { SignatureColumns } from "@/components/signature-columns"
+import { SignaturePadDialog } from "@/components/signature-pad-dialog"
 
 const SAMPLE_PATIENTS = [
   "Ramesh Kumar (P-1046)", "Priya Sharma (P-1045)", "Arjun Patel (P-1044)",
@@ -27,23 +32,44 @@ const SAMPLE_PATIENTS = [
 
 // ── HTML ↔ DOCX formatting helpers ───────────────────────────────────────────
 
-type Seg = { text: string; bold?: boolean; italic?: boolean; underline?: boolean }
+type Seg = {
+  text: string; bold?: boolean; italic?: boolean; underline?: boolean; font?: string
+  image?: string; imgWidth?: number; imgHeight?: number
+}
+
+// Reads the font a run was set to via execCommand("fontName", ...), which
+// Chrome/Firefox represent as a legacy <font face="..."> wrapper.
+function fontOf(el: HTMLElement): string | undefined {
+  if (el.tagName.toLowerCase() === "font" && el.getAttribute("face")) return el.getAttribute("face") || undefined
+  const styleFont = el.style?.fontFamily
+  return styleFont ? styleFont.split(",")[0].trim().replace(/^["']|["']$/g, "") : undefined
+}
 
 function parseHtml(html: string): Seg[] {
   const segs: Seg[] = []
   if (typeof window === "undefined") return [{ text: html }]
   const doc = new DOMParser().parseFromString(html, "text/html")
-  function walk(node: Node, fmt: { bold: boolean; italic: boolean; underline: boolean }) {
+  function walk(node: Node, fmt: { bold: boolean; italic: boolean; underline: boolean; font?: string }) {
     if (node.nodeType === 3) {
       const t = node.textContent ?? ""
       if (t) segs.push({ text: t, ...fmt })
     } else if (node.nodeType === 1) {
-      const el = node as Element
+      const el = node as HTMLElement
       const tag = el.tagName.toLowerCase()
+      if (tag === "img") {
+        const src = el.getAttribute("src") || ""
+        if (src) {
+          const w = parseFloat(el.style.width) || parseFloat(el.getAttribute("width") || "") || 0
+          const h = parseFloat(el.style.height) || parseFloat(el.getAttribute("height") || "") || 0
+          segs.push({ text: "", image: src, imgWidth: w, imgHeight: h })
+        }
+        return
+      }
       const f = { ...fmt }
       if (tag === "b" || tag === "strong") f.bold = true
       if (tag === "i" || tag === "em")     f.italic = true
       if (tag === "u")                     f.underline = true
+      f.font = fontOf(el) ?? f.font
       el.childNodes.forEach((c) => walk(c, f))
       if (["div", "p", "br", "li"].includes(tag)) segs.push({ text: "\n" })
     }
@@ -120,42 +146,29 @@ function markChanges(originalHtml: string, newHtml: string, editorName?: string,
 // then the bordered underlined study heading, body and signatures.
 function buildPrintHtml(opts: {
   patient: string; study: string; body: string; age?: string; gender?: string; contact?: string; refBy?: string; date?: string; srNo?: string
+  signatories: Signatory[]
+  signatureLayouts?: (SignatureLayout | null | undefined)[]
 }): string {
-  const { patient, study, body, age, gender, refBy, date, srNo } = opts
+  const { patient, study, body, age, gender, refBy, date, srNo, signatories, signatureLayouts } = opts
   const displayDate = date || new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Report – ${patient}</title>
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5; padding: 15mm 20mm; color: #111; }
-.sigs { display: flex; gap: 30px; margin-top: 80px; }
-.sig { flex: 1; }
-.sig-name { font-weight: bold; font-size: 10pt; text-transform: uppercase; }
-.sig-title { font-size: 8pt; color: #333; margin-top: 2px; text-transform: uppercase; }
-@media print { body { padding: 8mm 12mm; } }
-</style></head><body>
+  const extraCss = `
+.sigs { display: flex; gap: 30px; margin-top: 80px; page-break-inside: avoid; break-inside: avoid; }`
+
+  return printShellHtml(`Report – ${patient}`, `
 ${reportHeaderHtml({ name: patient, refBy, date: displayDate, age, gender, srNo })}
 ${reportTitleHtml(study)}
 <div class="body" style="font-size:10pt;line-height:1.6;">${body}</div>
-<div class="sigs">
-  <div class="sig">
-    <div style="height: 55px;"></div>
-    <p class="sig-name">DR. PRADNYA GORE</p>
-    <p class="sig-title">Consultant Radiologist</p>
-  </div>
-  <div class="sig">
-    <div style="height: 55px;"></div>
-    <p class="sig-name">DR. RAMNATH GHUTE</p>
-    <p class="sig-title">Consultant Radiologist</p>
-    <p class="sig-title">M.D. Radiology</p>
-  </div>
-</div>
-</body></html>`
+<div class="sigs">${signatureColumnsHtml(signatories, signatureLayouts)}</div>`, extraCss)
 }
 
 const FONT_FAMILIES = [
-  "Arial", "Times New Roman", "Courier New", "Georgia", "Verdana", "Calibri",
-  "Tahoma", "Trebuchet MS", "Garamond", "Bookman", "Palatino", "Impact"
+  "Arial", "Arial Black", "Arial Narrow", "Times New Roman", "Courier New",
+  "Georgia", "Verdana", "Calibri", "Cambria", "Candara", "Consolas", "Constantia",
+  "Corbel", "Tahoma", "Trebuchet MS", "Segoe UI", "Segoe Print", "Segoe Script",
+  "Garamond", "Book Antiqua", "Bookman Old Style", "Century Gothic",
+  "Franklin Gothic Medium", "Palatino Linotype", "Lucida Sans Unicode",
+  "Lucida Console", "Comic Sans MS", "Impact", "Rockwell", "Perpetua"
 ]
 
 // ── Formatting toolbar button ─────────────────────────────────────────────────
@@ -174,6 +187,42 @@ function FmtBtn({ cmd, label, title, value }: { cmd: string; label: React.ReactN
 
 function Sep() { return <span className="w-px h-4 bg-gray-300 mx-0.5" /> }
 
+// ── Template picker card ───────────────────────────────────────────────────────
+// Compact text card (name + preview excerpt) so a whole category's worth of
+// templates is scannable at a glance instead of needing a wide scroll strip.
+// Browse-and-apply only — adding/removing templates lives on the dedicated
+// Report Templates page, not in this picker.
+function TemplateCard({
+  tpl, categoryLabel, onApply,
+}: {
+  tpl: ReportTemplate
+  categoryLabel?: string
+  onApply: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onApply}
+      className="group w-full text-left p-3.5 rounded-xl border border-gray-200 hover:border-blue-400 hover:shadow-sm bg-white transition-all"
+    >
+      <div className="flex items-center gap-1.5 flex-wrap mb-1">
+        {categoryLabel && (
+          <span className="text-[10px] font-semibold text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">{categoryLabel}</span>
+        )}
+        {tpl._id && (
+          <span className="text-[10px] font-semibold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">Custom</span>
+        )}
+      </div>
+      <p className="text-xs font-semibold text-gray-800 group-hover:text-blue-600 leading-snug line-clamp-2">
+        {tpl.name}
+      </p>
+      <p className="text-[11px] text-gray-400 mt-1 leading-relaxed line-clamp-2">
+        {tpl.preview}
+      </p>
+    </button>
+  )
+}
+
 const getDisplayTitle = (studyName: string) => {
   if (!studyName) return ""
   for (const cat of Object.keys(REPORT_TEMPLATES)) {
@@ -183,6 +232,13 @@ const getDisplayTitle = (studyName: string) => {
   }
   return studyName
 }
+
+// Friendly label for a category tab — the 4 built-in ones get a short display
+// name, clinic-created categories (free-form strings) are shown as typed.
+const BUILT_IN_TAB_LABEL: Record<string, string> = {
+  usg: "USG", doppler: "Doppler", xray: "X-Ray", pathology: "Pathology",
+}
+const categoryTabLabel = (cat: string) => BUILT_IN_TAB_LABEL[cat] ?? cat
 
 // ── Main editor ───────────────────────────────────────────────────────────────
 
@@ -243,13 +299,63 @@ function ReportEditorInner() {
 
   // Template picker
   const [showTemplates, setShowTemplates] = useState(false)
-  const [templateTab,   setTemplateTab]   = useState<TemplateCategory>(() => {
+  const [templateTab,   setTemplateTab]   = useState<string>(() => {
     const s = (paramStudy || "").toLowerCase()
     if (s.includes("x") && (s.includes("ray") || s.includes("-ray"))) return "xray"
     if (["cbc","lft","kft","blood","thyroid","path","urine","hb"].some((k) => s.includes(k))) return "pathology"
     if (/doppler|carotid|venous|arterial|portal|renal artery/.test(s)) return "doppler"
     return "usg"
   })
+  const [templateSearch, setTemplateSearch] = useState("")
+  // Clinic-added templates (imported from Word via the Add Template page),
+  // merged in alongside the built-in bundled ones. This picker is browse/apply
+  // only — adding or removing templates happens on the Add Template page.
+  // Keyed by category string rather than the narrow 4-value union, since the
+  // clinic can create its own categories from that page.
+  const [customTemplates, setCustomTemplates] = useState<Record<string, ReportTemplate[]>>({})
+  const [templatesLoaded, setTemplatesLoaded] = useState(false)
+
+  useEffect(() => {
+    if (!showTemplates || templatesLoaded) return
+    fetch("/api/templates")
+      .then((r) => r.json())
+      .then((d) => {
+        const grouped: Record<string, ReportTemplate[]> = {}
+        for (const t of d.templates ?? []) {
+          const cat = String(t.category)
+          if (!grouped[cat]) grouped[cat] = []
+          grouped[cat].push({ id: t._id, _id: t._id, name: t.name, heading: t.heading, preview: t.preview, body: t.body })
+        }
+        setCustomTemplates(grouped)
+      })
+      .catch(() => {})
+      .finally(() => setTemplatesLoaded(true))
+  }, [showTemplates, templatesLoaded])
+
+  const [signatories, setSignatories] = useState<Signatory[]>([])
+  useEffect(() => { fetchSignatories().then(setSignatories) }, [])
+
+  const BUILTIN_CATS: TemplateCategory[] = ["usg", "doppler", "xray", "pathology"]
+  const customCategoryKeys = Object.keys(customTemplates).filter((c) => !(BUILTIN_CATS as string[]).includes(c))
+  // Every browsable category — the 4 built-ins plus any the clinic has created.
+  const allCategoryTabs: string[] = [...BUILTIN_CATS, ...customCategoryKeys]
+
+  const allTemplates = (cat: string) => [
+    ...((BUILTIN_CATS as string[]).includes(cat) ? REPORT_TEMPLATES[cat as TemplateCategory] : []),
+    ...(customTemplates[cat] ?? []),
+  ]
+
+  // Flat, cross-category search results — lets a doctor find a template by
+  // name without needing to remember (or scroll through) the right category tab.
+  const templateSearchResults = (() => {
+    const q = templateSearch.trim().toLowerCase()
+    if (!q) return null
+    return allCategoryTabs.flatMap((cat) =>
+      allTemplates(cat)
+        .filter((t) => t.name.toLowerCase().includes(q) || t.heading.toLowerCase().includes(q))
+        .map((t) => ({ ...t, category: cat }))
+    )
+  })()
 
   // Toolbar extras
   const [fontSize,   setFontSize]   = useState(14)
@@ -263,21 +369,417 @@ function ReportEditorInner() {
   const originalBodyRef = useRef<string>("")
   const submittedRef    = useRef(false)
 
+  // Saved per-report drag/resize override for the two doctor-signature images
+  // (index 0/1 matches the columns; overrideImage holds custom drawn dataUrls)
+  const [loadedSigLayout, setLoadedSigLayout] = useState<(SignatureLayout | null | undefined)[]>([
+    { hidden: true },
+    { hidden: true }
+  ])
+
   const paperRef        = useRef<HTMLDivElement | null>(null)
+  // Pagination: the document is laid out as real A4 sheets — content that would
+  // fall into a page's footer band is pushed to the top of the next sheet, just
+  // like Microsoft Word's Print Layout view.
+  const wrapRef         = useRef<HTMLDivElement | null>(null)
+  const patientBoxRef   = useRef<HTMLDivElement | null>(null)
+  const titleWrapRef    = useRef<HTMLDivElement | null>(null)
+  const sigsRef         = useRef<HTMLDivElement | null>(null)
+  const rafRef          = useRef<number | undefined>(undefined)
   const [numPages, setNumPages] = useState(1)
 
-  useEffect(() => {
-    const el = paperRef.current
-    if (!el) return
-    const checkHeight = () => {
-      const h = el.scrollHeight
-      const pages = Math.ceil(h / 1122)
-      setNumPages(pages)
+
+  const A4_GAP_PX  = 28                                    // grey gap drawn between sheets
+  const A4_STRIDE  = A4_PAGE_PX + A4_GAP_PX                // sheet-to-sheet distance
+
+  // Return the report body HTML without the transient pagination margins we add
+  // for on-screen layout, so saved / printed / exported output stays clean.
+  const readCleanBody = useCallback(() => {
+    const el = bodyRef.current
+    if (!el) return ""
+    const clone = el.cloneNode(true) as HTMLElement
+    clone.querySelectorAll<HTMLElement>("[data-pgb]").forEach((n) => {
+      n.style.marginTop = n.getAttribute("data-pgb-base") || ""
+      n.removeAttribute("data-pgb")
+      n.removeAttribute("data-pgb-base")
+      if (!n.getAttribute("style")) n.removeAttribute("style")
+    })
+    return clone.innerHTML
+  }, [])
+
+  // Measure the flowing blocks and push any that would cross a page's footer band
+  // down to the next sheet's content area. Sets the sheet count for the backdrop.
+  const paginate = useCallback(() => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+
+    const items: HTMLElement[] = []
+    if (patientBoxRef.current) items.push(patientBoxRef.current)
+    if (titleWrapRef.current)  items.push(titleWrapRef.current)
+    if (bodyRef.current) Array.from(bodyRef.current.children).forEach((c) => items.push(c as HTMLElement))
+    if (sigsRef.current)   items.push(sigsRef.current)
+
+    // Clear previous pagination pushes first so measurements are natural
+    items.forEach((it) => {
+      if (it.dataset.pgb) {
+        it.style.marginTop = it.getAttribute("data-pgb-base") || ""
+        delete it.dataset.pgb
+        it.removeAttribute("data-pgb-base")
+      }
+    })
+
+    const wrapTop = wrap.getBoundingClientRect().top
+    let page = 0
+    for (const it of items) {
+      const r      = it.getBoundingClientRect()
+      const top    = r.top - wrapTop
+      const bottom = top + r.height
+      const footerLimit  = page * A4_STRIDE + (A4_PAGE_PX - LETTERHEAD_BOTTOM_PX)
+      const pageTop      = page * A4_STRIDE + LETTERHEAD_TOP_PX
+      // Break only if it overflows the footer band AND isn't already the first
+      // block on this page (an oversized single block can't be split further).
+      if (bottom > footerLimit + 1 && top > pageTop + 2) {
+        page++
+        const target = page * A4_STRIDE + LETTERHEAD_TOP_PX
+        const delta  = target - top
+        if (delta > 0) {
+          const base = parseFloat(getComputedStyle(it).marginTop) || 0
+          it.setAttribute("data-pgb-base", it.style.marginTop || "")
+          it.dataset.pgb = "1"
+          it.style.marginTop = `${base + delta}px`
+        }
+      }
     }
-    const observer = new ResizeObserver(checkHeight)
-    observer.observe(el)
-    return () => observer.disconnect()
-  }, [showDoc])
+
+    setNumPages(page + 1)
+  }, [A4_STRIDE])
+
+  const schedulePaginate = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    rafRef.current = requestAnimationFrame(() => paginate())
+  }, [paginate])
+
+  // ── Insert Signature ─────────────────────────────────────────────────────────
+  // The caret position is saved when the toolbar button is pressed, since
+  // opening the dialog moves focus into it and would otherwise lose where the
+  // cursor was in the report body.
+  const savedRangeRef = useRef<Range | null>(null)
+  const [sigPadOpen, setSigPadOpen] = useState(false)
+  // Remounts the dialog fresh each time it opens (rather than resetting state
+  // in an effect) so a leftover drawn/typed/uploaded signature from a
+  // previous session can never be re-inserted by mistake.
+  const [sigPadKey, setSigPadKey] = useState(0)
+
+  const openSignaturePad = () => {
+    const sel = window.getSelection()
+    savedRangeRef.current =
+      sel && sel.rangeCount > 0 && bodyRef.current?.contains(sel.anchorNode)
+        ? sel.getRangeAt(0).cloneRange()
+        : null
+    setSigPadKey((k) => k + 1)
+    setSigPadOpen(true)
+  }
+
+  // Inserted as a plain <img> at the caret. Native HTML5 image dragging is
+  // switched off (draggable=false) so our own pointer-based drag/resize below
+  // gets clean pointermove/pointerup events instead of the browser hijacking
+  // them into a native "drag this image out of the page" gesture.
+  const insertSignature = ({ dataUrl, width, height }: { dataUrl: string; width: number; height: number }) => {
+    const body = bodyRef.current
+    if (!body) return
+    body.focus()
+    const sel = window.getSelection()
+    let range: Range
+    if (savedRangeRef.current) {
+      range = savedRangeRef.current
+    } else {
+      range = document.createRange()
+      range.selectNodeContents(body)
+      range.collapse(false)
+    }
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+
+    const img = document.createElement("img")
+    img.src = dataUrl
+    img.setAttribute("width", String(width))
+    img.setAttribute("height", String(height))
+    img.setAttribute("data-sig-stamp", "1")
+    img.setAttribute("data-sig-kind", "stamp")
+    img.draggable = false
+    img.style.display = "inline-block"
+    img.style.verticalAlign = "middle"
+    img.style.position = "relative"   // lets drag/nudge shift it via top/left without disturbing text flow
+    img.style.cursor = "move"
+    img.style.userSelect = "none"
+    img.style.setProperty("-webkit-user-drag", "none")
+    range.deleteContents()
+    range.insertNode(img)
+    range.setStartAfter(img)
+    range.setEndAfter(img)
+    sel?.removeAllRanges()
+    sel?.addRange(range)
+
+    selectSigStamp(img)
+
+    setSigPadOpen(false)
+    schedulePaginate()
+  }
+
+  // ── Drag / resize / nudge for an inserted signature stamp ────────────────────
+  // Clicking a stamp shows a small floating toolbar plus a resize handle at its
+  // bottom-right corner (positioned against wrapRef, the same relatively-
+  // positioned ancestor the page-sheet overlay uses). Holding down directly on
+  // the stamp drags it anywhere on the page (e.g. up into the signature block
+  // above a doctor's name); the corner handle scales it up or down. The nudge
+  // buttons stay as a precise fallback for small adjustments.
+  // The selected DOM node itself lives in a ref (mutable handle, not render
+  // data); only the overlay's screen position is real state, since that's
+  // what the render actually needs to react to.
+  const selectedSigRef = useRef<HTMLImageElement | null>(null)
+  const [sigOverlayPos, setSigOverlayPos] = useState<{
+    toolbarTop: number; toolbarLeft: number; handleTop: number; handleLeft: number; kind: "stamp" | "doctor"
+  } | null>(null)
+
+  const updateSigOverlayPos = (img: HTMLImageElement) => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    const wrapRect = wrap.getBoundingClientRect()
+    const imgRect  = img.getBoundingClientRect()
+    setSigOverlayPos({
+      toolbarTop:  imgRect.top - wrapRect.top - 34,
+      toolbarLeft: Math.max(0, imgRect.left - wrapRect.left),
+      handleTop:   imgRect.bottom - wrapRect.top - 7,
+      handleLeft:  imgRect.right - wrapRect.left - 7,
+      kind: img.dataset.sigKind === "doctor" ? "doctor" : "stamp",
+    })
+  }
+
+  const selectSigStamp = (img: HTMLImageElement) => {
+    selectedSigRef.current = img
+    updateSigOverlayPos(img)
+  }
+
+  // Reads the current drag/resize state of the two signature-block images
+  // straight off the DOM (mirrors readCleanBody()'s "imperative source of
+  // truth, read at save time" pattern) so it can be persisted and threaded
+  // into the DOCX/PDF/print exports.
+  const readSignatureLayout = (): (SignatureLayout | null)[] => {
+    const layout: (SignatureLayout | null)[] = [null, null]
+    for (let i = 0; i < 2; i++) {
+      const img = sigsRef.current?.querySelector<HTMLImageElement>(`img[data-sig-idx="${i}"]`)
+      if (!img) {
+        // A hidden/removed signature unmounts its <img> entirely (replaced by
+        // the "+ Add Signature" placeholder) — state is the only remaining
+        // record of that removal, so fall back to it instead of dropping it.
+        layout[i] = loadedSigLayout[i] ?? null
+        continue
+      }
+      const left   = parseFloat(img.style.left)   || 0
+      const top    = parseFloat(img.style.top)    || 0
+      const width  = parseFloat(img.style.width)  || 0
+      const height = parseFloat(img.style.height) || 0
+      const hidden = img.style.display === "none" || img.getAttribute("data-sig-hidden") === "true"
+      const overrideImage = loadedSigLayout[i]?.overrideImage || (img.src?.startsWith("data:") ? img.src : undefined)
+      if (left || top || width || height || hidden || overrideImage) {
+        layout[i] = {
+          ...(left ? { left } : {}),
+          ...(top ? { top } : {}),
+          ...(width ? { width } : {}),
+          ...(height ? { height } : {}),
+          ...(hidden ? { hidden } : {}),
+          ...(overrideImage ? { overrideImage } : {}),
+        }
+      }
+    }
+    return layout
+  }
+
+  const deselectSig = () => {
+    selectedSigRef.current = null
+    setSigOverlayPos(null)
+  }
+
+  const handleBodyClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement
+    if (target.tagName === "IMG" && target.getAttribute("data-sig-stamp") === "1") {
+      selectSigStamp(target as HTMLImageElement)
+    } else {
+      deselectSig()
+    }
+  }
+
+  const nudgeSig = (dx: number, dy: number) => {
+    const img = selectedSigRef.current
+    if (!img) return
+    const curLeft = parseFloat(img.style.left) || 0
+    const curTop  = parseFloat(img.style.top) || 0
+    let newLeft = curLeft + dx
+    let newTop  = curTop + dy
+    if (img.dataset.sigKind === "doctor") {
+      newLeft = Math.max(-150, Math.min(150, newLeft))
+      newTop  = Math.max(-60, Math.min(0, newTop))
+    } else {
+      newLeft = Math.max(-200, Math.min(200, newLeft))
+      newTop  = Math.max(-100, Math.min(100, newTop))
+    }
+    img.style.left = `${newLeft}px`
+    img.style.top  = `${newTop}px`
+    updateSigOverlayPos(img)
+    if (img.dataset.sigKind === "doctor") {
+      const idx = parseInt(img.dataset.sigIdx || "0")
+      const copy = [...loadedSigLayout]
+      const layout = copy[idx]
+      copy[idx] = {
+        ...(layout || {}),
+        left: newLeft,
+        top: newTop,
+      }
+      setLoadedSigLayout(copy)
+    }
+  }
+
+  const removeSelectedSig = () => {
+    const img = selectedSigRef.current
+    if (!img) return
+    if (img.dataset.sigKind === "doctor") {
+      const idx = Number(img.dataset.sigIdx)
+      setLoadedSigLayout((prev) => {
+        const next = [...prev]
+        next[idx] = { ...next[idx], hidden: true }
+        return next
+      })
+      deselectSig()
+      schedulePaginate()
+      return
+    }
+    img.remove()
+    deselectSig()
+    schedulePaginate()
+  }
+
+  // Click-and-hold drag: a pair of listeners scoped to this single drag
+  // gesture (no persistent ref needed) moves the stamp by the same relative
+  // left/top offset the nudge buttons use, continuously while the pointer moves.
+  const beginDragSig = (e: React.PointerEvent, img: HTMLImageElement) => {
+    e.preventDefault()
+    e.stopPropagation()
+    selectSigStamp(img)
+    const startX = e.clientX, startY = e.clientY
+    const baseLeft = parseFloat(img.style.left) || 0
+    const baseTop  = parseFloat(img.style.top)  || 0
+    const isDoctor = img.dataset.sigKind === "doctor"
+
+    const onMove = (ev: PointerEvent) => {
+      let newLeft = baseLeft + (ev.clientX - startX)
+      let newTop  = baseTop  + (ev.clientY - startY)
+      if (isDoctor) {
+        newLeft = Math.max(-150, Math.min(150, newLeft))
+        newTop  = Math.max(-60, Math.min(0, newTop))
+      } else {
+        newLeft = Math.max(-200, Math.min(200, newLeft))
+        newTop  = Math.max(-100, Math.min(100, newTop))
+      }
+      img.style.left = `${newLeft}px`
+      img.style.top  = `${newTop}px`
+      updateSigOverlayPos(img)
+    }
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      if (isDoctor) {
+        const idx = parseInt(img.dataset.sigIdx || "0")
+        const copy = [...loadedSigLayout]
+        const layout = copy[idx]
+        copy[idx] = {
+          ...(layout || {}),
+          left: parseFloat(img.style.left) || 0,
+          top: parseFloat(img.style.top) || 0,
+        }
+        setLoadedSigLayout(copy)
+      }
+      schedulePaginate()
+    }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+  }
+
+  // Corner-handle resize: scales width/height together, keeping aspect ratio.
+  const beginResizeSig = (e: React.PointerEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const img = selectedSigRef.current
+    if (!img) return
+    const rect = img.getBoundingClientRect()
+    const startX = e.clientX
+    const startW = rect.width, startH = rect.height
+    const isDoctor = img.dataset.sigKind === "doctor"
+
+    const onMove = (ev: PointerEvent) => {
+      let newW = Math.max(24, startW + (ev.clientX - startX))
+      if (isDoctor) {
+        newW = Math.min(220, newW)
+      } else {
+        newW = Math.min(350, newW)
+      }
+      const scale = newW / startW
+      // Inline style (not the width/height attribute) so this also overrides
+      // the signature-block image's own CSS height class when resizing that.
+      img.style.width  = `${Math.round(newW)}px`
+      img.style.height = `${Math.round(Math.max(12, startH * scale))}px`
+      updateSigOverlayPos(img)
+    }
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      if (isDoctor) {
+        const idx = parseInt(img.dataset.sigIdx || "0")
+        const copy = [...loadedSigLayout]
+        const layout = copy[idx]
+        copy[idx] = {
+          ...(layout || {}),
+          width: parseFloat(img.style.width) || 0,
+          height: parseFloat(img.style.height) || 0,
+        }
+        setLoadedSigLayout(copy)
+      }
+      schedulePaginate()
+    }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+  }
+
+  // Event delegation: any signature stamp inside the body starts a drag on
+  // pointerdown, regardless of when it was inserted or reloaded from saved HTML.
+  const handleBodyPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement
+    if (target.tagName === "IMG" && target.getAttribute("data-sig-stamp") === "1") {
+      beginDragSig(e, target as HTMLImageElement)
+    }
+  }
+
+  // Re-paginate whenever the body content or viewport changes. Attribute
+  // mutations (our own margin writes) are intentionally not observed to avoid loops.
+  useEffect(() => {
+    if (!showDoc || !study) return
+    schedulePaginate()
+    const bodyEl = bodyRef.current
+    const mo = bodyEl ? new MutationObserver(schedulePaginate) : null
+    if (bodyEl) mo?.observe(bodyEl, { childList: true, subtree: true, characterData: true })
+    const ro = new ResizeObserver(schedulePaginate)
+    if (bodyEl) ro.observe(bodyEl)
+    // The signature block grows/shrinks when a signature image is inserted,
+    // resized or removed — its placement must be recomputed then too, or the
+    // taller block spills into the footer band it was measured to sit above.
+    // (Safe from loops: paginate only writes marginTop, which is not part of
+    // the observed box size.)
+    if (sigsRef.current) ro.observe(sigsRef.current)
+    window.addEventListener("resize", schedulePaginate)
+    return () => {
+      mo?.disconnect()
+      ro.disconnect()
+      window.removeEventListener("resize", schedulePaginate)
+    }
+  }, [showDoc, study, schedulePaginate])
 
   // Current heading text (falls back to the study name)
   const getDocTitle = () => (titleRef.current?.innerText ?? "").trim() || getDisplayTitle(study).toUpperCase()
@@ -308,7 +810,7 @@ function ReportEditorInner() {
       if (!submittedRef.current && bodyRef.current?.innerHTML) {
         try {
           localStorage.setItem(storageKey, JSON.stringify({
-            body: bodyRef.current.innerHTML,
+            body: readCleanBody(),
             docTitle: titleRef.current?.innerText?.trim() || undefined,
             patient, study, date, age, gender, contact, srNo, refBy,
             savedAt: new Date().toISOString(),
@@ -329,6 +831,7 @@ function ReportEditorInner() {
         if (paramLoad || paramView) originalBodyRef.current = html
       }
       if (title && titleRef.current) titleRef.current.innerText = title
+      schedulePaginate()
     }
 
     let draft: { body?: string; docTitle?: string; study?: string } | null = null
@@ -340,10 +843,9 @@ function ReportEditorInner() {
         setBody(d.body!, d.docTitle)
         if (d.study) setCurrentStudy(d.study)
       }, 80)
-      return
     }
 
-    // View / edit mode without a local draft — pull the submitted body for this study
+    // View / edit mode — pull the submitted body/layout for this study
     if (paramId && (paramView || paramLoad)) {
       fetch(`/api/patients/${paramId}`)
         .then((r) => r.json())
@@ -351,9 +853,17 @@ function ReportEditorInner() {
           const p = d.patient
           if (!p) return
           const entry = p.studies?.[paramSidx]
-          const html: string = entry?.reportBody || p.reportBody || ""
-          if (html) setTimeout(() => setBody(html), 80)
+          if (!draft?.body) {
+            const html: string = entry?.reportBody || p.reportBody || ""
+            if (html) setTimeout(() => setBody(html), 80)
+          }
           if (entry?.name) setCurrentStudy(entry.name)
+          const savedLayouts = entry?.signatureLayout
+          if (savedLayouts && savedLayouts.length > 0) {
+            setLoadedSigLayout(savedLayouts)
+          } else {
+            setLoadedSigLayout([{ hidden: true }, { hidden: true }])
+          }
         })
         .catch(() => {})
     }
@@ -372,7 +882,7 @@ function ReportEditorInner() {
   useEffect(() => {
     const save = () => {
       if (submittedRef.current) return
-      const html = bodyRef.current?.innerHTML
+      const html = readCleanBody()
       if (!html || html === "<br>") return
       try {
         localStorage.setItem(storageKey, JSON.stringify({
@@ -390,7 +900,8 @@ function ReportEditorInner() {
 
   // ── Build DOCX blob from current report body ─────────────────────────────────
   const buildDocxBase64 = async (bodyHtml: string): Promise<string> => {
-    const { Document, Packer, Paragraph, TextRun, AlignmentType, BorderStyle } = await import("docx")
+    const { Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType, BorderStyle } = await import("docx")
+    const sigCells = await buildDocxSignatureCells(signatories, readSignatureLayout())
 
     const makeParas = (html: string, size = 20) => {
       const segs = parseHtml(html)
@@ -404,8 +915,18 @@ function ReportEditorInner() {
         line = []
       }
       segs.forEach((s) => {
+        if (s.image) {
+          if (line.length) flush()
+          const w = Math.min(s.imgWidth || 150, 450)
+          const h = s.imgWidth && s.imgHeight ? Math.round(w * (s.imgHeight / s.imgWidth)) : Math.min(s.imgHeight || 60, 300)
+          paras.push(new Paragraph({
+            children: [new ImageRun({ type: imageFormat(s.image), data: dataUrlToBytes(s.image), transformation: { width: w, height: h } })],
+            spacing: { after: 80 },
+          }))
+          return
+        }
         if (s.text === "\n") { flush() }
-        else { line.push(new TextRun({ text: s.text, bold: s.bold, italics: s.italic, underline: s.underline ? {} : undefined, size })) }
+        else { line.push(new TextRun({ text: s.text, bold: s.bold, italics: s.italic, underline: s.underline ? {} : undefined, font: s.font, size })) }
       })
       if (line.length) flush()
       return paras.length ? paras : [new Paragraph({ children: [new TextRun({ text: "", size })] })]
@@ -498,22 +1019,29 @@ function ReportEditorInner() {
           insideVertical: { style: BorderStyle.NONE, size: 0, color: "ffffff" },
         },
         rows: [
+          // Row 1: Signature Images
           new TableRow({
             children: [
               new TableCell({
                 width: { size: 50, type: WidthType.PERCENTAGE },
-                children: [
-                  new Paragraph({ children: [new TextRun({ text: "DR. PRADNYA GORE", bold: true, size: 20 })], spacing: { after: 40 } }),
-                  new Paragraph({ children: [new TextRun({ text: "CONSULTANT RADIOLOGIST", size: 16 })] }),
-                ],
+                children: sigCells.imgLeft,
               }),
               new TableCell({
                 width: { size: 50, type: WidthType.PERCENTAGE },
-                children: [
-                  new Paragraph({ children: [new TextRun({ text: "DR. RAMNATH GHUTE", bold: true, size: 20 })], spacing: { after: 40 } }),
-                  new Paragraph({ children: [new TextRun({ text: "CONSULTANT RADIOLOGIST", size: 16 })] }),
-                  new Paragraph({ children: [new TextRun({ text: "M.D. RADIOLOGY", size: 16 })] }),
-                ],
+                children: sigCells.imgRight,
+              }),
+            ],
+          }),
+          // Row 2: Doctor Names & Credentials
+          new TableRow({
+            children: [
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                children: sigCells.textLeft,
+              }),
+              new TableCell({
+                width: { size: 50, type: WidthType.PERCENTAGE },
+                children: sigCells.textRight,
               }),
             ],
           }),
@@ -521,9 +1049,11 @@ function ReportEditorInner() {
       }),
     ]
 
+    // Top/bottom margins keep the pre-printed letterhead bands (logo header,
+    // address footer) empty on every page: 40mm top / 30mm bottom, in twips.
     return await Packer.toBase64String(new Document({
       sections: [{
-        properties: { page: { margin: { top: 1080, bottom: 1080, left: 1440, right: 1440 } } },
+        properties: { page: { margin: { top: 2270, bottom: 1700, left: 1440, right: 1440 } } },
         children,
       }],
     }))
@@ -543,12 +1073,13 @@ function ReportEditorInner() {
 
     // When editing a submitted report, stamp attribution on changed sections
     if (paramLoad && originalBodyRef.current && bodyRef.current) {
-      const marked = markChanges(originalBodyRef.current, bodyRef.current.innerHTML, editorName, editedAtDisplay)
+      const marked = markChanges(originalBodyRef.current, readCleanBody(), editorName, editedAtDisplay)
       bodyRef.current.innerHTML = marked
+      schedulePaginate()
     }
 
     // Final body HTML (with attribution spans if edit mode)
-    const finalBody = bodyRef.current?.innerHTML ?? ""
+    const finalBody = readCleanBody()
 
     // Save to localStorage
     try {
@@ -562,17 +1093,21 @@ function ReportEditorInner() {
 
     // Generate DOCX and save everything to MongoDB
     if (paramId) {
+      const cleanBody = stripEditedSpans(finalBody)
+
+      // Generate DOCX from the clean body and stash it for the success screen
+      let reportDocx = ""
       try {
-        const cleanBody = stripEditedSpans(finalBody)
+        reportDocx = await buildDocxBase64(cleanBody)
+        setSubmittedDocxBase64(reportDocx)
+      } catch {}
 
-        // Generate DOCX from the clean body and stash it for the success screen
-        let reportDocx = ""
-        try {
-          reportDocx = await buildDocxBase64(cleanBody)
-          setSubmittedDocxBase64(reportDocx)
-        } catch {}
-
-        await fetch(`/api/patients/${paramId}`, {
+      // Signature images (drawn/typed/uploaded) can push this payload past the
+      // server's request-size limit. A failed save must NOT show the success
+      // screen — that's exactly how an added signature silently "disappears":
+      // the request is rejected but the UI used to claim success regardless.
+      try {
+        const res = await fetch(`/api/patients/${paramId}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -581,6 +1116,7 @@ function ReportEditorInner() {
             reportBody:   cleanBody,
             reportDocx,
             studyName:    study,
+            signatureLayout: readSignatureLayout(),
             ...(localSrNo ? { srNo: Number(localSrNo) } : {}),
             editHistoryEntry: {
               editor:   editorName,
@@ -589,7 +1125,20 @@ function ReportEditorInner() {
             },
           }),
         })
-      } catch {}
+        if (!res.ok) {
+          alert(
+            res.status === 413
+              ? "Save failed: the report (including the signature image) is too large for the server to accept. Try a smaller/lower-resolution signature image and save again."
+              : `Save failed (server returned ${res.status}). Please try again.`
+          )
+          setSubmitting(false)
+          return
+        }
+      } catch {
+        alert("Save failed: could not reach the server. Check your connection and try again.")
+        setSubmitting(false)
+        return
+      }
     }
 
     submittedRef.current = true
@@ -618,6 +1167,7 @@ function ReportEditorInner() {
     } catch {}
     setShowTemplates(false)
     bodyRef.current.focus()
+    schedulePaginate()
   }
 
   // ── Font size change (applies to selection or sets cursor default) ────────────
@@ -637,6 +1187,7 @@ function ReportEditorInner() {
       span.appendChild(frag)
       range.insertNode(span)
     }
+    schedulePaginate()
   }
 
   // ── Font family apply ─────────────────────────────────────────────────────────
@@ -644,6 +1195,7 @@ function ReportEditorInner() {
     setFontFamily(family)
     bodyRef.current?.focus()
     document.execCommand("fontName", false, family)
+    schedulePaginate()
   }
 
   // ── Persist SR. NO change to backend immediately on blur/enter ──────────────
@@ -660,7 +1212,7 @@ function ReportEditorInner() {
 
   // ── Save draft to localStorage ───────────────────────────────────────────────
   const saveReport = () => {
-    let bodyHtml = bodyRef.current?.innerHTML ?? ""
+    let bodyHtml = readCleanBody()
     // If editing an existing report, mark changed blocks with underline
     if (paramLoad && originalBodyRef.current) {
       bodyHtml = markChanges(originalBodyRef.current, bodyHtml)
@@ -680,13 +1232,15 @@ function ReportEditorInner() {
     const html = buildPrintHtml({
       patient,
       study: getDocTitle(),
-      body: bodyRef.current?.innerHTML ?? "",
+      body: readCleanBody(),
       age,
       gender,
       contact,
       refBy,
       date,
       srNo: localSrNo || srNo,
+      signatories,
+      signatureLayouts: readSignatureLayout(),
     })
     const win = window.open("", "_blank", "width=820,height=1000")
     if (!win) { alert("Please allow pop-ups."); return }
@@ -698,35 +1252,17 @@ function ReportEditorInner() {
   }
 
   // ── Build a PDF Blob from the clean report HTML ──────────────────────────────
+  // Rasterizes the same header/title/body/signatures markup used for printing,
+  // so the exported PDF shows whatever font the browser actually rendered
+  // (Georgia, Calibri, Tahoma, ...) instead of jsPDF's built-in Helvetica.
   const buildPdfBlob = async (bodyHtml: string): Promise<Blob> => {
-    const { jsPDF } = await import("jspdf")
-    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" })
-    const W = 210, M = 20, CW = W - M * 2
-    let y = 18
-
-    const ln = (pt: number) => pt * 0.352778 * 1.4   // pt → mm with 1.4× leading
-    const checkPage = (need = 8) => { if (y + need > 282) { doc.addPage(); y = 18 } }
-
-    // The PDF matches the printed report design: double-bordered patient
-    // info box, then the bordered underlined study heading
-    y = drawPdfReportHeader(doc, { name: patient, refBy, date, age, gender, srNo: localSrNo || srNo })
-    y = drawPdfReportTitle(doc, getDocTitle(), y)
-
-    // ── Report body (HTML-aware, preserves bold labels) ──
-    const { renderHtmlToPdf } = await import("@/lib/pdf-html-renderer")
-    y = renderHtmlToPdf(doc, bodyHtml, M, CW, y, checkPage, 5.5)
-
-    // ── Two-doctor signature block, matching the Word format ──
-    checkPage(28); y += 22
-    doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(0)
-    doc.text("DR. PRADNYA GORE", M, y)
-    doc.text("DR. RAMNATH GHUTE", W / 2 + 5, y); y += ln(9)
-    doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(60)
-    doc.text("CONSULTANT RADIOLOGIST", M, y)
-    doc.text("CONSULTANT RADIOLOGIST", W / 2 + 5, y); y += ln(7.5)
-    doc.text("M.D. RADIOLOGY", W / 2 + 5, y)
-
-    return doc.output("blob")
+    const { buildPagedPdfBlob } = await import("@/lib/dom-to-pdf")
+    return buildPagedPdfBlob({
+      headerHtml: reportHeaderHtml({ name: patient, refBy, date, age, gender, srNo: localSrNo || srNo }),
+      titleHtml: reportTitleHtml(getDocTitle()),
+      bodyHtml,
+      signaturesHtml: signatureColumnsHtml(signatories, readSignatureLayout()),
+    })
   }
 
   // ── Share on WhatsApp: upload PDF → share download link ─────────────────────
@@ -734,7 +1270,7 @@ function ReportEditorInner() {
     if (!paramId) return
     setShareLoading(true)
 
-    const cleanHtml = stripEditedSpans(bodyRef.current?.innerHTML ?? "")
+    const cleanHtml = stripEditedSpans(readCleanBody())
     const num       = to === "patient" ? contact.replace(/\D/g, "") : ""
 
     try {
@@ -747,7 +1283,7 @@ function ReportEditorInner() {
       const res  = await fetch(`/api/patients/${paramId}`, {
         method:  "PATCH",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ reportPdf: base64, studyIndex: paramSidx }),
+        body:    JSON.stringify({ reportPdf: base64, studyIndex: paramSidx, signatureLayout: readSignatureLayout() }),
       })
       const data   = await res.json()
       const slug   = data?.patient?.studies?.[paramSidx]?.reportSlug || data?.patient?.reportSlug
@@ -804,7 +1340,7 @@ function ReportEditorInner() {
   const handleSave = async () => {
     setDocxLoading(true)
     try {
-      const base64 = await buildDocxBase64(bodyRef.current?.innerHTML ?? "")
+      const base64 = await buildDocxBase64(readCleanBody())
       downloadDocxFromBase64(base64, `Report_${(patient || "Patient").replace(/\s+/g, "_")}${study ? `_${study.replace(/[^A-Za-z0-9]+/g, "_")}` : ""}.docx`)
     } finally { setDocxLoading(false) }
   }
@@ -944,145 +1480,181 @@ function ReportEditorInner() {
             <FmtBtn cmd="insertOrderedList"   label={<span className="text-[11px] font-semibold">1.</span>} title="Numbered list" />
             <Sep />
             <FmtBtn cmd="removeFormat" label={<span className="text-[11px] text-gray-400 font-medium">Clear</span>} title="Clear formatting" />
+            <Sep />
+            <button
+              type="button" title="Insert signature"
+              onMouseDown={(e) => { e.preventDefault(); openSignaturePad() }}
+              className="h-7 px-2 flex items-center gap-1 rounded hover:bg-gray-200 text-gray-700 transition-colors text-[11px] font-medium"
+            >
+              <PenTool className="h-3.5 w-3.5" />Signature
+            </button>
           </div>
         )}
       </div>
 
       {/* ── Document area ── */}
-      <div className="bg-slate-200 py-8 px-4 flex-1 min-h-screen">
+      <div className="flex flex-col sm:flex-row flex-1 min-h-screen bg-slate-200">
 
-        {/* ── Template picker panel ── */}
+        {/* ── Templates — a separate panel to the left of the document, never
+            overlapping or sitting inside the report itself ── */}
         <AnimatePresence>
           {showTemplates && (
-            <motion.div
-              key="template-panel"
-              initial={{ opacity: 0, y: -16, scaleY: 0.95 }}
-              animate={{ opacity: 1, y: 0, scaleY: 1 }}
-              exit={{ opacity: 0, y: -12, scaleY: 0.96 }}
-              transition={{ duration: 0.22, ease: [0.4, 0, 0.2, 1] }}
-              style={{ transformOrigin: "top" }}
-              className="max-w-[794px] mx-auto mb-5 bg-white rounded-2xl shadow-xl border border-gray-200 overflow-hidden"
+            <motion.aside
+              key="template-sidebar"
+              initial={{ opacity: 0, x: -16 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -16 }}
+              transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
+              className="w-full sm:w-[300px] shrink-0 bg-white border-b sm:border-b-0 sm:border-r border-gray-200 flex flex-col"
             >
-              {/* Category tabs */}
-              <div className="flex items-center border-b border-gray-100 px-5 pt-0 bg-gray-50/60">
-                {(["usg", "doppler", "xray", "pathology"] as TemplateCategory[]).map((cat) => {
-                  const labels: Record<TemplateCategory, string> = {
-                    usg: "USG / Sonography",
-                    doppler: "Doppler",
-                    xray: "X-Ray",
-                    pathology: "Pathology",
-                  }
-                  const active = templateTab === cat
-                  return (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={() => setTemplateTab(cat)}
-                      className={`relative px-5 py-3.5 text-xs font-semibold transition-colors ${
-                        active ? "text-blue-600" : "text-gray-500 hover:text-gray-800"
-                      }`}
-                    >
-                      {labels[cat]}
-                      {active && (
-                        <motion.div
-                          layoutId="tab-underline"
-                          className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-500 rounded-full"
-                          transition={{ type: "spring", stiffness: 400, damping: 30 }}
-                        />
-                      )}
-                    </button>
-                  )
-                })}
-                <div className="ml-auto flex items-center gap-2 pr-1">
-                  <span className="text-[11px] text-gray-400">
-                    {REPORT_TEMPLATES[templateTab].length} template{REPORT_TEMPLATES[templateTab].length !== 1 ? "s" : ""}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowTemplates(false)}
-                    className="h-7 w-7 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-200 hover:text-gray-700 transition-colors text-base font-light"
-                    title="Close"
-                  >×</button>
+              {/* Sidebar header */}
+              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+                <div className="flex items-center gap-1.5">
+                  <LayoutTemplate className="h-4 w-4 text-blue-500" />
+                  <p className="text-sm font-semibold text-gray-800">Templates</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowTemplates(false)}
+                  className="h-7 w-7 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+                  title="Close"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Search — spans every category, so nothing needs to be scrolled to find */}
+              <div className="px-4 pt-3">
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
+                  <input
+                    type="text"
+                    value={templateSearch}
+                    onChange={(e) => setTemplateSearch(e.target.value)}
+                    placeholder="Search templates…"
+                    className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                  />
                 </div>
               </div>
 
-              {/* Template cards — horizontal PowerPoint-style scroll */}
-              <div className="px-5 py-5 overflow-x-auto scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent">
-                <AnimatePresence mode="wait">
-                  <motion.div
-                    key={templateTab}
-                    initial={{ opacity: 0, x: 24 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -24 }}
-                    transition={{ duration: 0.18, ease: "easeOut" }}
-                    className="flex gap-4 pb-1"
-                    style={{ width: "max-content" }}
-                  >
-                    {REPORT_TEMPLATES[templateTab].map((tpl, i) => (
-                      <motion.button
-                        key={tpl.id}
+              {/* Category buttons — hidden while searching, since search spans every category */}
+              {!templateSearch && (
+                <div className="grid grid-cols-2 gap-1.5 px-4 pt-3">
+                  {allCategoryTabs.map((cat) => {
+                    const active = templateTab === cat
+                    return (
+                      <button
+                        key={cat}
                         type="button"
-                        onClick={() => applyTemplate(tpl)}
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        transition={{ duration: 0.2, delay: i * 0.05, ease: "easeOut" }}
-                        whileHover={{ y: -4, boxShadow: "0 12px 28px rgba(59,130,246,0.18)" }}
-                        whileTap={{ scale: 0.97 }}
-                        className="group w-56 shrink-0 rounded-xl border-2 border-gray-200 hover:border-blue-400 bg-white overflow-hidden text-left cursor-pointer"
-                        style={{ boxShadow: "0 2px 8px rgba(0,0,0,0.07)" }}
+                        onClick={() => setTemplateTab(cat)}
+                        className={`px-2 py-1.5 rounded-lg text-xs font-semibold border transition-colors truncate ${
+                          active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-600 border-gray-200 hover:border-blue-300 hover:text-blue-600"
+                        }`}
+                        title={categoryTabLabel(cat)}
                       >
-                        {/* Mini document preview */}
-                        <div className="h-36 bg-gradient-to-b from-gray-50 to-white p-3 overflow-hidden border-b border-gray-100 relative">
-                          {/* Paper header */}
-                          <div className="flex flex-col items-center gap-0.5 mb-2 pb-1.5 border-b border-gray-200">
-                            <div className="h-2 w-2 rounded-full bg-gray-300 mb-0.5" />
-                            <div className="h-1 w-16 bg-gray-700 rounded-sm" />
-                            <div className="h-px w-10 bg-gray-300 rounded" />
-                            <div className="h-px w-12 bg-gray-300 rounded" />
-                          </div>
-                          {/* Content lines simulating field labels + values */}
-                          <div className="space-y-1">
-                            {[
-                              { w: "55%",  dark: true  },
-                              { w: "85%",  dark: false },
-                              { w: "50%",  dark: true  },
-                              { w: "90%",  dark: false },
-                              { w: "45%",  dark: true  },
-                              { w: "80%",  dark: false },
-                              { w: "70%",  dark: false },
-                              { w: "35%",  dark: true  },
-                              { w: "65%",  dark: false },
-                            ].map((line, li) => (
-                              <div
-                                key={li}
-                                className={`h-px rounded-full ${line.dark ? "bg-gray-600" : "bg-gray-200"}`}
-                                style={{ width: line.w }}
-                              />
-                            ))}
-                          </div>
-                          {/* Blue hover overlay */}
-                          <div className="absolute inset-0 bg-blue-500/0 group-hover:bg-blue-500/5 transition-colors" />
-                        </div>
+                        {categoryTabLabel(cat)}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
 
-                        {/* Template name footer */}
-                        <div className="px-3 py-2.5 bg-white">
-                          <p className="text-xs font-semibold text-gray-800 group-hover:text-blue-600 leading-snug transition-colors">
-                            {tpl.name}
-                          </p>
-                          <p className="text-[10px] text-gray-400 mt-0.5 group-hover:text-blue-400 transition-colors">
-                            Click to apply
-                          </p>
-                        </div>
-                      </motion.button>
-                    ))}
-                  </motion.div>
-                </AnimatePresence>
+              {/* Adding/removing templates happens on the Add Template page,
+                  not here — this picker is browse-and-apply only. */}
+              <div className="px-4 pt-3">
+                <Link
+                  href="/add-template"
+                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-200 text-gray-500 hover:border-blue-300 hover:text-blue-600 transition-colors"
+                >
+                  <Upload className="h-3.5 w-3.5" />Add Template
+                </Link>
               </div>
-            </motion.div>
+
+              {/* Count label */}
+              <p className="px-4 pt-3 text-[11px] text-gray-400">
+                {(templateSearchResults ?? allTemplates(templateTab)).length} template
+                {(templateSearchResults ?? allTemplates(templateTab)).length !== 1 ? "s" : ""}
+              </p>
+
+              {/* Template list — single column, scrolls within the sidebar so it
+                  never needs to push or overlap the document beside it. */}
+              <div className="flex-1 px-4 py-3 space-y-2 overflow-y-auto max-h-[50vh] sm:max-h-none">
+                {templateSearchResults !== null ? (
+                  templateSearchResults.length === 0 ? (
+                    <p className="text-center text-xs text-gray-400 py-8">No templates match &ldquo;{templateSearch}&rdquo;.</p>
+                  ) : (
+                    templateSearchResults.map((tpl) => (
+                      <TemplateCard
+                        key={tpl.id}
+                        tpl={tpl}
+                        categoryLabel={categoryTabLabel(tpl.category)}
+                        onApply={() => applyTemplate(tpl)}
+                      />
+                    ))
+                  )
+                ) : (
+                  <AnimatePresence mode="wait">
+                    <motion.div key={templateTab} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="space-y-2">
+                      {allTemplates(templateTab).length === 0 ? (
+                        <p className="text-center text-xs text-gray-400 py-8">No templates in this category yet.</p>
+                      ) : (
+                        allTemplates(templateTab).map((tpl) => (
+                          <TemplateCard
+                            key={tpl.id}
+                            tpl={tpl}
+                            onApply={() => applyTemplate(tpl)}
+                          />
+                        ))
+                      )}
+                    </motion.div>
+                  </AnimatePresence>
+                )}
+              </div>
+            </motion.aside>
           )}
         </AnimatePresence>
 
-        <div ref={paperRef} className="relative max-w-[794px] mx-auto bg-white shadow-xl rounded-sm px-4 sm:px-14 py-6 sm:py-12 min-h-[1122px]">
+        {/* ── The document itself — untouched by the templates panel above ── */}
+        <div className="py-8 px-4 flex-1 min-h-screen">
+        <div
+          ref={wrapRef}
+          className="relative max-w-[794px] mx-auto"
+          style={{ minHeight: `${numPages * A4_STRIDE - A4_GAP_PX}px` }}
+          onClick={handleBodyClick}
+          onPointerDown={handleBodyPointerDown}
+        >
+          {/* A4 sheet backdrop — one white page per printed sheet, separated by a
+              grey gap, with the letterhead header/footer bands marked. Content in
+              the overlay flows across these sheets like Word's Print Layout view. */}
+          <div aria-hidden className="absolute inset-0 z-0 pointer-events-none">
+            {Array.from({ length: numPages }).map((_, i) => (
+              <div
+                key={i}
+                className="absolute left-0 right-0 bg-white shadow-xl rounded-sm"
+                style={{ top: `${i * A4_STRIDE}px`, height: `${A4_PAGE_PX}px` }}
+              >
+                {showDoc && study && !isReadOnly && (
+                  <>
+                    <div className="absolute inset-x-0 border-b border-dashed border-blue-200" style={{ top: `${LETTERHEAD_TOP_PX}px` }} />
+                    <div className="absolute inset-x-0 border-t border-dashed border-blue-200" style={{ bottom: `${LETTERHEAD_BOTTOM_PX}px` }} />
+                    <span
+                      className="absolute right-3 bg-blue-50 text-blue-400 text-[9px] font-semibold px-1.5 py-0.5 rounded border border-blue-100 uppercase tracking-wider"
+                      style={{ bottom: `${LETTERHEAD_BOTTOM_PX - 22}px` }}
+                    >
+                      Page {i + 1} of {numPages}
+                    </span>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Content overlay — transparent; sits on top of the sheets */}
+          <div
+            ref={paperRef}
+            className="relative z-10 px-4 sm:px-14"
+            style={{ paddingTop: `${LETTERHEAD_TOP_PX}px`, paddingBottom: `${LETTERHEAD_BOTTOM_PX}px` }}
+          >
 
           {/* Patient picker — no URL params */}
           {!hasPatient && !pickerDone && (
@@ -1148,20 +1720,8 @@ function ReportEditorInner() {
           {/* ── Document body ── */}
           {showDoc && study && (
             <>
-              {/* Dynamic Page Break Markers (editor only) */}
-              {!isReadOnly && Array.from({ length: numPages - 1 }).map((_, i) => (
-                <div
-                  key={i}
-                  style={{ top: `${(i + 1) * 1122}px` }}
-                  className="absolute left-0 right-0 border-t border-dashed border-blue-400 pointer-events-none flex justify-center items-center select-none print:hidden z-10"
-                >
-                  <span className="bg-blue-50 text-blue-600 font-bold text-[9px] px-2 py-0.5 rounded border border-blue-200 uppercase tracking-wider -translate-y-1/2">
-                    A4 Page Break (Page {i + 2})
-                  </span>
-                </div>
-              ))}
               {/* Patient info — NON-EDITABLE (except SR. NO), matches the printed report header */}
-              <div className="select-none mb-5 border-4 border-double border-gray-700 px-3.5 sm:px-5 py-2.5 sm:py-3.5 flex flex-col sm:flex-row justify-between gap-3 sm:gap-6 text-[13px] font-bold text-gray-900">
+              <div ref={patientBoxRef} className="select-none mb-5 border-4 border-double border-gray-700 px-3.5 sm:px-5 py-2.5 sm:py-3.5 flex flex-col sm:flex-row justify-between gap-3 sm:gap-6 text-[13px] font-bold text-gray-900">
                 <div className="space-y-1 min-w-0">
                   <p className="truncate">NAME - {patient.toUpperCase()}</p>
                   <p className="truncate">REF. BY - {(refBy || "SELF").toUpperCase()}</p>
@@ -1216,7 +1776,7 @@ function ReportEditorInner() {
               </div>
 
               {/* Study heading — editable, boxed like the printed report */}
-              <div className="flex justify-center mb-6">
+              <div ref={titleWrapRef} className="flex justify-center mb-6">
                 <div
                   ref={titleRef}
                   contentEditable={!isReadOnly}
@@ -1238,19 +1798,22 @@ function ReportEditorInner() {
                 className={`doc-field min-h-[400px] text-sm leading-relaxed text-gray-900 focus:outline-none${isReadOnly ? " cursor-default select-text" : ""}`}
               />
 
-              {/* Two-doctor signature block — NON-EDITABLE, matches print / Word */}
-              <div className="mt-24 grid grid-cols-2 gap-8 select-none text-gray-900">
-                <div>
-                  <div className="h-12" /> {/* Visual spacing for signing */}
-                  <p className="font-bold text-[13px] uppercase">DR. PRADNYA GORE</p>
-                  <p className="text-[10px] uppercase text-gray-600 mt-0.5">Consultant Radiologist</p>
-                </div>
-                <div>
-                  <div className="h-12" /> {/* Visual spacing for signing */}
-                  <p className="font-bold text-[13px] uppercase">DR. RAMNATH GHUTE</p>
-                  <p className="text-[10px] uppercase text-gray-600 mt-0.5">Consultant Radiologist</p>
-                  <p className="text-[10px] uppercase text-gray-600">M.D. Radiology</p>
-                </div>
+              {/* Two-doctor signature block — the signature images are drag/resize
+                  editable (same mechanism as the pen-tool stamp above), name/
+                  credentials text stays fixed */}
+              <div ref={sigsRef} className="mt-24 select-none text-gray-900 w-full">
+                <SignatureColumns
+                  signatories={signatories}
+                  layouts={loadedSigLayout}
+                  editable={!isReadOnly}
+                  onLayoutChange={(idx, layout) => {
+                    setLoadedSigLayout((prev) => {
+                      const next = [...prev]
+                      next[idx] = layout
+                      return next
+                    })
+                  }}
+                />
               </div>
 
               {/* Mobile share buttons (visible below document on small screens) */}
@@ -1266,8 +1829,61 @@ function ReportEditorInner() {
               </div>
             </>
           )}
+          </div>
+
+          {/* Floating toolbar for a selected signature stamp — nudge buttons
+              stay as a precise fallback alongside direct drag/resize */}
+          {sigOverlayPos && !isReadOnly && (
+            <div
+              className="absolute z-20 flex items-center gap-0.5 bg-white border border-gray-200 rounded-lg shadow-lg p-1"
+              style={{ top: sigOverlayPos.toolbarTop, left: sigOverlayPos.toolbarLeft }}
+              onClick={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <button type="button" title="Move left" onMouseDown={(e) => { e.preventDefault(); nudgeSig(-4, 0) }} className="h-6 w-6 flex items-center justify-center rounded hover:bg-gray-100 text-gray-600">
+                <ChevronLeft className="h-3.5 w-3.5" />
+              </button>
+              <button type="button" title="Move right" onMouseDown={(e) => { e.preventDefault(); nudgeSig(4, 0) }} className="h-6 w-6 flex items-center justify-center rounded hover:bg-gray-100 text-gray-600">
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+              <button type="button" title="Move up" onMouseDown={(e) => { e.preventDefault(); nudgeSig(0, -4) }} className="h-6 w-6 flex items-center justify-center rounded hover:bg-gray-100 text-gray-600">
+                <ChevronUp className="h-3.5 w-3.5" />
+              </button>
+              <button type="button" title="Move down" onMouseDown={(e) => { e.preventDefault(); nudgeSig(0, 4) }} className="h-6 w-6 flex items-center justify-center rounded hover:bg-gray-100 text-gray-600">
+                <ChevronDown className="h-3.5 w-3.5" />
+              </button>
+              <span className="w-px h-4 bg-gray-200 mx-0.5" />
+              <button
+                type="button"
+                title={sigOverlayPos.kind === "doctor" ? "Reset position/size" : "Remove signature"}
+                onMouseDown={(e) => { e.preventDefault(); removeSelectedSig() }}
+                className="h-6 w-6 flex items-center justify-center rounded hover:bg-red-50 text-red-500"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
+          {/* Resize handle — drag to scale the selected stamp (aspect-ratio locked) */}
+          {sigOverlayPos && !isReadOnly && (
+            <div
+              title="Drag to resize"
+              onPointerDown={beginResizeSig}
+              onClick={(e) => e.stopPropagation()}
+              className="absolute z-20 h-3.5 w-3.5 rounded-full bg-blue-600 border-2 border-white shadow cursor-nwse-resize"
+              style={{ top: sigOverlayPos.handleTop, left: sigOverlayPos.handleLeft }}
+            />
+          )}
         </div>
       </div>
+      </div>
+
+      <SignaturePadDialog
+        key={sigPadKey}
+        open={sigPadOpen}
+        onClose={() => setSigPadOpen(false)}
+        onInsert={insertSignature}
+      />
     </div>
   )
 }

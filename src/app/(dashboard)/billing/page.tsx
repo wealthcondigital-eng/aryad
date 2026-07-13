@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react"
 import Link from "next/link"
 import { Plus, Search, Filter, MoreHorizontal, Printer, Pencil, History, X, Clock, Check, Eye, Share2 } from "lucide-react"
 import { BillDocViewer, shareBillOnWhatsApp } from "@/components/bill-doc-viewer"
+import { receiptLetterheadHtml, receiptPatientBoxHtml, receiptItemsTableHtml, ReceiptRow } from "@/lib/receipt-letterhead"
 import { useRole } from "@/lib/role-context"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
@@ -34,7 +35,7 @@ interface BillDoc {
   gender?: string
   contact?: string
   referredBy: string
-  items: { study: string; quantity: number; price: number }[]
+  items: { study: string; quantity: number; price: number; discount?: number }[]
   charges: number
   discount: number
   paid: number
@@ -49,6 +50,40 @@ interface BillDoc {
     previousValues: Record<string, unknown>
   }[]
   createdAt: string
+}
+
+// A patient row in the "Pending Billing" strip — every registered study that
+// isn't linked to any bill yet shows here until a bill is raised for it.
+interface UnbilledPatient {
+  _id: string
+  srNo: number
+  name: string
+  age: number
+  gender: string
+  contact: string
+  referredBy: string
+  study: string
+  createdAt: string
+  studies?: { name: string; billId?: string | null }[]
+}
+
+function unbilledStudiesOf(p: UnbilledPatient): string[] {
+  const entries = p.studies?.length ? p.studies : (p.study ? [{ name: p.study, billId: null }] : [])
+  return entries.filter((s) => !s.billId && s.name).map((s) => s.name)
+}
+
+function createBillHref(p: UnbilledPatient): string {
+  const params = new URLSearchParams({
+    id: p._id,
+    name: p.name,
+    srNo: String(p.srNo),
+    age: String(p.age),
+    gender: p.gender,
+    contact: p.contact,
+    refBy: p.referredBy || "Self",
+    study: p.study,
+  })
+  return `/billing/new?${params}`
 }
 
 function billStatus(b: BillDoc): "paid" | "partial" | "pending" {
@@ -189,21 +224,9 @@ function EditHistoryModal({ bill, onClose }: { bill: BillDoc; onClose: () => voi
 function printBillReceipt(b: BillDoc, index: number) {
   const bNo = billNo(b, index)
   const dateStr = formatDate(b.billDate || b.createdAt)
-
-  const itemRows = b.items
-    .map(
-      (item, idx) =>
-        `<tr>
-          <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${idx + 1}.</td>
-          <td style="border:1px solid #111;padding:4px 6px;text-transform:uppercase;">${item.study}</td>
-          <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${(item.price * item.quantity).toLocaleString()}</td>
-          <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${idx === 0 ? (b.discount ?? 0).toLocaleString() : 0}</td>
-          <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${idx === 0 ? b.paid.toLocaleString() : 0}</td>
-        </tr>`
-    )
-    .join("")
-
+  const rows: ReceiptRow[] = b.items.map((item) => ({ study: item.study, amount: item.price * item.quantity, discount: item.discount || 0 }))
   const totalCharges = b.items.reduce((s, i) => s + i.price * i.quantity, 0)
+  const baseUrl = typeof window !== "undefined" ? window.location.origin : ""
 
   const html = `<!DOCTYPE html>
 <html>
@@ -214,47 +237,15 @@ function printBillReceipt(b: BillDoc, index: number) {
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: Arial, sans-serif; font-size: 10pt; line-height: 1.5; color: #111; padding: 10mm 14mm; max-width: 160mm; margin: 0 auto; }
     @media print { body { padding: 6mm 10mm; } }
-    table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
-    th { background: #f0f0f0; font-weight: bold; text-transform: uppercase; text-align: center; border: 1px solid #111; padding: 4px 6px; }
-    .total-row td { font-weight: bold; background: #f9f9f9; }
-    .patient-info { margin-bottom: 8px; font-size: 8.5pt; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; border-bottom: 1.5px solid #111; padding-bottom: 6px; }
-    .patient-info div { margin-bottom: 1px; }
-    .patient-info strong { font-weight: bold; }
   </style>
 </head>
 <body>
-  <!-- No clinic letterhead — receipts print on pre-printed stationery -->
+  ${receiptLetterheadHtml(baseUrl)}
   <div style="border-top:2.5px solid #111;border-bottom:2.5px solid #111;padding:2px 0;text-align:center;font-weight:bold;font-size:9.5pt;text-transform:uppercase;letter-spacing:1px;margin:8px 0;">Payment Receipt</div>
 
-  <div class="patient-info">
-    <div><strong>NAME:</strong> ${b.patientName.toUpperCase()}</div>
-    <div><strong>DATE:</strong> ${dateStr}</div>
-    <div><strong>AGE / SEX:</strong> ${b.age || "—"} YRS &nbsp;/&nbsp; ${(b.gender || "—").toUpperCase()}</div>
-    <div><strong>MOBILE:</strong> ${b.contact || "—"}</div>
-    <div><strong>REF. BY:</strong> ${(b.referredBy || "Self").toUpperCase()}</div>
-    <div><strong>SR. NO:</strong> #${b.srNo || "—"}</div>
-  </div>
+  ${receiptPatientBoxHtml({ name: b.patientName, date: dateStr, age: b.age, gender: b.gender, contact: b.contact, referredBy: b.referredBy, srNo: b.srNo })}
 
-  <table style="margin-bottom:8px;">
-    <thead>
-      <tr>
-        <th style="width:50px;">Sr.<br>No.</th>
-        <th>Investigation of Patient</th>
-        <th style="width:70px;">Charges</th>
-        <th style="width:70px;">Discount</th>
-        <th style="width:70px;">Paid</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${itemRows}
-      <tr class="total-row">
-        <td colspan="2" style="border:1px solid #111;padding:4px 6px;text-align:center;">Total</td>
-        <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${totalCharges.toLocaleString()}</td>
-        <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${b.discount.toLocaleString()}</td>
-        <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${b.paid.toLocaleString()}</td>
-      </tr>
-    </tbody>
-  </table>
+  ${receiptItemsTableHtml(rows, totalCharges, b.paid)}
 
   <div style="font-size:9.5pt;">
     <p><strong>Date:</strong> ${dateStr}</p>
@@ -394,6 +385,13 @@ function BillsTable({
                           <Eye className="h-3.5 w-3.5 mr-2" />
                           View Bill
                         </DropdownMenuItem>
+                        <DropdownMenuItem asChild>
+                          <Link href={`/billing/new?billId=${b._id}`} className="flex items-center">
+                            <Pencil className="h-3.5 w-3.5 mr-2 text-blue-500" />
+                            Edit Bill
+                          </Link>
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
                         <DropdownMenuItem onClick={() => printBillReceipt(b, origIdx >= 0 ? origIdx : 0)}>
                           <Printer className="h-3.5 w-3.5 mr-2" />
                           Print Receipt
@@ -401,10 +399,6 @@ function BillsTable({
                         <DropdownMenuItem onClick={() => shareBillReceipt(b, origIdx >= 0 ? origIdx : 0)}>
                           <Share2 className="h-3.5 w-3.5 mr-2 text-green-600" />
                           Share WhatsApp
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem asChild>
-                          <Link href={`/billing/new?billId=${b._id}`}>Edit Bill</Link>
                         </DropdownMenuItem>
                         {b.editHistory.length > 0 && (
                           <DropdownMenuItem onClick={() => onViewHistory(b)}>
@@ -467,6 +461,13 @@ function BillsTable({
                         <Eye className="h-3.5 w-3.5 mr-2" />
                         View Bill
                       </DropdownMenuItem>
+                      <DropdownMenuItem asChild>
+                        <Link href={`/billing/new?billId=${b._id}`} className="flex items-center">
+                          <Pencil className="h-3.5 w-3.5 mr-2 text-blue-500" />
+                          Edit Bill
+                        </Link>
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
                       <DropdownMenuItem onClick={() => printBillReceipt(b, origIdx >= 0 ? origIdx : 0)}>
                         <Printer className="h-3.5 w-3.5 mr-2" />
                         Print Receipt
@@ -474,10 +475,6 @@ function BillsTable({
                       <DropdownMenuItem onClick={() => shareBillReceipt(b, origIdx >= 0 ? origIdx : 0)}>
                         <Share2 className="h-3.5 w-3.5 mr-2 text-green-600" />
                         Share WhatsApp
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      <DropdownMenuItem asChild>
-                        <Link href={`/billing/new?billId=${b._id}`}>Edit Bill</Link>
                       </DropdownMenuItem>
                       {b.editHistory.length > 0 && (
                         <DropdownMenuItem onClick={() => onViewHistory(b)}>
@@ -546,6 +543,19 @@ export default function BillingPage() {
 
   useEffect(() => { fetchBills() }, [fetchBills])
 
+  // Patients with studies not yet on any bill — surfaced here so a freshly
+  // registered report shows up in Billing right away, ready to be billed.
+  const [unbilled, setUnbilled] = useState<UnbilledPatient[]>([])
+  useEffect(() => {
+    fetch("/api/patients")
+      .then((r) => r.json())
+      .then((d) => {
+        const pts: UnbilledPatient[] = d.patients ?? []
+        setUnbilled(pts.filter((p) => unbilledStudiesOf(p).length > 0))
+      })
+      .catch(() => setUnbilled([]))
+  }, [])
+
   const handleMarkPaid = async (id: string) => {
     const bill = bills.find((b) => b._id === id)
     if (!bill) return
@@ -567,6 +577,8 @@ export default function BillingPage() {
       !q ||
       b.patientName.toLowerCase().includes(q) ||
       b.referredBy?.toLowerCase().includes(q) ||
+      String(b.srNo).includes(q) ||
+      b.contact?.includes(q) ||
       b.items.some((i) => i.study.toLowerCase().includes(q))
   )
 
@@ -635,6 +647,42 @@ export default function BillingPage() {
           </Card>
         ))}
       </div>
+
+      {/* Pending billing — registered studies that have no bill yet */}
+      {unbilled.length > 0 && (
+        <Card className="border-amber-200 bg-amber-50/40">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Clock className="h-4 w-4 text-amber-600" />
+              Pending Billing
+            </CardTitle>
+            <CardDescription>
+              {unbilled.length} patient{unbilled.length !== 1 ? "s" : ""} with studies not billed yet
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="pt-0 divide-y divide-amber-100">
+            {unbilled.map((p) => (
+              <div key={p._id} className="flex flex-col sm:flex-row sm:items-center gap-2 py-3">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm">{p.name} <span className="text-xs text-muted-foreground font-normal">· #{p.srNo}</span></p>
+                  <div className="flex flex-wrap gap-1.5 mt-1">
+                    {unbilledStudiesOf(p).map((s) => (
+                      <span key={s} className="text-[11px] bg-white border border-amber-200 text-amber-800 px-2 py-0.5 rounded-full">
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+                <Button asChild size="sm" className="shrink-0 h-8 text-xs gap-1.5">
+                  <Link href={createBillHref(p)}>
+                    <Plus className="h-3.5 w-3.5" />Create Bill
+                  </Link>
+                </Button>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Bills table with tabs */}
       <Card>

@@ -114,24 +114,53 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   const patient = await Patient.findById(current.patientId)
   if (patient) {
     ensureStudies(patient)
-    const studyIndex = patient.studies.findIndex((s: any) => s.billId?.toString() === id)
-    if (studyIndex !== -1) {
-      const entry = patient.studies[studyIndex]
+    // Mirror the bill totals onto every study this bill covers. A study whose
+    // name was just added as a line item on this bill (via the edit screen)
+    // gets linked here too — without that, an unbilled study added to the
+    // bill would stay marked unbilled on the patient forever.
+    const billedNames = new Set(
+      (updatedFields.items ?? current.items ?? []).map((i: { study: string }) => i.study.trim().toLowerCase())
+    )
+    let touched = 0
+    for (const entry of patient.studies) {
+      const linked     = entry.billId?.toString() === id
+      const nameOnBill = !entry.billId && billedNames.has((entry.name || "").trim().toLowerCase())
+      if (!linked && !nameOnBill) continue
+      if (nameOnBill) entry.billId = current._id
       entry.charges = charges
       entry.paid = paid
       entry.discount = discount
       entry.paymentMode = paymentMode
-    } else {
-      if (patient.studies[0]) {
-        patient.studies[0].charges = charges
-        patient.studies[0].paid = paid
-        patient.studies[0].discount = discount
-        patient.studies[0].paymentMode = paymentMode
-      }
+      touched++
+    }
+    if (touched === 0 && patient.studies[0]) {
+      patient.studies[0].charges = charges
+      patient.studies[0].paid = paid
+      patient.studies[0].discount = discount
+      patient.studies[0].paymentMode = paymentMode
     }
     syncLegacyMirror(patient)
     patient.markModified("studies")
+
+    // A name/referral correction typed on the bill itself is a patient-record
+    // correction, not a bill-only detail — write it through to the patient so
+    // reports (which always read the live patient) and every other bill for
+    // this patient stay in sync, not just the one bill being edited here.
+    const identitySync: Record<string, unknown> = {}
+    if (typeof updatedFields.patientName === "string" && updatedFields.patientName.trim() && updatedFields.patientName.trim() !== patient.name) {
+      patient.name = updatedFields.patientName.trim()
+      identitySync.patientName = patient.name
+    }
+    if (typeof updatedFields.referredBy === "string" && updatedFields.referredBy.trim() && updatedFields.referredBy.trim() !== patient.referredBy) {
+      patient.referredBy = updatedFields.referredBy.trim()
+      identitySync.referredBy = patient.referredBy
+    }
+
     await patient.save()
+
+    if (Object.keys(identitySync).length > 0) {
+      await Bill.updateMany({ patientId: patient._id, _id: { $ne: id } }, { $set: identitySync })
+    }
   }
 
   // Update Study catalogue prices from updated bill items

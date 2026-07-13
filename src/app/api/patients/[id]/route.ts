@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
+import mongoose from "mongoose"
 import { connectDB } from "@/lib/db"
 import Patient from "@/models/Patient"
 import Study from "@/models/Study"
+import Bill from "@/models/Bill"
 import Notification from "@/models/Notification"
 import { autoCategory } from "@/lib/study-catalogue"
 
@@ -67,6 +69,104 @@ async function generateSlug(patient: PatientDoc, studyName: string, excludeId: s
   return slug
 }
 
+// When a study is dropped from a patient's study list, pull its line off
+// whatever Bill it was billed on (deleting the Bill outright if that was the
+// only study on it), and keep any sibling studies still on that Bill in sync.
+async function cascadeRemoveStudiesFromBills(patient: PatientDoc, removed: Array<{ name: string; billId?: mongoose.Types.ObjectId | null }>) {
+  const billIds = Array.from(
+    new Set(removed.filter((s) => s.billId).map((s) => String(s.billId)))
+  )
+  for (const billId of billIds) {
+    const bill = await Bill.findById(billId)
+    if (!bill) continue
+
+    const droppedNames = new Set(
+      removed.filter((s) => String(s.billId) === billId).map((s) => s.name.trim().toLowerCase())
+    )
+    bill.items = bill.items.filter((i: { study: string }) => !droppedNames.has(i.study.trim().toLowerCase()))
+
+    if (bill.items.length === 0) {
+      await Bill.findByIdAndDelete(billId)
+      continue
+    }
+
+    bill.charges = bill.items.reduce((sum: number, i: { quantity: number; price: number }) => sum + i.quantity * i.price, 0)
+    // The bill's discount/paid were never split per study, so there's no true
+    // per-item amount to subtract when one study drops off — just clamp them
+    // to the smaller charges total so the balance can't go negative/nonsensical
+    // (e.g. "paid" exceeding what's left owed). Staff can correct the exact
+    // split manually on the bill if needed.
+    bill.discount = Math.min(bill.discount, bill.charges)
+    bill.paid = Math.min(bill.paid, bill.charges - bill.discount)
+    bill.balance = bill.charges - bill.discount - bill.paid
+    await bill.save()
+
+    // Studies still remaining on this patient that share the same bill need
+    // their mirrored charges/balance updated to match the trimmed-down bill.
+    for (const entry of patient.studies) {
+      if (String(entry.billId) === billId) {
+        entry.charges = bill.charges
+        entry.paid = bill.paid
+        entry.discount = bill.discount
+        entry.paymentMode = bill.paymentMode
+      }
+    }
+  }
+}
+
+// The mirror image of cascadeRemoveStudiesFromBills: when a study is added to
+// a patient who already has a bill, append it as a line on their most recent
+// bill (at its catalogue price) so billing stays in step with the study list —
+// otherwise a study added after billing never shows on any bill at all.
+// Patients with no bill yet are left alone; the "New Bill" screen already
+// picks up every unbilled study when a bill is eventually raised.
+async function cascadeAddStudiesToBill(patient: PatientDoc, added: Array<{ name: string; billId?: mongoose.Types.ObjectId | null }>) {
+  const unbilled = added.filter((s) => !s.billId && s.name?.trim())
+  if (unbilled.length === 0) return
+
+  const bill = await Bill.findOne({ patientId: patient._id }).sort({ createdAt: -1 })
+  if (!bill) return
+
+  const existingNames = new Set(bill.items.map((i: { study: string }) => i.study.trim().toLowerCase()))
+  let changed = false
+  for (const s of unbilled) {
+    const name = s.name.trim()
+    if (existingNames.has(name.toLowerCase())) {
+      // Already a line for this study name (e.g. re-added after a rename) —
+      // just link the entry back to the bill instead of double-charging.
+      s.billId = bill._id
+      continue
+    }
+    const catalogue = await Study.findOne({ name }).select("price")
+    bill.items.push({ study: name, quantity: 1, price: catalogue?.price ?? 0, discount: 0 })
+    existingNames.add(name.toLowerCase())
+    s.billId = bill._id
+    changed = true
+  }
+  if (!changed) return
+
+  bill.charges = bill.items.reduce((sum: number, i: { quantity: number; price: number }) => sum + i.quantity * i.price, 0)
+  bill.balance = bill.charges - bill.discount - bill.paid
+  bill.editHistory.unshift({
+    editor: "System (study added)",
+    editedAt: new Date(),
+    changedFields: ["items", "charges"],
+    previousValues: {},
+  })
+  bill.markModified("items")
+  await bill.save()
+
+  // Every study entry linked to this bill mirrors the new totals.
+  for (const entry of patient.studies) {
+    if (String(entry.billId) === String(bill._id)) {
+      entry.charges = bill.charges
+      entry.paid = bill.paid
+      entry.discount = bill.discount
+      entry.paymentMode = bill.paymentMode
+    }
+  }
+}
+
 // GET /api/patients/:id
 export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -100,9 +200,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       registrationEditHistoryEntry,
       studyIndex: rawStudyIndex,
       addStudy,
+      removeStudyIndex,
       studyName,
       studies: studiesUpdate,
-      reportStatus, reportBody, reportDocx, reportPdf,
+      reportStatus, reportBody, reportDocx, reportPdf, signatureLayout,
       ...regularFields
     } = body
 
@@ -110,14 +211,47 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (!patient) return NextResponse.json({ error: "Not found" }, { status: 404 })
     ensureStudies(patient)
 
+    // ── Delete one study's report (drops the study + its bill line) ──
+    // Removing the last remaining study deletes the whole patient record —
+    // a patient with zero studies can't exist in this app.
+    if (removeStudyIndex !== undefined) {
+      const idx = Number(removeStudyIndex)
+      if (!Number.isInteger(idx) || idx < 0 || idx >= patient.studies.length) {
+        return NextResponse.json({ error: "Invalid study index" }, { status: 400 })
+      }
+      const removed = patient.studies.splice(idx, 1)
+      await cascadeRemoveStudiesFromBills(patient, removed)
+      if (patient.studies.length === 0) {
+        await Patient.findByIdAndDelete(id)
+        return NextResponse.json({ patient: null, deleted: true })
+      }
+      syncLegacyMirror(patient)
+      patient.markModified("studies")
+      await patient.save()
+      return NextResponse.json({ patient })
+    }
+
     // ── Plain registration fields ──
     const allowed = ["name", "age", "gender", "contact", "address", "referredBy", "srNo", "charges", "paid", "discount", "paymentMode", "billId"]
+    // Bills keep their own copy of name/age/gender/contact/referredBy/srNo
+    // (denormalized so a bill still reads correctly if a patient is later
+    // deleted) — a registration edit has to push those same fields onto every
+    // bill already raised for this patient, or the bill keeps showing
+    // whatever was typed at booking time even after it's corrected here.
+    const BILL_SYNC_FIELDS: Record<string, string> = {
+      name: "patientName", age: "age", gender: "gender", contact: "contact", referredBy: "referredBy", srNo: "srNo",
+    }
+    const billSync: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(regularFields)) {
       if (allowed.includes(k)) (patient as unknown as Record<string, unknown>)[k] = v
+      if (k in BILL_SYNC_FIELDS) billSync[BILL_SYNC_FIELDS[k]] = v
       // legacy single-study edit from older clients
       if (k === "study" && typeof v === "string" && v.trim()) {
         if (patient.studies.length > 0) patient.studies[0].name = v.trim()
       }
+    }
+    if (Object.keys(billSync).length > 0) {
+      await Bill.updateMany({ patientId: patient._id }, { $set: billSync })
     }
 
     // ── Replace / reconcile the study list (registration edit) ──
@@ -130,13 +264,26 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         .filter((s) => s.name)
       if (cleaned.length > 0) {
         const old = patient.studies
-        patient.studies = cleaned.map((s) => {
-          // keep report data if the same study name existed before (or same position with same name)
-          const match = old.find((o: { name: string }) => o.name === s.name)
-          return match
-            ? Object.assign(match, { category: s.category })
-            : { name: s.name, category: s.category, reportStatus: "pending", reportBody: "", reportDocx: "", reportPdf: "", reportSlug: "", editHistory: [] }
+        // Matched by name, but each old entry is only used ONCE (a proper
+        // multiset diff) — a plain "does cleaned contain this name" check
+        // would treat two same-named studies (e.g. two "USG Abdomen" visits)
+        // as still-present even when only one of the two duplicates remains,
+        // silently keeping the other's stale bill line forever.
+        const usedOldIndices = new Set<number>()
+        const newIndices: number[] = []
+        const merged = cleaned.map((s, mi) => {
+          const matchIdx = old.findIndex((o: { name: string }, i: number) => !usedOldIndices.has(i) && o.name === s.name)
+          if (matchIdx === -1) {
+            newIndices.push(mi)
+            return { name: s.name, category: s.category, reportStatus: "pending", reportBody: "", reportDocx: "", reportPdf: "", reportSlug: "", editHistory: [] }
+          }
+          usedOldIndices.add(matchIdx)
+          return Object.assign(old[matchIdx], { category: s.category })
         })
+        const removed = old.filter((_: unknown, i: number) => !usedOldIndices.has(i))
+        if (removed.length > 0) await cascadeRemoveStudiesFromBills(patient, removed)
+
+        patient.studies = merged
         await Promise.all(cleaned.map((s) =>
           Study.findOneAndUpdate(
             { name: s.name },
@@ -144,6 +291,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
             { upsert: true }
           )
         ))
+        // Studies newly added by this edit also get a line on the existing bill
+        if (newIndices.length > 0) {
+          await cascadeAddStudiesToBill(patient, newIndices.map((i) => patient.studies[i]).filter(Boolean))
+        }
       }
     }
 
@@ -160,6 +311,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         { $setOnInsert: { name, category, price: 0, fromCatalogue: false, firstSeenAt: new Date() } },
         { upsert: true }
       )
+      await cascadeAddStudiesToBill(patient, [patient.studies[patient.studies.length - 1]])
     }
 
     // ── Rename the current study (report template / heading changed) ──
@@ -167,6 +319,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       const idx = Math.min(Math.max(Number(rawStudyIndex) || 0, 0), Math.max(patient.studies.length - 1, 0))
       const entry = patient.studies[idx]
       if (entry && entry.name !== studyName.trim()) {
+        const oldName = entry.name
         entry.name = studyName.trim()
         entry.category = autoCategory(entry.name)
         await Study.findOneAndUpdate(
@@ -174,13 +327,25 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
           { $setOnInsert: { name: entry.name, category: entry.category, price: 0, fromCatalogue: false, firstSeenAt: new Date() } },
           { upsert: true }
         )
+        // Keep the linked bill's line item labelled the same as the report —
+        // otherwise the bill keeps showing the study's old name forever.
+        if (entry.billId) {
+          const bill = await Bill.findById(entry.billId)
+          const item = bill?.items.find((i: { study: string }) => i.study.trim().toLowerCase() === oldName.trim().toLowerCase())
+          if (bill && item) {
+            item.study = entry.name
+            bill.markModified("items")
+            await bill.save()
+          }
+        }
       }
     }
 
     // ── Per-study report fields ──
     const hasReportFields =
       reportStatus !== undefined || reportBody !== undefined ||
-      reportDocx !== undefined || reportPdf !== undefined || !!editHistoryEntry
+      reportDocx !== undefined || reportPdf !== undefined || !!editHistoryEntry ||
+      signatureLayout !== undefined
 
     if (hasReportFields) {
       const idx = Math.min(Math.max(Number(rawStudyIndex) || 0, 0), Math.max(patient.studies.length - 1, 0))
@@ -194,6 +359,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
           if (!entry.reportSlug) entry.reportSlug = await generateSlug(patient, entry.name, id)
         }
         if (editHistoryEntry) entry.editHistory.unshift(editHistoryEntry)
+        // Per-report drag/resize override for the two signature-block images
+        if (signatureLayout !== undefined) entry.signatureLayout = signatureLayout
       }
     }
 

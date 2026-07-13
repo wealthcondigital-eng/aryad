@@ -1,15 +1,15 @@
 "use client"
 
-import { useState, useEffect, useMemo, useRef } from "react"
-import Link from "next/link"
+import { useState, useEffect, useMemo } from "react"
 import {
-  Search, Phone, UserCheck, Info, Calendar,
+  Search, UserCheck, Info,
   ChevronDown, Loader2, FileText, ReceiptText,
-  Clock, CheckCircle2, AlertCircle, Users, TrendingUp, X, Printer,
+  Clock, CheckCircle2, AlertCircle, Users, TrendingUp, X,
 } from "lucide-react"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { motion, AnimatePresence } from "framer-motion"
+import { receiptLetterheadHtml, receiptPatientBoxHtml, receiptItemsTableHtml, ReceiptRow } from "@/lib/receipt-letterhead"
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -31,6 +31,20 @@ interface DoctorEntry {
   referrals: number
 }
 
+// One entry per study a patient has — each study has its own report, bill and status
+interface StudyEntry {
+  name: string
+  category?: string
+  reportStatus: "pending" | "in_progress" | "completed"
+  reportBody?: string
+  reportSlug?: string
+  billId?: string
+  charges?: number
+  paid?: number
+  discount?: number
+  paymentMode?: string
+}
+
 interface PatientRef {
   _id: string
   srNo: number
@@ -39,6 +53,7 @@ interface PatientRef {
   gender: string
   contact: string
   study: string
+  studies?: StudyEntry[]
   referredBy: string
   reportStatus: "pending" | "in_progress" | "completed"
   reportBody?: string
@@ -50,6 +65,18 @@ interface PatientRef {
   createdAt: string
 }
 
+// Every patient has at least one study; older records fall back to the legacy
+// single-study fields so this always returns at least one entry.
+function studiesOf(p: PatientRef): StudyEntry[] {
+  return p.studies?.length
+    ? p.studies
+    : [{
+        name: p.study, reportStatus: p.reportStatus, reportBody: p.reportBody,
+        billId: p.billId, charges: p.charges, paid: p.paid,
+        discount: p.discount, paymentMode: p.paymentMode,
+      }]
+}
+
 interface BillDoc {
   _id: string
   srNo: number
@@ -58,7 +85,7 @@ interface BillDoc {
   gender?: string
   contact?: string
   referredBy: string
-  items: { study: string; quantity: number; price: number }[]
+  items: { study: string; quantity: number; price: number; discount?: number }[]
   charges: number
   discount: number
   paid: number
@@ -74,60 +101,18 @@ interface BillDoc {
 function buildBillHtml(b: BillDoc, baseUrl: string): string {
   const dateStr = new Date(b.billDate || b.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
   const bNo = `B-${b.srNo || b._id.slice(-5).toUpperCase()}`
-
-  const itemRows = b.items.map((item, idx) => `
-    <tr>
-      <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${idx + 1}.</td>
-      <td style="border:1px solid #111;padding:4px 6px;text-transform:uppercase;">${item.study}</td>
-      <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${(item.price * item.quantity).toLocaleString()}</td>
-      <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${idx === 0 ? (b.discount ?? 0).toLocaleString() : 0}</td>
-      <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${idx === 0 ? b.paid.toLocaleString() : 0}</td>
-    </tr>`).join("")
-
+  const rows: ReceiptRow[] = b.items.map((item) => ({ study: item.study, amount: item.price * item.quantity, discount: item.discount || 0 }))
   const totalCharges = b.items.reduce((s, i) => s + i.price * i.quantity, 0)
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Receipt</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: Arial, sans-serif; font-size: 10pt; line-height: 1.5; color: #111; padding: 10mm 14mm; max-width: 160mm; margin: 0 auto; }
-table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
-th { background: #f0f0f0; font-weight: bold; text-transform: uppercase; text-align: center; border: 1px solid #111; padding: 4px 6px; }
-.total-row td { font-weight: bold; background: #f9f9f9; }
-.patient-info { margin-bottom: 8px; font-size: 8.5pt; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; border-bottom: 1.5px solid #111; padding-bottom: 6px; }
-.patient-info div { margin-bottom: 1px; }
-.patient-info strong { font-weight: bold; }
 </style></head><body>
-<div style="text-align:center;margin-bottom:10px;">
-  <img src="${baseUrl}/logo.jpeg" style="width:72px;height:72px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" />
-  <h1 style="font-size:15pt;font-weight:bold;text-transform:uppercase;letter-spacing:2px;">Aarya Diagnostic Center</h1>
-  <p style="font-size:8.5pt;color:#333;line-height:1.6;">Shop no - 5, K. K. Smruti Building, New Maneklal Estate, S.N. Mehta Road, Ghatkopar (W) 400086<br>Contact no - 9819022444 &nbsp;&nbsp; aaryadiagnosticsmumbai@gmail.com</p>
-</div>
-<div class="patient-info">
-  <div><strong>NAME:</strong> ${b.patientName.toUpperCase()}</div>
-  <div><strong>DATE:</strong> ${dateStr}</div>
-  <div><strong>AGE / SEX:</strong> ${b.age || "—"} YRS &nbsp;/&nbsp; ${(b.gender || "—").toUpperCase()}</div>
-  <div><strong>MOBILE:</strong> ${b.contact || "—"}</div>
-  <div><strong>REF. BY:</strong> ${(b.referredBy || "Self").toUpperCase()}</div>
-  <div><strong>SR. NO:</strong> #${b.srNo || "—"}</div>
-</div>
-<table style="margin-bottom:8px;">
-  <thead><tr>
-    <th style="width:50px;">Sr.<br>No.</th>
-    <th>Investigation of Patient</th>
-    <th style="width:70px;">Charges</th>
-    <th style="width:70px;">Discount</th>
-    <th style="width:70px;">Paid</th>
-  </tr></thead>
-  <tbody>
-    ${itemRows}
-    <tr class="total-row">
-      <td colspan="2" style="border:1px solid #111;padding:4px 6px;text-align:center;">Total</td>
-      <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${totalCharges.toLocaleString()}</td>
-      <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${b.discount.toLocaleString()}</td>
-      <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${b.paid.toLocaleString()}</td>
-    </tr>
-  </tbody>
-</table>
+${receiptLetterheadHtml(baseUrl)}
+<div style="border-top:2.5px solid #111;border-bottom:2.5px solid #111;padding:2px 0;text-align:center;font-weight:bold;font-size:9.5pt;text-transform:uppercase;letter-spacing:1px;margin:8px 0;">Payment Receipt</div>
+${receiptPatientBoxHtml({ name: b.patientName, date: dateStr, age: b.age, gender: b.gender, contact: b.contact, referredBy: b.referredBy, srNo: b.srNo })}
+${receiptItemsTableHtml(rows, totalCharges, b.paid)}
 <div style="font-size:9.5pt;">
   <p><strong>Date:</strong> ${dateStr}</p>
   <p><strong>Payment Method</strong> - ${(b.paymentMode || "Cash").toUpperCase()}</p>
@@ -137,7 +122,9 @@ th { background: #f0f0f0; font-weight: bold; text-transform: uppercase; text-ali
 </body></html>`
 }
 
-function buildReportHtml(p: PatientRef, baseUrl: string): string {
+// studyName/reportBody are passed explicitly (not read off `p`) since each of
+// a patient's studies has its own name and report body.
+function buildReportHtml(p: PatientRef, studyName: string, reportBody: string, baseUrl: string): string {
   const date = new Date(p.createdAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
 
   const infoRows: [string, string][] = [["NAME", p.name.toUpperCase()], ["DATE", date]]
@@ -167,8 +154,8 @@ body { font-family: Arial, sans-serif; font-size: 11pt; line-height: 1.5; paddin
 .study { text-align: center; font-weight: bold; font-size: 12pt; text-transform: uppercase; text-decoration: underline; margin: 12px 0 14px; }
 </style></head><body>
 <div class="info-block">${infoHtml}</div>
-<div class="study">${p.study}</div>
-<div style="font-size:10pt;line-height:1.6;">${p.reportBody ?? ""}</div>
+<div class="study">${studyName}</div>
+<div style="font-size:10pt;line-height:1.6;">${reportBody}</div>
 </body></html>`
 }
 
@@ -187,11 +174,11 @@ function fmtDate(iso: string) {
   catch { return iso }
 }
 
-function billStatusOf(p: PatientRef): "paid" | "partial" | "pending" | null {
-  if (!p.charges) return null
-  const net = p.charges - (p.discount ?? 0)
-  if ((p.paid ?? 0) >= net) return "paid"
-  if ((p.paid ?? 0) > 0) return "partial"
+function billStatusOf(s: StudyEntry): "paid" | "partial" | "pending" | null {
+  if (!s.charges) return null
+  const net = s.charges - (s.discount ?? 0)
+  if ((s.paid ?? 0) >= net) return "paid"
+  if ((s.paid ?? 0) > 0) return "partial"
   return "pending"
 }
 
@@ -209,25 +196,25 @@ const REPORT_STATUS_META: Record<string, { label: string; cls: string; icon: Rea
 
 // ── Bill Modal ───────────────────────────────────────────────────────────────
 
-function BillModal({ patient, onClose }: { patient: PatientRef; onClose: () => void }) {
+// Read-only for the doctor's referral view — no print / edit-in-billing
+// controls here; those live in Billing, which doctors don't need from this page.
+function BillModal({ patient, sidx, onClose }: { patient: PatientRef; sidx: number; onClose: () => void }) {
   const [bill,    setBill]    = useState<BillDoc | null>(null)
   const [loading, setLoading] = useState(true)
-  const iframeRef             = useRef<HTMLIFrameElement>(null)
+  const entry  = studiesOf(patient)[sidx]
+  const billId = entry?.billId
 
   useEffect(() => {
-    if (!patient.billId) { setLoading(false); return }
-    fetch(`/api/billing/${patient.billId}`)
+    if (!billId) { setBill(null); setLoading(false); return }
+    setLoading(true)
+    fetch(`/api/billing/${billId}`)
       .then((r) => r.json())
       .then((d) => setBill(d.bill ?? null))
       .catch(() => {})
       .finally(() => setLoading(false))
-  }, [patient.billId])
+  }, [billId])
 
   const receiptHtml = bill ? buildBillHtml(bill, typeof window !== "undefined" ? window.location.origin : "") : null
-
-  const handlePrint = () => {
-    iframeRef.current?.contentWindow?.print()
-  }
 
   return (
     <AnimatePresence>
@@ -236,7 +223,7 @@ function BillModal({ patient, onClose }: { patient: PatientRef; onClose: () => v
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+        className="fixed inset-0 bg-black/50 backdrop-blur-[2px] z-50 flex items-center justify-center p-4"
         onClick={onClose}
       >
         <motion.div
@@ -249,12 +236,16 @@ function BillModal({ patient, onClose }: { patient: PatientRef; onClose: () => v
         >
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
-            <div className="flex items-center gap-2">
-              <ReceiptText className="h-4 w-4 text-blue-500" />
-              <h2 className="font-semibold text-sm text-gray-900">Payment Receipt</h2>
-              <span className="text-xs text-gray-400">— {patient.name} #{patient.srNo}</span>
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="h-8 w-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+                <ReceiptText className="h-4 w-4 text-blue-600" />
+              </div>
+              <div className="min-w-0">
+                <h2 className="font-semibold text-sm text-gray-900 truncate">Payment Receipt</h2>
+                <p className="text-xs text-gray-400 truncate">{patient.name} · #{patient.srNo}{entry?.name ? ` · ${entry.name}` : ""}</p>
+              </div>
             </div>
-            <button onClick={onClose} className="h-8 w-8 rounded-full hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-600 transition-colors">
+            <button onClick={onClose} className="h-8 w-8 rounded-full hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-600 transition-colors shrink-0">
               <X className="h-4 w-4" />
             </button>
           </div>
@@ -269,12 +260,11 @@ function BillModal({ patient, onClose }: { patient: PatientRef; onClose: () => v
             {!loading && !receiptHtml && (
               <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">
                 <ReceiptText className="h-10 w-10 mb-2 opacity-20" />
-                <p className="text-sm">No bill created for this patient yet.</p>
+                <p className="text-sm">No bill created for this study yet.</p>
               </div>
             )}
             {!loading && receiptHtml && (
               <iframe
-                ref={iframeRef}
                 srcDoc={receiptHtml}
                 className="w-full h-full border-0"
                 style={{ minHeight: "500px" }}
@@ -283,28 +273,11 @@ function BillModal({ patient, onClose }: { patient: PatientRef; onClose: () => v
             )}
           </div>
 
-          {/* Footer */}
-          <div className="flex items-center justify-between gap-3 px-5 py-3 bg-gray-50 border-t border-gray-100 shrink-0">
+          {/* Footer — view-only, no print / editing actions here */}
+          <div className="flex items-center justify-end px-5 py-3 bg-gray-50 border-t border-gray-100 shrink-0">
             <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 transition-colors">
               Close
             </button>
-            <div className="flex items-center gap-2">
-              {receiptHtml && (
-                <button
-                  onClick={handlePrint}
-                  className="inline-flex items-center gap-2 px-4 py-2 border border-gray-200 hover:bg-gray-100 text-gray-700 text-sm font-medium rounded-lg transition-colors"
-                >
-                  <Printer className="h-4 w-4" />Print
-                </button>
-              )}
-              <Link
-                href="/billing"
-                onClick={onClose}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
-              >
-                <ReceiptText className="h-4 w-4" />Open in Billing
-              </Link>
-            </div>
           </div>
         </motion.div>
       </motion.div>
@@ -314,16 +287,35 @@ function BillModal({ patient, onClose }: { patient: PatientRef; onClose: () => v
 
 // ── Report Modal ─────────────────────────────────────────────────────────────
 
-function ReportModal({ patient, onClose }: { patient: PatientRef; onClose: () => void }) {
-  const iframeRef  = useRef<HTMLIFrameElement>(null)
-  const reportUrl  = `/reports/new?id=${patient._id}&patient=${encodeURIComponent(patient.name)}&srNo=${patient.srNo}&study=${encodeURIComponent(patient.study ?? "")}&age=${patient.age}&gender=${patient.gender}&contact=${patient.contact}&refBy=${encodeURIComponent(patient.referredBy ?? "")}${patient.reportStatus !== "pending" ? "&load=1" : ""}`
-  const reportHtml = patient.reportBody
-    ? buildReportHtml(patient, typeof window !== "undefined" ? window.location.origin : "")
-    : null
+// Read-only for the doctor's referral view — no edit / continue / print
+// controls here; report editing stays in the Reports section.
+function ReportModal({ patient, sidx, onClose }: { patient: PatientRef; sidx: number; onClose: () => void }) {
+  const entry      = studiesOf(patient)[sidx]
+  const studyName  = entry?.name || patient.study
+  const status     = entry?.reportStatus ?? "pending"
+  const rMeta       = REPORT_STATUS_META[status] ?? REPORT_STATUS_META.pending
 
-  const handlePrint = () => {
-    iframeRef.current?.contentWindow?.print()
-  }
+  // The patient list never carries reportBody (stripped for payload size), so
+  // fetch the full record for this one study when the modal opens.
+  const [reportBody, setReportBody] = useState<string | null>(null)
+  const [loading,    setLoading]    = useState(true)
+
+  useEffect(() => {
+    setLoading(true)
+    setReportBody(null)
+    fetch(`/api/patients/${patient._id}`)
+      .then((r) => r.json())
+      .then((d) => {
+        const body = d.patient?.studies?.[sidx]?.reportBody ?? d.patient?.reportBody ?? ""
+        setReportBody(body || "")
+      })
+      .catch(() => setReportBody(""))
+      .finally(() => setLoading(false))
+  }, [patient._id, sidx])
+
+  const reportHtml = reportBody
+    ? buildReportHtml(patient, studyName, reportBody, typeof window !== "undefined" ? window.location.origin : "")
+    : null
 
   return (
     <AnimatePresence>
@@ -332,7 +324,7 @@ function ReportModal({ patient, onClose }: { patient: PatientRef; onClose: () =>
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+        className="fixed inset-0 bg-black/50 backdrop-blur-[2px] z-50 flex items-center justify-center p-4"
         onClick={onClose}
       >
         <motion.div
@@ -345,24 +337,33 @@ function ReportModal({ patient, onClose }: { patient: PatientRef; onClose: () =>
         >
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 shrink-0">
-            <div className="flex items-center gap-2">
-              <FileText className="h-4 w-4 text-violet-500" />
-              <h2 className="font-semibold text-sm text-gray-900">Report</h2>
-              <span className="text-xs text-gray-400">— {patient.name} #{patient.srNo}</span>
-              {patient.study && (
-                <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded font-medium">{patient.study}</span>
-              )}
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="h-8 w-8 rounded-lg bg-violet-50 flex items-center justify-center shrink-0">
+                <FileText className="h-4 w-4 text-violet-600" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h2 className="font-semibold text-sm text-gray-900 truncate">{studyName || "Report"}</h2>
+                  <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border shrink-0 ${rMeta.cls}`}>
+                    {rMeta.icon}{rMeta.label}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-400 truncate">{patient.name} · #{patient.srNo}</p>
+              </div>
             </div>
-            <button onClick={onClose} className="h-8 w-8 rounded-full hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-600 transition-colors">
+            <button onClick={onClose} className="h-8 w-8 rounded-full hover:bg-gray-100 flex items-center justify-center text-gray-400 hover:text-gray-600 transition-colors shrink-0">
               <X className="h-4 w-4" />
             </button>
           </div>
 
           {/* Body — iframe rendering exact print HTML */}
           <div className="flex-1 overflow-hidden bg-gray-100">
-            {reportHtml ? (
+            {loading ? (
+              <div className="flex items-center justify-center h-64 gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />Loading report…
+              </div>
+            ) : reportHtml ? (
               <iframe
-                ref={iframeRef}
                 srcDoc={reportHtml}
                 className="w-full h-full border-0"
                 style={{ minHeight: "500px" }}
@@ -372,34 +373,15 @@ function ReportModal({ patient, onClose }: { patient: PatientRef; onClose: () =>
               <div className="flex flex-col items-center justify-center h-64 text-muted-foreground">
                 <FileText className="h-10 w-10 mb-2 opacity-20" />
                 <p className="text-sm font-medium">No report submitted yet</p>
-                <p className="text-xs mt-1 opacity-60">Open the editor to fill the report.</p>
               </div>
             )}
           </div>
 
-          {/* Footer */}
-          <div className="flex items-center justify-between gap-3 px-5 py-3 bg-gray-50 border-t border-gray-100 shrink-0">
+          {/* Footer — view-only, no edit / continue / print actions here */}
+          <div className="flex items-center justify-end px-5 py-3 bg-gray-50 border-t border-gray-100 shrink-0">
             <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 transition-colors">
               Close
             </button>
-            <div className="flex items-center gap-2">
-              {reportHtml && (
-                <button
-                  onClick={handlePrint}
-                  className="inline-flex items-center gap-2 px-4 py-2 border border-gray-200 hover:bg-gray-100 text-gray-700 text-sm font-medium rounded-lg transition-colors"
-                >
-                  <Printer className="h-4 w-4" />Print
-                </button>
-              )}
-              <Link
-                href={reportUrl}
-                onClick={onClose}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white text-sm font-medium rounded-lg transition-colors"
-              >
-                <FileText className="h-4 w-4" />
-                {patient.reportStatus === "completed" ? "Edit Report" : patient.reportStatus === "in_progress" ? "Continue Report" : "Open Report Editor"}
-              </Link>
-            </div>
           </div>
         </motion.div>
       </motion.div>
@@ -407,119 +389,107 @@ function ReportModal({ patient, onClose }: { patient: PatientRef; onClose: () =>
   )
 }
 
-// ── Patient card ─────────────────────────────────────────────────────────────
+// ── Patient group card ───────────────────────────────────────────────────────
+// One card per patient (not per study). The patient's identity — name, age,
+// contact, date — is shown once at the top so it isn't repeated per test; each
+// test the patient was referred for is then listed as its own plain row below,
+// with its report/bill status spelled out in words rather than a dense strip
+// of colored badges, and its own View Report / View Bill buttons.
 
-function PatientCard({
-  patient, index, onViewBill, onViewReport,
+function PatientGroupCard({
+  patient, entries, index, onViewBill, onViewReport,
 }: {
   patient: PatientRef
+  entries: StudyEntry[]
   index: number
-  onViewBill: (p: PatientRef) => void
-  onViewReport: (p: PatientRef) => void
+  onViewBill: (p: PatientRef, sidx: number) => void
+  onViewReport: (p: PatientRef, sidx: number) => void
 }) {
-  const bStatus = billStatusOf(patient)
-  const rMeta   = REPORT_STATUS_META[patient.reportStatus] ?? REPORT_STATUS_META.pending
-  const net     = (patient.charges ?? 0) - (patient.discount ?? 0)
-  const balance = Math.max(0, net - (patient.paid ?? 0))
+  const BILL_LABEL: Record<string, string> = { paid: "Paid", partial: "Partially Paid", pending: "Unpaid" }
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, delay: index * 0.055, ease: "easeOut" }}
-      className="bg-white border border-gray-200 rounded-xl p-5 hover:border-blue-300 hover:shadow-md transition-all"
+      className="bg-white border border-gray-200 rounded-xl overflow-hidden hover:border-blue-300 hover:shadow-sm transition-all"
     >
-      <div className="flex items-start gap-4">
-        {/* Avatar */}
-        <div className="h-11 w-11 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center text-sm font-bold shrink-0">
+      {/* Header — patient identity shown once, regardless of how many tests */}
+      <div className="flex items-center gap-3 px-4 py-3.5">
+        <div className="h-10 w-10 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center text-sm font-bold shrink-0">
           {patInitials(patient.name)}
         </div>
-
         <div className="flex-1 min-w-0">
-          {/* Row 1: name + sr# */}
           <div className="flex items-center gap-2 flex-wrap">
-            <p className="text-base font-bold text-gray-900">{patient.name}</p>
+            <p className="text-sm font-bold text-gray-900">{patient.name}</p>
             <span className="text-xs font-mono text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">#{patient.srNo}</span>
           </div>
-
-          {/* Row 2: meta chips */}
-          <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-            {patient.study && (
-              <span className="bg-blue-50 text-blue-700 border border-blue-200 px-2.5 py-0.5 rounded-full text-xs font-semibold">{patient.study}</span>
-            )}
-            {patient.age > 0 && (
-              <span className="text-xs text-gray-500">{patient.age} yrs · {patient.gender}</span>
-            )}
-            {patient.contact && (
-              <span className="text-xs text-gray-500 flex items-center gap-1"><Phone className="h-3 w-3" />{patient.contact}</span>
-            )}
-            <span className="text-xs text-gray-400 flex items-center gap-1"><Calendar className="h-3 w-3" />{fmtDate(patient.createdAt)}</span>
-          </div>
-
-          {/* Row 3: status badges */}
-          <div className="flex items-center gap-2 mt-2 flex-wrap">
-            {bStatus && (
-              <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border capitalize ${BILL_STATUS_STYLE[bStatus]}`}>
-                <ReceiptText className="h-3 w-3" />Bill: {bStatus}
-              </span>
-            )}
-            <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-full border ${rMeta.cls}`}>
-              {rMeta.icon}{rMeta.label}
-            </span>
-          </div>
-
-          {/* Row 4: billing numbers */}
-          {patient.charges ? (
-            <div className="mt-3 flex items-center gap-3 flex-wrap p-3 bg-gray-50 rounded-lg">
-              <div className="text-center">
-                <p className="text-[11px] text-gray-400 mb-0.5">Charges</p>
-                <p className="text-sm font-bold text-gray-800">₹{patient.charges.toLocaleString("en-IN")}</p>
-              </div>
-              <div className="h-8 w-px bg-gray-200" />
-              <div className="text-center">
-                <p className="text-[11px] text-gray-400 mb-0.5">Paid</p>
-                <p className="text-sm font-bold text-green-600">₹{(patient.paid ?? 0).toLocaleString("en-IN")}</p>
-              </div>
-              {balance > 0 && (
-                <>
-                  <div className="h-8 w-px bg-gray-200" />
-                  <div className="text-center">
-                    <p className="text-[11px] text-gray-400 mb-0.5">Due</p>
-                    <p className="text-sm font-bold text-red-500">₹{balance.toLocaleString("en-IN")}</p>
-                  </div>
-                </>
-              )}
-              {patient.paymentMode && (
-                <>
-                  <div className="h-8 w-px bg-gray-200" />
-                  <div className="text-center">
-                    <p className="text-[11px] text-gray-400 mb-0.5">Mode</p>
-                    <p className="text-xs font-semibold text-gray-600">{patient.paymentMode}</p>
-                  </div>
-                </>
-              )}
-            </div>
-          ) : (
-            <p className="mt-2 text-xs text-gray-400 italic">No billing record yet</p>
-          )}
-
-          {/* Row 5: action buttons */}
-          <div className="mt-3 flex items-center gap-2">
-            <button
-              onClick={() => onViewBill(patient)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 text-xs font-semibold text-gray-700 hover:text-blue-700 transition-all"
-            >
-              <ReceiptText className="h-3.5 w-3.5" />View Bill
-            </button>
-            <button
-              onClick={() => onViewReport(patient)}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white hover:bg-violet-50 hover:border-violet-300 text-xs font-semibold text-gray-700 hover:text-violet-700 transition-all"
-            >
-              <FileText className="h-3.5 w-3.5" />
-              {patient.reportStatus === "completed" ? "View Report" : patient.reportStatus === "in_progress" ? "Continue Report" : "Fill Report"}
-            </button>
-          </div>
+          <p className="text-xs text-gray-500 mt-0.5">
+            {patient.age > 0 && `${patient.age} yrs · ${patient.gender} · `}
+            {patient.contact && `${patient.contact} · `}
+            {fmtDate(patient.createdAt)}
+          </p>
         </div>
+        {entries.length > 1 && (
+          <span className="text-xs font-semibold text-gray-500 bg-gray-100 px-2.5 py-1 rounded-full shrink-0">
+            {entries.length} tests
+          </span>
+        )}
+      </div>
+
+      {/* One plain row per test this patient was referred for */}
+      <div className="divide-y divide-gray-100 border-t border-gray-100 bg-gray-50/50">
+        {entries.map((entry, sidx) => {
+          const bStatus = billStatusOf(entry)
+          const rMeta   = REPORT_STATUS_META[entry.reportStatus] ?? REPORT_STATUS_META.pending
+          const net     = (entry.charges ?? 0) - (entry.discount ?? 0)
+          const balance = Math.max(0, net - (entry.paid ?? 0))
+
+          return (
+            <div key={sidx} className="flex flex-col sm:flex-row sm:items-center gap-3 px-4 py-3">
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-gray-900">{entry.name}</p>
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-xs">
+                  <span className={`inline-flex items-center gap-1 font-medium px-2 py-0.5 rounded-full border ${rMeta.cls}`}>
+                    {rMeta.icon}Report: {rMeta.label}
+                  </span>
+                  {bStatus ? (
+                    <span className={`inline-flex items-center gap-1 font-medium px-2 py-0.5 rounded-full border ${BILL_STATUS_STYLE[bStatus]}`}>
+                      <ReceiptText className="h-3 w-3" />Bill: {BILL_LABEL[bStatus]}
+                    </span>
+                  ) : (
+                    <span className="text-gray-400">No bill yet</span>
+                  )}
+                </div>
+                {entry.charges ? (
+                  <p className="text-xs text-gray-400 mt-1">
+                    ₹{entry.charges.toLocaleString("en-IN")} charged · ₹{(entry.paid ?? 0).toLocaleString("en-IN")} paid
+                    {balance > 0 && <span className="text-red-500"> · ₹{balance.toLocaleString("en-IN")} due</span>}
+                  </p>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => onViewReport(patient, sidx)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white hover:bg-violet-50 hover:border-violet-300 text-xs font-semibold text-gray-700 hover:text-violet-700 transition-all"
+                >
+                  <FileText className="h-3.5 w-3.5" />View Report
+                </button>
+                <button
+                  onClick={() => onViewBill(patient, sidx)}
+                  disabled={!bStatus}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-semibold transition-all ${
+                    bStatus
+                      ? "border-gray-200 bg-white hover:bg-blue-50 hover:border-blue-300 text-gray-700 hover:text-blue-700"
+                      : "border-gray-100 bg-gray-50 text-gray-300 cursor-not-allowed"
+                  }`}
+                >
+                  <ReceiptText className="h-3.5 w-3.5" />View Bill
+                </button>
+              </div>
+            </div>
+          )
+        })}
       </div>
     </motion.div>
   )
@@ -537,8 +507,8 @@ function DoctorRow({
   isLoading: boolean
   patients: PatientRef[] | undefined
   onToggle: () => void
-  onViewBill: (p: PatientRef) => void
-  onViewReport: (p: PatientRef) => void
+  onViewBill: (p: PatientRef, sidx: number) => void
+  onViewReport: (p: PatientRef, sidx: number) => void
 }) {
   return (
     <div className="border-b border-gray-100 last:border-0">
@@ -626,9 +596,10 @@ function DoctorRow({
               {!isLoading && patients && patients.length > 0 && (
                 <div className="grid gap-3">
                   {patients.map((p, i) => (
-                    <PatientCard
+                    <PatientGroupCard
                       key={p._id}
                       patient={p}
+                      entries={studiesOf(p)}
                       index={i}
                       onViewBill={onViewBill}
                       onViewReport={onViewReport}
@@ -653,8 +624,8 @@ export default function DoctorsPage() {
   const [expandedDoctor, setExpandedDoctor] = useState<string | null>(null)
   const [loadingDoctor,  setLoadingDoctor]  = useState<string | null>(null)
   const [patientsByDoc,  setPatientsByDoc]  = useState<Record<string, PatientRef[]>>({})
-  const [billModal,      setBillModal]      = useState<PatientRef | null>(null)
-  const [reportModal,    setReportModal]    = useState<PatientRef | null>(null)
+  const [billModal,      setBillModal]      = useState<{ patient: PatientRef; sidx: number } | null>(null)
+  const [reportModal,    setReportModal]    = useState<{ patient: PatientRef; sidx: number } | null>(null)
 
   useEffect(() => {
     fetch("/api/patients")
@@ -712,8 +683,8 @@ export default function DoctorsPage() {
   return (
     <div className="space-y-6">
       {/* Modals — rendered at page level to avoid overflow:hidden clipping inside expand panels */}
-      {billModal   && <BillModal   patient={billModal}   onClose={() => setBillModal(null)}   />}
-      {reportModal && <ReportModal patient={reportModal} onClose={() => setReportModal(null)} />}
+      {billModal   && <BillModal   patient={billModal.patient}   sidx={billModal.sidx}   onClose={() => setBillModal(null)}   />}
+      {reportModal && <ReportModal patient={reportModal.patient} sidx={reportModal.sidx} onClose={() => setReportModal(null)} />}
 
       <div>
         <h1 className="text-2xl font-bold">Doctors</h1>
@@ -792,8 +763,8 @@ export default function DoctorsPage() {
                   isLoading={loadingDoctor === doc.name}
                   patients={patientsByDoc[doc.name]}
                   onToggle={() => toggleDoctor(doc.name)}
-                  onViewBill={setBillModal}
-                  onViewReport={setReportModal}
+                  onViewBill={(p, sidx) => setBillModal({ patient: p, sidx })}
+                  onViewReport={(p, sidx) => setReportModal({ patient: p, sidx })}
                 />
               ))}
             </div>

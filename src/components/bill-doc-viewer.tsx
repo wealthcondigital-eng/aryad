@@ -3,7 +3,8 @@
 import { Printer, Share2, Loader2 } from "lucide-react"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
-import { useState } from "react"
+import { useEffect, useState } from "react"
+import { receiptLetterheadHtml, receiptPatientBoxHtml, receiptItemsTableHtml, drawReceiptPatientBox, loadLogoDataUrl, CLINIC_ADDRESS, CLINIC_CONTACT_LINE } from "@/lib/receipt-letterhead"
 
 interface EditEntry { editor: string; editedAt: string; changedFields: string[] }
 
@@ -22,7 +23,7 @@ export interface BillShareData {
   contact: string
   referredBy?: string
   study: string
-  items?: { study: string; quantity?: number; price?: number }[]  // multi-item bills
+  items?: { study: string; quantity?: number; price?: number; discount?: number }[]  // multi-item bills
   billNo?: string                                                  // receipt number (falls back to srNo)
   charges: number
   discount?: number
@@ -38,11 +39,13 @@ export interface BillViewerProps extends BillShareData {
 }
 
 // One table row per bill item; single-study callers fall back to one row
-function billRows(p: BillShareData): { study: string; amount: number }[] {
+// (using the bill-level discount for that lone row, since there's only one
+// study for it to belong to).
+function billRows(p: BillShareData): { study: string; amount: number; discount: number }[] {
   if (p.items?.length) {
-    return p.items.map((i) => ({ study: i.study, amount: (i.price ?? 0) * (i.quantity ?? 1) }))
+    return p.items.map((i) => ({ study: i.study, amount: (i.price ?? 0) * (i.quantity ?? 1), discount: i.discount ?? 0 }))
   }
-  return [{ study: p.study, amount: p.charges }]
+  return [{ study: p.study, amount: p.charges, discount: p.discount ?? 0 }]
 }
 
 function formatDate(d?: string) {
@@ -66,19 +69,9 @@ function formatEditDate(iso: string) {
 }
 
 function buildBillPrintHtml(p: BillViewerProps): string {
-  const discount    = p.discount ?? 0
   const dateStr     = formatDate(p.date)
   const receiptNo   = p.billNo ?? String(p.srNo)
   const rows        = billRows(p)
-
-  const itemRowsHtml = rows.map((r, i) => `
-      <tr>
-        <td>${i + 1}.</td>
-        <td>${r.study.toUpperCase()}</td>
-        <td>${r.amount}</td>
-        <td>${i === 0 ? discount : 0}</td>
-        <td>${i === 0 ? p.paid : 0}</td>
-      </tr>`).join("")
 
   return `<!DOCTYPE html>
 <html>
@@ -88,62 +81,21 @@ function buildBillPrintHtml(p: BillViewerProps): string {
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #111; padding: 10mm 14mm; max-width: 160mm; margin: 0 auto; }
-
     .divider-thick { border-top: 2.5px solid #111; border-bottom: 2.5px solid #111; padding: 2px 0; text-align: center; font-weight: bold; font-size: 9.5pt; text-transform: uppercase; letter-spacing: 1px; margin: 8px 0; }
-
-    .patient-info { margin-bottom: 8px; font-size: 8.5pt; display: grid; grid-template-columns: 1fr 1fr; gap: 4px; border-bottom: 1.5px solid #111; padding-bottom: 6px; }
-    .patient-info div { margin-bottom: 1px; }
-    .patient-info strong { font-weight: bold; }
-
-    table { width: 100%; border-collapse: collapse; font-size: 9.5pt; margin-bottom: 8px; }
-    table th, table td { border: 1px solid #111; padding: 4px 6px; }
-    table thead th { font-weight: bold; text-transform: uppercase; text-align: center; background: #f0f0f0; }
-    table th:nth-child(1), table td:nth-child(1) { width: 50px; text-align: center; }
-    table th:nth-child(3), table td:nth-child(3),
-    table th:nth-child(4), table td:nth-child(4),
-    table th:nth-child(5), table td:nth-child(5) { width: 70px; text-align: center; }
-    .total-row td { font-weight: bold; background: #f9f9f9; }
-
     .footer { font-size: 9.5pt; margin-top: 4px; }
     .footer p { margin-bottom: 3px; }
     .footer strong { font-weight: bold; }
-
     @media print { body { padding: 6mm 10mm; } }
   </style>
 </head>
 <body>
 
-  <!-- No clinic letterhead — receipts print on pre-printed stationery -->
+  ${receiptLetterheadHtml(typeof window !== "undefined" ? window.location.origin : "")}
   <div class="divider-thick">Payment Receipt</div>
 
-  <div class="patient-info">
-    <div><strong>NAME:</strong> ${p.name.toUpperCase()}</div>
-    <div><strong>DATE:</strong> ${dateStr}</div>
-    <div><strong>AGE / SEX:</strong> ${p.age} YRS &nbsp;/&nbsp; ${p.gender.toUpperCase()}</div>
-    <div><strong>MOBILE:</strong> ${p.contact}</div>
-    <div><strong>REF. BY:</strong> ${(p.referredBy || "Self").toUpperCase()}</div>
-    <div><strong>SR. NO:</strong> #${p.srNo}</div>
-  </div>
+  ${receiptPatientBoxHtml({ name: p.name, date: dateStr, age: p.age, gender: p.gender, contact: p.contact, referredBy: p.referredBy, srNo: p.srNo })}
 
-  <table>
-    <thead>
-      <tr>
-        <th>Sr.<br>No.</th>
-        <th>Investigation of Patient</th>
-        <th>Charges</th>
-        <th>Discount</th>
-        <th>Paid</th>
-      </tr>
-    </thead>
-    <tbody>${itemRowsHtml}
-      <tr class="total-row">
-        <td colspan="2" style="text-align:center;">Total</td>
-        <td>${p.charges}</td>
-        <td>${discount}</td>
-        <td>${p.paid}</td>
-      </tr>
-    </tbody>
-  </table>
+  ${receiptItemsTableHtml(rows, p.charges, p.paid)}
 
   <div class="footer">
     <p><strong>Date:</strong> ${dateStr}</p>
@@ -176,10 +128,29 @@ const generateBillPdfBlob = async (p: BillShareData): Promise<Blob> => {
   const dateStr   = formatDate(p.date)
   const receiptNo = p.billNo || String(p.srNo)
   const rows      = billRows(p)
-  const discount  = p.discount ?? 0
+  const discount  = rows.reduce((sum, r) => sum + r.discount, 0)
 
-  let y = 22
+  let y = 14
   doc.setDrawColor(17, 17, 17)
+  doc.setTextColor(17, 17, 17)
+
+  // ── Clinic letterhead (logo, name, address) ──
+  const logo = await loadLogoDataUrl(typeof window !== "undefined" ? window.location.origin : "")
+  if (logo) {
+    try { doc.addImage(logo, "JPEG", W / 2 - 9, y, 18, 18) } catch { /* ignore bad image */ }
+    y += 20
+  }
+  doc.setFont("helvetica", "bold")
+  doc.setFontSize(15)
+  doc.text("AARYA DIAGNOSTIC CENTER", W / 2, y, { align: "center" })
+  y += 5
+  doc.setFont("helvetica", "normal")
+  doc.setFontSize(7.5)
+  doc.setTextColor(60)
+  doc.text(CLINIC_ADDRESS, W / 2, y, { align: "center" })
+  y += 4
+  doc.text(CLINIC_CONTACT_LINE, W / 2, y, { align: "center" })
+  y += 6
   doc.setTextColor(17, 17, 17)
 
   // ── Title between two thick rules ──
@@ -191,29 +162,15 @@ const generateBillPdfBlob = async (p: BillShareData): Promise<Blob> => {
   doc.line(M, y + 8.2, W - M, y + 8.2)
   y += 17
 
-  // ── Patient info grid (two columns, bold labels) ──
-  doc.setFontSize(9.5)
-  const col1X = M, col2X = W / 2 + 4, infoRowH = 5.5, labelW = 22
-  const info = (label: string, value: string, x: number) => {
-    doc.setFont("helvetica", "bold");   doc.text(label, x, y)
-    doc.setFont("helvetica", "normal"); doc.text(value, x + labelW, y)
-  }
-  info("NAME:", p.name.toUpperCase(), col1X)
-  info("DATE:", dateStr, col2X)
-  y += infoRowH
-  info("AGE / SEX:", `${p.age} YRS / ${p.gender.toUpperCase()}`, col1X)
-  info("MOBILE:", p.contact, col2X)
-  y += infoRowH
-  info("REF. BY:", (p.referredBy || "Self").toUpperCase(), col1X)
-  info("SR. NO:", `#${p.srNo}`, col2X)
-  y += 3.5
-
-  doc.setLineWidth(0.4)
-  doc.line(M, y, W - M, y)
-  y += 6
+  // ── Patient info box — double border, matches the printed report design ──
+  y = drawReceiptPatientBox(doc, {
+    name: p.name, date: dateStr, age: p.age, gender: p.gender,
+    contact: p.contact, referredBy: p.referredBy, srNo: p.srNo,
+  }, y)
 
   // ── Bordered table matching the print layout ──
-  const colW  = [14, 81, 25, 25, 25] // sums to the 170mm content width
+  // Discount and Paid are shown in the columns.
+  const colW  = [12, 78, 26, 27, 27] // sums to the 170mm content width
   const rowH  = 8
   const cellX = (i: number) => M + colW.slice(0, i).reduce((a, b) => a + b, 0)
 
@@ -252,13 +209,18 @@ const generateBillPdfBlob = async (p: BillShareData): Promise<Blob> => {
     { text: "PAID" },
   ], { bold: true, fillGray: 240 })
 
+  const netTotal = p.charges - discount
+  const factor = netTotal > 0 ? p.paid / netTotal : 0
+
   rows.forEach((r, i) => {
+    const rowNet = r.amount - (r.discount || 0)
+    const rowPaid = Math.round(rowNet * factor)
     drawTableRow([
       { text: `${i + 1}.` },
       { text: r.study.toUpperCase(), align: "left" },
       { text: `${r.amount}` },
-      { text: `${i === 0 ? discount : 0}` },
-      { text: `${i === 0 ? p.paid : 0}` },
+      { text: `${r.discount}` },
+      { text: `${rowPaid}` },
     ])
   })
 
@@ -270,7 +232,7 @@ const generateBillPdfBlob = async (p: BillShareData): Promise<Blob> => {
   ], { bold: true, fillGray: 249 })
   y += 8
 
-  // ── Footer ──
+  // ── Footer — Balance Due and Paid summary omitted because Paid is inside the table ──
   doc.setFontSize(9.5)
   const footer = (label: string, value: string) => {
     doc.setFont("helvetica", "bold")
@@ -346,11 +308,27 @@ export async function shareBillOnWhatsApp(p: BillShareData, opts: { forceLink?: 
 
 export function BillDocViewer(props: BillViewerProps) {
   const { open, onClose, srNo, name, age, gender, contact, referredBy, charges, paid, paymentMode } = props
-  const discount    = props.discount ?? 0
+
+  // Callers that only know the bill id (e.g. patient list "Print Bill") don't
+  // pass the line items — fetch them so a multi-study bill itemises each study.
+  const [loadedItems, setLoadedItems] = useState<BillShareData["items"] | null>(null)
+  useEffect(() => {
+    if (!open || !props.id || props.items?.length) { setLoadedItems(null); return }
+    let cancelled = false
+    fetch(`/api/billing/${props.id}`)
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled && d?.bill?.items?.length) setLoadedItems(d.bill.items) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [open, props.id, props.items])
+
+  const data: BillViewerProps = props.items?.length ? props : { ...props, items: loadedItems ?? undefined }
+
   const editHistory = props.editHistory ?? []
   const dateStr     = formatDate(props.date)
   const receiptNo   = props.billNo ?? String(srNo)
-  const rows        = billRows(props)
+  const rows        = billRows(data)
+  const discount    = rows.reduce((sum, r) => sum + r.discount, 0)
 
   const [sharing, setSharing] = useState(false)
 
@@ -358,7 +336,7 @@ export function BillDocViewer(props: BillViewerProps) {
     if (sharing) return
     setSharing(true)
     try {
-      await shareBillOnWhatsApp(props)
+      await shareBillOnWhatsApp(data)
     } catch (e) {
       console.error(e)
     }
@@ -375,7 +353,7 @@ export function BillDocViewer(props: BillViewerProps) {
               <p className="text-xs text-muted-foreground mt-0.5">{name} · Receipt #{srNo}</p>
             </div>
             <div className="flex items-center gap-2">
-              <Button variant="outline" size="sm" className="gap-1.5 text-xs h-8" onClick={() => printBill(props)}>
+              <Button variant="outline" size="sm" className="gap-1.5 text-xs h-8" onClick={() => printBill(data)}>
                 <Printer className="h-3.5 w-3.5" />Print
               </Button>
               <Button size="sm" className="gap-1.5 text-xs h-8 bg-green-600 hover:bg-green-700" onClick={shareOnWhatsApp} disabled={sharing}>
@@ -390,43 +368,67 @@ export function BillDocViewer(props: BillViewerProps) {
           {/* Preview matching exact print layout */}
           <div className="border border-slate-200 rounded-lg p-4 bg-white text-[11px] font-[Arial,sans-serif]">
 
-            {/* No clinic letterhead — receipts print on pre-printed stationery */}
+            {/* Clinic letterhead — logo, name, address, contact */}
+            <div className="text-center mb-2.5">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src="/logo.jpeg" alt="Aarya Diagnostic Center" className="w-14 h-14 rounded-full object-cover mx-auto mb-1.5" />
+              <h1 className="text-[15px] font-bold uppercase tracking-[2px] text-slate-900">Aarya Diagnostic Center</h1>
+              <p className="text-[8.5px] text-slate-600 leading-relaxed mt-0.5">
+                {CLINIC_ADDRESS}<br />{CLINIC_CONTACT_LINE}
+              </p>
+            </div>
+
             {/* PAYMENT RECEIPT label */}
             <div className="border-t-2 border-b-2 border-slate-800 py-0.5 text-center font-bold uppercase tracking-wider text-[11px] mb-3">
               Payment Receipt
             </div>
 
             {/* Patient info */}
-            <div className="mb-3 grid grid-cols-2 gap-x-4 gap-y-1 text-slate-800 border-b border-slate-200 pb-3" style={{ fontSize: "10px" }}>
-              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">NAME:</span><span className="text-slate-700">{name.toUpperCase()}</span></div>
-              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">DATE:</span><span className="text-slate-700">{dateStr}</span></div>
-              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">AGE / SEX:</span><span className="text-slate-700">{age} YRS / {gender.toUpperCase()}</span></div>
-              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">MOBILE:</span><span className="text-slate-700">{contact}</span></div>
-              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">REF. BY:</span><span className="text-slate-700">{(referredBy || "Self").toUpperCase()}</span></div>
-              <div className="flex gap-1.5"><span className="font-bold w-16 shrink-0">SR. NO:</span><span className="text-slate-700">#{srNo}</span></div>
+            <div className="mb-3 border-4 border-double border-slate-700 px-3 py-2.5 flex justify-between gap-4 text-slate-900" style={{ fontSize: "10px" }}>
+              <div className="space-y-1 min-w-0">
+                <p className="font-bold truncate">NAME - {name.toUpperCase()}</p>
+                <p className="font-bold truncate">REF. BY - {(referredBy || "Self").toUpperCase()}</p>
+                {Number(srNo) > 0 && <p className="font-bold">SR. NO - #{srNo}</p>}
+                <p className="font-bold">MOBILE - {contact}</p>
+              </div>
+              <div className="space-y-1 shrink-0 whitespace-nowrap">
+                <p className="font-bold">DATE - {dateStr}</p>
+                <p className="font-bold">AGE - {age} YRS</p>
+                <p className="font-bold">SEX - {gender.toUpperCase()}</p>
+              </div>
             </div>
 
-            {/* Table */}
-            <table className="w-full border-collapse mb-3" style={{ fontSize: "10px" }}>
+            {/* Table — Discount is real per-study data; Paid stays a summary
+                line below since it's never split per study (just how much
+                cash was collected for the whole visit). */}
+            <table className="w-full border-collapse mb-1.5" style={{ fontSize: "10px" }}>
               <thead>
                 <tr className="bg-slate-100">
                   <th className="border border-slate-400 px-1.5 py-1 text-center font-bold uppercase w-8">Sr. No.</th>
                   <th className="border border-slate-400 px-1.5 py-1 font-bold uppercase">Investigation of Patient</th>
                   <th className="border border-slate-400 px-1.5 py-1 text-center font-bold uppercase w-14">Charges</th>
                   <th className="border border-slate-400 px-1.5 py-1 text-center font-bold uppercase w-14">Discount</th>
-                  <th className="border border-slate-400 px-1.5 py-1 text-center font-bold uppercase w-12">Paid</th>
+                  <th className="border border-slate-400 px-1.5 py-1 text-center font-bold uppercase w-14">Paid</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r, i) => (
-                  <tr key={i}>
-                    <td className="border border-slate-400 px-1.5 py-1 text-center">{i + 1}.</td>
-                    <td className="border border-slate-400 px-1.5 py-1 uppercase">{r.study}</td>
-                    <td className="border border-slate-400 px-1.5 py-1 text-center">{r.amount}</td>
-                    <td className="border border-slate-400 px-1.5 py-1 text-center">{i === 0 ? discount : 0}</td>
-                    <td className="border border-slate-400 px-1.5 py-1 text-center">{i === 0 ? paid : 0}</td>
-                  </tr>
-                ))}
+                {(() => {
+                  const netTotal = charges - discount
+                  const factor = netTotal > 0 ? paid / netTotal : 0
+                  return rows.map((r, i) => {
+                    const rowNet = r.amount - r.discount
+                    const rowPaid = Math.round(rowNet * factor)
+                    return (
+                      <tr key={i}>
+                        <td className="border border-slate-400 px-1.5 py-1 text-center">{i + 1}.</td>
+                        <td className="border border-slate-400 px-1.5 py-1 uppercase">{r.study}</td>
+                        <td className="border border-slate-400 px-1.5 py-1 text-center">{r.amount}</td>
+                        <td className="border border-slate-400 px-1.5 py-1 text-center">{r.discount}</td>
+                        <td className="border border-slate-400 px-1.5 py-1 text-center">{rowPaid}</td>
+                      </tr>
+                    )
+                  })
+                })()}
                 <tr className="font-bold bg-slate-50">
                   <td className="border border-slate-400 px-1.5 py-1 text-center" colSpan={2}>Total</td>
                   <td className="border border-slate-400 px-1.5 py-1 text-center">{charges}</td>

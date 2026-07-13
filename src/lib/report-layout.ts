@@ -15,6 +15,51 @@ export interface ReportHeaderInfo {
   srNo?: string | number
 }
 
+// ── Print-window page shell ──────────────────────────────────────────────────
+// Reports print on the clinic's pre-printed letterhead stationery, so the
+// printed page must keep the top (logo) and bottom (address) bands empty.
+// `@page { margin: 0 }` also stops the browser from adding its own
+// date / title / URL lines over the letterhead; the thead/tfoot spacers
+// repeat on every printed page so multi-page reports stay clear too.
+
+export const LETTERHEAD_TOP_MM = 40    // pre-printed logo band
+export const LETTERHEAD_BOTTOM_MM = 30 // pre-printed address band
+
+// Same bands expressed in on-screen pixels (A4 @ 96dpi: 1mm ≈ 3.7795px),
+// so the report editor's "paper" can reserve exactly the header/footer gap
+// the Word file and printout use — WYSIWYG with the final document.
+const MM_TO_PX = 96 / 25.4
+export const A4_PAGE_PX = Math.round(297 * MM_TO_PX)          // 1123 — full A4 height
+export const LETTERHEAD_TOP_PX = Math.round(LETTERHEAD_TOP_MM * MM_TO_PX)       // 151
+export const LETTERHEAD_BOTTOM_PX = Math.round(LETTERHEAD_BOTTOM_MM * MM_TO_PX) // 113
+
+export function printShellCss(): string {
+  return `*{box-sizing:border-box;margin:0;padding:0;}
+@page{size:A4;margin:0;}
+body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.5;color:#111;}
+table.pg{width:100%;border-collapse:collapse;}
+td.pg-content{padding:15mm 20mm;}
+@media print{
+td.pg-content{padding:0 20mm;}
+thead.pg-head>tr>td{height:${LETTERHEAD_TOP_MM}mm;}
+tfoot.pg-foot>tr>td{height:${LETTERHEAD_BOTTOM_MM}mm;}
+}`
+}
+
+export function printShellHtml(title: string, innerHtml: string, extraCss = ""): string {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
+<style>${printShellCss()}${extraCss ? `\n${extraCss}` : ""}</style>
+</head><body>
+<table class="pg">
+<thead class="pg-head"><tr><td></td></tr></thead>
+<tbody><tr><td class="pg-content">
+${innerHtml}
+</td></tr></tbody>
+<tfoot class="pg-foot"><tr><td></td></tr></tfoot>
+</table>
+</body></html>`
+}
+
 // ── HTML (print windows) ─────────────────────────────────────────────────────
 
 export function reportHeaderHtml(i: ReportHeaderInfo): string {

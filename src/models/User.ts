@@ -13,6 +13,9 @@ export interface IUser extends Document {
     analytics:{ view: boolean }
     users:    { view: boolean; create: boolean; edit: boolean }
   }
+  resetOtpHash?: string
+  resetOtpExpiresAt?: Date
+  resetOtpAttempts?: number
   createdAt: Date
   updatedAt: Date
 }
@@ -31,6 +34,9 @@ const UserSchema = new Schema<IUser>(
       analytics: { view: Boolean },
       users:     { view: Boolean, create: Boolean, edit: Boolean },
     },
+    resetOtpHash:      { type: String, select: false },
+    resetOtpExpiresAt: { type: Date, select: false },
+    resetOtpAttempts:  { type: Number, default: 0, select: false },
   },
   { timestamps: true }
 )

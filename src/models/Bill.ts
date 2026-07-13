@@ -4,6 +4,7 @@ export interface IBillItem {
   study: string
   quantity: number
   price: number
+  discount: number
 }
 
 export interface IBillEditEntry {
@@ -60,9 +61,13 @@ const BillSchema = new Schema<IBill>(
         study:    { type: String, required: true },
         quantity: { type: Number, default: 1 },
         price:    { type: Number, required: true },
+        discount: { type: Number, default: 0 },
       },
     ],
     charges:     { type: Number, required: true },
+    // Whole-bill discount — kept in sync as the sum of each item's own
+    // discount, since Net Amount/Balance Due calculations elsewhere already
+    // read this single field rather than re-summing the items every time.
     discount:    { type: Number, default: 0 },
     paid:        { type: Number, required: true },
     balance:     { type: Number, default: 0 },

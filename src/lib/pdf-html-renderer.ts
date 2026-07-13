@@ -1,5 +1,9 @@
 // Browser-only: renders HTML (any structure) with inline bold into a jsPDF document
 
+import { imageFormat } from "@/lib/report-signatures"
+
+const PX_TO_MM = 0.264583
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function renderHtmlToPdf(doc: any, html: string, M: number, CW: number, startY: number, checkPage: (n: number) => void, lineH: number): number {
   let y = startY
@@ -97,6 +101,25 @@ export function renderHtmlToPdf(doc: any, html: string, M: number, CW: number, s
     if (tag === "br") {
       // Treat <br> as a paragraph separator
       flushPending()
+      return
+    }
+
+    if (tag === "img") {
+      flushPending()
+      const src = el.getAttribute("src") || ""
+      if (src) {
+        const style = (el as HTMLElement).style
+        const wAttr = parseFloat(style?.width) || parseFloat(el.getAttribute("width") || "") || 0
+        const hAttr = parseFloat(style?.height) || parseFloat(el.getAttribute("height") || "") || 0
+        let wmm = wAttr ? wAttr * PX_TO_MM : 42
+        let hmm = hAttr ? hAttr * PX_TO_MM : (wAttr && hAttr ? wmm * (hAttr / wAttr) : 16)
+        if (wmm > CW) { hmm = hmm * (CW / wmm); wmm = CW }
+        checkPage(hmm + 4)
+        try {
+          doc.addImage(src, imageFormat(src).toUpperCase(), M, y, wmm, hmm)
+          y += hmm + 4
+        } catch { /* an unreadable image shouldn't fail the whole PDF */ }
+      }
       return
     }
 

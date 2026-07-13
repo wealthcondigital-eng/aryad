@@ -1,11 +1,13 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { X, Printer, Share2, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { reportHeaderHtml, reportTitleHtml, drawPdfReportHeader, drawPdfReportTitle } from "@/lib/report-layout"
+import { reportHeaderHtml, reportTitleHtml, printShellHtml, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX } from "@/lib/report-layout"
 import { REPORT_TEMPLATES } from "@/lib/report-templates"
+import { fetchSignatories, signatureColumnsHtml, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
+import { SignatureColumns } from "@/components/signature-columns"
 
 const getDisplayTitle = (studyName: string) => {
   if (!studyName) return ""
@@ -48,24 +50,108 @@ export function ReportViewModal({
   const [mounted, setMounted] = useState(false)
   const [shareLoading, setShareLoading] = useState(false)
   const date = dateOf(patient.createdAt)
+  const [signatories, setSignatories] = useState<Signatory[]>([])
+  const [signatureLayout, setSignatureLayout] = useState<(SignatureLayout | null | undefined)[]>([])
+  useEffect(() => { fetchSignatories().then(setSignatories) }, [])
+
+  // Pagination: lay the preview out as A4 sheets so the doctor sees where pages
+  // break, with a plain empty gap at the top (letterhead header) and bottom
+  // (footer) of each page — no guide lines or labels, just casual spacing.
+  const wrapRef       = useRef<HTMLDivElement>(null)
+  const patientBoxRef = useRef<HTMLDivElement>(null)
+  const titleWrapRef  = useRef<HTMLDivElement>(null)
+  const sigsRef       = useRef<HTMLDivElement>(null)
+  const rafRef        = useRef<number | undefined>(undefined)
+  const [numPages, setNumPages] = useState(1)
+
+  const A4_GAP_PX = 28
+  const A4_STRIDE = A4_PAGE_PX + A4_GAP_PX
+
+  // Body HTML without the transient pagination margins (for print / share PDF).
+  const readCleanBody = useCallback(() => {
+    const el = bodyRef.current
+    if (!el) return ""
+    const clone = el.cloneNode(true) as HTMLElement
+    clone.querySelectorAll<HTMLElement>("[data-pgb]").forEach((n) => {
+      n.style.marginTop = n.getAttribute("data-pgb-base") || ""
+      n.removeAttribute("data-pgb")
+      n.removeAttribute("data-pgb-base")
+      if (!n.getAttribute("style")) n.removeAttribute("style")
+    })
+    return clone.innerHTML
+  }, [])
+
+  const paginate = useCallback(() => {
+    const wrap = wrapRef.current
+    if (!wrap) return
+    const items: HTMLElement[] = []
+    if (patientBoxRef.current) items.push(patientBoxRef.current)
+    if (titleWrapRef.current)  items.push(titleWrapRef.current)
+    if (bodyRef.current) Array.from(bodyRef.current.children).forEach((c) => items.push(c as HTMLElement))
+    if (sigsRef.current)   items.push(sigsRef.current)
+
+    items.forEach((it) => {
+      if (it.dataset.pgb) {
+        it.style.marginTop = it.getAttribute("data-pgb-base") || ""
+        delete it.dataset.pgb
+        it.removeAttribute("data-pgb-base")
+      }
+    })
+
+    const wrapTop = wrap.getBoundingClientRect().top
+    let page = 0
+    for (const it of items) {
+      const r      = it.getBoundingClientRect()
+      const top    = r.top - wrapTop
+      const bottom = top + r.height
+      const footerLimit = page * A4_STRIDE + (A4_PAGE_PX - LETTERHEAD_BOTTOM_PX)
+      const pageTop     = page * A4_STRIDE + LETTERHEAD_TOP_PX
+      if (bottom > footerLimit + 1 && top > pageTop + 2) {
+        page++
+        const target = page * A4_STRIDE + LETTERHEAD_TOP_PX
+        const delta  = target - top
+        if (delta > 0) {
+          const base = parseFloat(getComputedStyle(it).marginTop) || 0
+          it.setAttribute("data-pgb-base", it.style.marginTop || "")
+          it.dataset.pgb = "1"
+          it.style.marginTop = `${base + delta}px`
+        }
+      }
+    }
+
+    setNumPages(page + 1)
+  }, [A4_STRIDE])
+
+  const schedulePaginate = useCallback(() => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    rafRef.current = requestAnimationFrame(() => paginate())
+  }, [paginate])
 
   useEffect(() => { setMounted(true) }, [])
 
   // Load: localStorage first, then MongoDB fallback (per study)
   useEffect(() => {
     const key = `aarya_report_${patient.srNo || patient.name.replace(/\s+/g, "_")}${sidx > 0 ? `_s${sidx}` : ""}`
+    let hasLocal = false
     try {
       const saved = JSON.parse(localStorage.getItem(key) || "null")
       if (saved?.body) {
         setReportBody(saved.body)
-        setLoading(false)
-        return
+        hasLocal = true
       }
     } catch {}
+
     fetch(`/api/patients/${patient._id}`)
       .then((r) => r.json())
-      .then((d) => setReportBody(d.patient?.studies?.[sidx]?.reportBody || d.patient?.reportBody || ""))
-      .catch(() => setReportBody(""))
+      .then((d) => {
+        if (!hasLocal) {
+          setReportBody(d.patient?.studies?.[sidx]?.reportBody || d.patient?.reportBody || "")
+        }
+        setSignatureLayout(d.patient?.studies?.[sidx]?.signatureLayout || [])
+      })
+      .catch(() => {
+        if (!hasLocal) setReportBody("")
+      })
       .finally(() => setLoading(false))
   }, [patient, sidx])
 
@@ -78,8 +164,22 @@ export function ReportViewModal({
       )
       bodyRef.current.innerHTML =
         clean || "<em style='color:#aaa;font-size:12px'>No report content saved yet.</em>"
+      schedulePaginate()
     }
-  }, [reportBody, loading])
+  }, [reportBody, loading, schedulePaginate])
+
+  // Re-paginate on viewport / content-size changes (e.g. late-loading images)
+  useEffect(() => {
+    if (loading) return
+    const bodyEl = bodyRef.current
+    const ro = new ResizeObserver(schedulePaginate)
+    if (bodyEl) ro.observe(bodyEl)
+    // The signature block's height changes when the signatories/saved layout
+    // load in — replace it too, or it can end up overlapping the footer band.
+    if (sigsRef.current) ro.observe(sigsRef.current)
+    window.addEventListener("resize", schedulePaginate)
+    return () => { ro.disconnect(); window.removeEventListener("resize", schedulePaginate) }
+  }, [loading, schedulePaginate])
 
   // Escape key closes
   useEffect(() => {
@@ -98,39 +198,23 @@ export function ReportViewModal({
     setShareLoading(true)
     const stripEditMarks = (html: string) =>
       html.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
-    const bodyHtml  = stripEditMarks(bodyRef.current?.innerHTML || reportBody)
+    const bodyHtml  = stripEditMarks(readCleanBody() || reportBody)
     const num = patient.contact?.replace(/\D/g, "") ?? ""
 
     try {
-      const { jsPDF } = await import("jspdf")
-      const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" })
-      const W = 210, M = 20, CW = W - M * 2
-      let y = 18
-      const ln = (pt: number) => pt * 0.352778 * 1.4
-      const checkPage = (need = 8) => { if (y + need > 282) { doc.addPage(); y = 18 } }
-
-      // The PDF matches the printed report design: double-bordered patient
-      // info box, then the bordered underlined study heading
-      y = drawPdfReportHeader(doc, {
-        name: patient.name, refBy: patient.referredBy, date,
-        age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined,
+      // Rasterizes the same header/title/body/signatures markup used for
+      // printing, so the exported PDF shows whatever font the browser
+      // actually rendered instead of jsPDF's built-in Helvetica.
+      const { buildPagedPdfBlob } = await import("@/lib/dom-to-pdf")
+      const pdfBlob = await buildPagedPdfBlob({
+        headerHtml: reportHeaderHtml({
+          name: patient.name, refBy: patient.referredBy, date,
+          age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined,
+        }),
+        titleHtml: reportTitleHtml(getDisplayTitle(patient.study)),
+        bodyHtml,
+        signaturesHtml: signatureColumnsHtml(signatories, signatureLayout),
       })
-      y = drawPdfReportTitle(doc, getDisplayTitle(patient.study), y)
-
-      const { renderHtmlToPdf } = await import("@/lib/pdf-html-renderer")
-      y = renderHtmlToPdf(doc, bodyHtml, M, CW, y, checkPage, 5.5)
-
-      // Two-doctor signature block, matching the Word format
-      checkPage(28); y += 22
-      doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(0)
-      doc.text("DR. PRADNYA GORE", M, y)
-      doc.text("DR. RAMNATH GHUTE", W / 2 + 5, y); y += ln(9)
-      doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(60)
-      doc.text("CONSULTANT RADIOLOGIST", M, y)
-      doc.text("CONSULTANT RADIOLOGIST", W / 2 + 5, y); y += ln(7.5)
-      doc.text("M.D. RADIOLOGY", W / 2 + 5, y)
-
-      const pdfBlob   = doc.output("blob")
       const arrayBuf  = await pdfBlob.arrayBuffer()
       const bytes     = new Uint8Array(arrayBuf)
       let binary = ""; bytes.forEach((b) => (binary += String.fromCharCode(b)))
@@ -176,26 +260,13 @@ export function ReportViewModal({
   const handlePrint = () => {
     const stripEditMarks = (html: string) =>
       html.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
-    const currentBody = stripEditMarks(bodyRef.current?.innerHTML || reportBody)
+    const currentBody = stripEditMarks(readCleanBody() || reportBody)
 
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Report – ${patient.name}</title>
-<style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.5;padding:15mm 20mm;color:#111;}@media print{body{padding:8mm 12mm;}}</style>
-</head><body>
+    const html = printShellHtml(`Report – ${patient.name}`, `
 ${reportHeaderHtml({ name: patient.name, refBy: patient.referredBy, date, age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined })}
 ${reportTitleHtml(getDisplayTitle(patient.study))}
 <div style="font-size:10pt;line-height:1.6;">${currentBody}</div>
-<div style="display:flex;gap:30px;margin-top:80px;">
-  <div style="flex:1;">
-    <p style="font-weight:bold;font-size:10pt;text-transform:uppercase;">DR. PRADNYA GORE</p>
-    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">Consultant Radiologist</p>
-  </div>
-  <div style="flex:1;">
-    <p style="font-weight:bold;font-size:10pt;text-transform:uppercase;">DR. RAMNATH GHUTE</p>
-    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">Consultant Radiologist</p>
-    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">M.D. Radiology</p>
-  </div>
-</div>
-</body></html>`
+<div style="display:flex;gap:30px;margin-top:80px;page-break-inside:avoid;break-inside:avoid;">${signatureColumnsHtml(signatories, signatureLayout)}</div>`)
 
     const blob = new Blob([html], { type: "text/html" })
     const url  = URL.createObjectURL(blob)
@@ -213,7 +284,7 @@ ${reportTitleHtml(getDisplayTitle(patient.study))}
       style={{ backdropFilter: "blur(6px)", backgroundColor: "rgba(0,0,0,0.45)" }}
       onClick={(e) => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[90vh] flex flex-col overflow-hidden mx-2 sm:mx-0">
+      <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-[860px] max-h-[90vh] flex flex-col overflow-hidden mx-2 sm:mx-0">
 
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between px-4 sm:px-5 py-3 border-b bg-white shrink-0 gap-2 sm:gap-0">
@@ -238,51 +309,64 @@ ${reportTitleHtml(getDisplayTitle(patient.study))}
         </div>
 
         {/* Scrollable document */}
-        <div className="overflow-y-auto flex-1 bg-slate-100 py-6 px-4">
+        <div className="overflow-auto flex-1 bg-slate-100 py-6 px-4">
           {loading ? (
             <div className="flex justify-center py-20">
               <div className="h-6 w-6 rounded-full border-2 border-blue-600 border-t-transparent animate-spin" />
             </div>
           ) : (
-            <div className="max-w-[680px] mx-auto bg-white shadow-lg rounded-sm px-4 sm:px-12 py-6 sm:py-10">
-
-              {/* Patient info — matches the printed report header */}
-              <div className="border-4 border-double border-gray-700 px-3 sm:px-4 py-2.5 sm:py-3 mb-5 flex flex-col sm:flex-row justify-between gap-3 sm:gap-4 text-xs font-bold text-gray-900">
-                <div className="space-y-1 min-w-0">
-                  <p className="truncate">NAME - {patient.name.toUpperCase()}</p>
-                  <p className="truncate">REF. BY - {(patient.referredBy || "SELF").toUpperCase()}</p>
-                  {patient.srNo > 0 && <p>SR. NO - #{patient.srNo}</p>}
-                </div>
-                <div className="space-y-1 shrink-0">
-                  <p>DATE - {date}</p>
-                  <p>AGE - {patient.age ? `${patient.age} YRS` : "—"}</p>
-                  <p>SEX - {(patient.gender || "—").toUpperCase()}</p>
-                </div>
+            <div
+              ref={wrapRef}
+              className="relative max-w-[794px] mx-auto"
+              style={{ minHeight: `${numPages * A4_STRIDE - A4_GAP_PX}px` }}
+            >
+              {/* Plain A4 sheets — each page is its own sheet with a casual empty
+                  gap at top (letterhead) and bottom (footer). No lines or labels. */}
+              <div aria-hidden className="absolute inset-0 z-0 pointer-events-none">
+                {Array.from({ length: numPages }).map((_, i) => (
+                  <div
+                    key={i}
+                    className="absolute left-0 right-0 bg-white shadow-lg rounded-sm"
+                    style={{ top: `${i * A4_STRIDE}px`, height: `${A4_PAGE_PX}px` }}
+                  />
+                ))}
               </div>
 
-              {/* Study title — boxed like the printed report */}
-              <div className="flex justify-center mb-5">
-                <div className="text-center font-bold uppercase text-sm py-1.5 px-8 border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900">
-                  {getDisplayTitle(patient.study)}
-                </div>
-              </div>
-
-              {/* Report body */}
+              {/* Content overlay — transparent; header/footer gaps are just empty padding */}
               <div
-                ref={bodyRef}
-                className="text-sm leading-relaxed text-gray-900 min-h-[200px]"
-              />
-
-              {/* Two-doctor signature block — matches print / Word */}
-              <div className="mt-24 grid grid-cols-2 gap-8 select-none text-gray-900">
-                <div>
-                  <p className="font-bold text-xs uppercase">DR. PRADNYA GORE</p>
-                  <p className="text-[10px] uppercase text-gray-600 mt-0.5">Consultant Radiologist</p>
+                className="relative z-10 px-4 sm:px-14"
+                style={{ paddingTop: `${LETTERHEAD_TOP_PX}px`, paddingBottom: `${LETTERHEAD_BOTTOM_PX}px` }}
+              >
+                {/* Patient info — matches the printed report header */}
+                <div ref={patientBoxRef} className="border-4 border-double border-gray-700 px-3 sm:px-4 py-2.5 sm:py-3 mb-5 flex flex-col sm:flex-row justify-between gap-3 sm:gap-4 text-xs font-bold text-gray-900">
+                  <div className="space-y-1 min-w-0">
+                    <p className="truncate">NAME - {patient.name.toUpperCase()}</p>
+                    <p className="truncate">REF. BY - {(patient.referredBy || "SELF").toUpperCase()}</p>
+                    {patient.srNo > 0 && <p>SR. NO - #{patient.srNo}</p>}
+                  </div>
+                  <div className="space-y-1 shrink-0">
+                    <p>DATE - {date}</p>
+                    <p>AGE - {patient.age ? `${patient.age} YRS` : "—"}</p>
+                    <p>SEX - {(patient.gender || "—").toUpperCase()}</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="font-bold text-xs uppercase">DR. RAMNATH GHUTE</p>
-                  <p className="text-[10px] uppercase text-gray-600 mt-0.5">Consultant Radiologist</p>
-                  <p className="text-[10px] uppercase text-gray-600">M.D. Radiology</p>
+
+                {/* Study title — boxed like the printed report */}
+                <div ref={titleWrapRef} className="flex justify-center mb-5">
+                  <div className="text-center font-bold uppercase text-sm py-1.5 px-8 border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900">
+                    {getDisplayTitle(patient.study)}
+                  </div>
+                </div>
+
+                {/* Report body */}
+                <div
+                  ref={bodyRef}
+                  className="text-sm leading-relaxed text-gray-900 min-h-[200px]"
+                />
+
+                {/* Two-doctor signature block — matches print / Word */}
+                <div ref={sigsRef} className="mt-24 select-none text-gray-900 w-full">
+                  <SignatureColumns signatories={signatories} layouts={signatureLayout} />
                 </div>
               </div>
             </div>

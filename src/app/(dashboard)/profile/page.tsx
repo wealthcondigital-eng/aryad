@@ -5,6 +5,7 @@ import { useRole } from "@/lib/role-context"
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { PasswordInput } from "@/components/ui/password-input"
 import { Label } from "@/components/ui/label"
 import { ShieldCheck, Stethoscope, ClipboardList, CheckCircle2 } from "lucide-react"
 
@@ -116,9 +117,8 @@ export default function ProfilePage() {
             <p className="text-sm font-medium">Change Password <span className="text-muted-foreground font-normal">(optional)</span></p>
             <div className="space-y-1.5">
               <Label htmlFor="password">New Password</Label>
-              <Input
+              <PasswordInput
                 id="password"
-                type="password"
                 value={password}
                 onChange={(e) => { setPassword(e.target.value); setSaved(false) }}
                 placeholder="Leave blank to keep current"
@@ -126,9 +126,8 @@ export default function ProfilePage() {
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="confirmPass">Confirm New Password</Label>
-              <Input
+              <PasswordInput
                 id="confirmPass"
-                type="password"
                 value={confirmPass}
                 onChange={(e) => { setConfirmPass(e.target.value); setSaved(false) }}
                 placeholder="Re-enter new password"

@@ -2,10 +2,12 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
-import { Lock, Mail, Stethoscope, CheckCircle2, AlertCircle } from "lucide-react"
+import { Lock, Mail, Stethoscope, CheckCircle2, AlertCircle, KeyRound, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { PasswordInput } from "@/components/ui/password-input"
 import { Label } from "@/components/ui/label"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { useRole } from "@/lib/role-context"
 import { motion, AnimatePresence } from "motion/react"
 
@@ -29,6 +31,63 @@ export default function LoginPage() {
   const [success, setSuccess] = useState(false)
   const [form, setForm]   = useState({ email: "", password: "" })
   const [error, setError] = useState("")
+
+  // ── Forgot password ──────────────────────────────────────────────────────
+  const [fpOpen, setFpOpen] = useState(false)
+  const [fpStep, setFpStep] = useState<"email" | "otp">("email")
+  const [fpEmail, setFpEmail] = useState("")
+  const [fpOtp, setFpOtp] = useState("")
+  const [fpNewPwd, setFpNewPwd] = useState("")
+  const [fpConfirmPwd, setFpConfirmPwd] = useState("")
+  const [fpLoading, setFpLoading] = useState(false)
+  const [fpError, setFpError] = useState("")
+  const [fpDone, setFpDone] = useState(false)
+
+  const resetForgotState = () => {
+    setFpStep("email"); setFpEmail(""); setFpOtp(""); setFpNewPwd(""); setFpConfirmPwd("")
+    setFpError(""); setFpDone(false); setFpLoading(false)
+  }
+
+  const handleSendOtp = async () => {
+    if (!fpEmail.trim()) { setFpError("Enter your email address."); return }
+    setFpLoading(true); setFpError("")
+    try {
+      const res = await fetch("/api/auth/forgot-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: fpEmail.toLowerCase() }),
+      })
+      if (!res.ok) { setFpError("Something went wrong. Please try again."); return }
+      setFpStep("otp")
+    } catch {
+      setFpError("Server error. Please try again.")
+    } finally {
+      setFpLoading(false)
+    }
+  }
+
+  const handleResetPassword = async () => {
+    if (!fpOtp.trim()) { setFpError("Enter the OTP sent to your email."); return }
+    if (fpNewPwd.length < 6) { setFpError("Password must be at least 6 characters."); return }
+    if (fpNewPwd !== fpConfirmPwd) { setFpError("Passwords do not match."); return }
+    setFpLoading(true); setFpError("")
+    try {
+      const res = await fetch("/api/auth/reset-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: fpEmail.toLowerCase(), otp: fpOtp.trim(), newPassword: fpNewPwd }),
+      })
+      const data = await res.json()
+      if (!res.ok) { setFpError(data.error ?? "Failed to reset password."); return }
+      setFpDone(true)
+      setForm(f => ({ ...f, email: fpEmail.toLowerCase() }))
+      setTimeout(() => { setFpOpen(false); resetForgotState() }, 1600)
+    } catch {
+      setFpError("Server error. Please try again.")
+    } finally {
+      setFpLoading(false)
+    }
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -237,16 +296,24 @@ export default function LoginPage() {
             >
               <Label htmlFor="password" className="text-slate-700 text-sm font-semibold">Password</Label>
               <div className="relative">
-                <Lock className="absolute left-3.5 top-2.5 h-4 w-4 text-slate-400" />
-                <Input
+                <Lock className="absolute left-3.5 top-2.5 h-4 w-4 text-slate-400 z-10" />
+                <PasswordInput
                   id="password"
-                  type="password"
                   placeholder="••••••••"
                   className="pl-10 h-11 border-slate-200 rounded-xl bg-slate-50 focus-visible:bg-white focus-visible:ring-blue-500 transition-colors"
                   value={form.password}
                   onChange={(e) => { setForm({ ...form, password: e.target.value }); setError("") }}
                   required
                 />
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => { resetForgotState(); setFpEmail(form.email); setFpOpen(true) }}
+                  className="text-xs font-medium text-blue-600 hover:underline"
+                >
+                  Forgot password?
+                </button>
               </div>
             </motion.div>
 
@@ -348,6 +415,110 @@ export default function LoginPage() {
           </motion.p>
         </motion.div>
       </div>
+
+      {/* ── Forgot Password Dialog ───────────────────────────────────────────── */}
+      <Dialog open={fpOpen} onOpenChange={o => { setFpOpen(o); if (!o) resetForgotState() }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <KeyRound className="h-4.5 w-4.5 text-blue-600" />
+              Reset Password
+            </DialogTitle>
+          </DialogHeader>
+
+          {fpDone ? (
+            <div className="flex flex-col items-center gap-2 py-6 text-center">
+              <CheckCircle2 className="h-9 w-9 text-green-600" />
+              <p className="text-sm font-medium">Password reset successfully</p>
+              <p className="text-xs text-muted-foreground">You can now sign in with your new password.</p>
+            </div>
+          ) : fpStep === "email" ? (
+            <div className="space-y-3 py-2">
+              <p className="text-sm text-muted-foreground">
+                Enter your registered email — we&apos;ll send a one-time code to reset your password.
+              </p>
+              {fpError && (
+                <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                  {fpError}
+                </div>
+              )}
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Email</Label>
+                <Input
+                  type="email"
+                  placeholder="you@aaryadiagnostics.com"
+                  value={fpEmail}
+                  onChange={e => setFpEmail(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleSendOtp()}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3 py-2">
+              <p className="text-sm text-muted-foreground">
+                Enter the OTP sent to <span className="font-medium text-foreground">{fpEmail}</span> and choose a new password.
+              </p>
+              {fpError && (
+                <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                  {fpError}
+                </div>
+              )}
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">OTP</Label>
+                <Input
+                  inputMode="numeric"
+                  maxLength={6}
+                  placeholder="6-digit code"
+                  value={fpOtp}
+                  onChange={e => setFpOtp(e.target.value.replace(/\D/g, ""))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">New Password</Label>
+                <PasswordInput
+                  placeholder="Enter new password"
+                  value={fpNewPwd}
+                  onChange={e => setFpNewPwd(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">Confirm Password</Label>
+                <PasswordInput
+                  placeholder="Re-enter new password"
+                  value={fpConfirmPwd}
+                  onChange={e => setFpConfirmPwd(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && handleResetPassword()}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleSendOtp}
+                disabled={fpLoading}
+                className="text-xs font-medium text-blue-600 hover:underline disabled:opacity-50"
+              >
+                Resend OTP
+              </button>
+            </div>
+          )}
+
+          {!fpDone && (
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setFpOpen(false)}>Cancel</Button>
+              {fpStep === "email" ? (
+                <Button className="bg-blue-600 hover:bg-blue-700" onClick={handleSendOtp} disabled={fpLoading}>
+                  {fpLoading ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Sending…</> : "Send OTP"}
+                </Button>
+              ) : (
+                <Button className="bg-blue-600 hover:bg-blue-700" onClick={handleResetPassword} disabled={fpLoading}>
+                  {fpLoading ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Resetting…</> : "Reset Password"}
+                </Button>
+              )}
+            </DialogFooter>
+          )}
+        </DialogContent>
+      </Dialog>
 
     </div>
   )

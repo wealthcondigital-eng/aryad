@@ -15,6 +15,7 @@ import { Separator } from "@/components/ui/separator"
 import { Badge } from "@/components/ui/badge"
 import { ComboInput, StudyComboInput, getSavedDoctors, saveDoctor } from "@/components/combo-input"
 import { useRole } from "@/lib/role-context"
+import { receiptLetterheadHtml, receiptPatientBoxHtml, receiptItemsTableHtml, ReceiptRow } from "@/lib/receipt-letterhead"
 
 const paymentModes = ["Cash", "UPI", "Card", "Cheque", "NEFT/RTGS"]
 
@@ -30,7 +31,7 @@ const FIELD_LABELS: Record<string, string> = {
   patientName: "Patient Name",
 }
 
-interface BillItem { id: number; study: string; studyInput: string; price: number; qty: number }
+interface BillItem { id: number; study: string; studyInput: string; price: number; qty: number; discount: number }
 
 interface EditEntry {
   editor: string
@@ -98,21 +99,12 @@ function getHistoryNewValue(
 }
 
 function printReceipt(data: SavedBillData) {
-  const itemRows = data.items
+  const rows: ReceiptRow[] = data.items
     .filter((i) => i.study && i.price > 0)
-    .map(
-      (i, idx) =>
-        `<tr>
-          <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${idx + 1}.</td>
-          <td style="border:1px solid #111;padding:4px 6px;text-transform:uppercase;">${i.study}</td>
-          <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${(i.price * i.qty).toLocaleString()}</td>
-          <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${idx === 0 ? data.discount.toLocaleString() : 0}</td>
-          <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${idx === 0 ? data.paidAmount.toLocaleString() : 0}</td>
-        </tr>`
-    )
-    .join("")
+    .map((i) => ({ study: i.study, amount: i.price * i.qty, discount: i.discount || 0 }))
 
   const totalCharges = data.items.filter(i => i.price > 0).reduce((s, i) => s + i.price * i.qty, 0)
+  const dateStr = new Date(data.billDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
 
   const html = `<!DOCTYPE html>
 <html>
@@ -123,53 +115,20 @@ function printReceipt(data: SavedBillData) {
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: Arial, sans-serif; font-size: 10pt; line-height: 1.5; color: #111; padding: 10mm 14mm; max-width: 160mm; margin: 0 auto; }
     @media print { body { padding: 6mm 10mm; } }
-    table { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
-    th { background: #f0f0f0; font-weight: bold; text-transform: uppercase; text-align: center; border: 1px solid #111; padding: 4px 6px; }
-    .total-row td { font-weight: bold; background: #f9f9f9; }
     .footer-text { text-align: center; font-size: 9pt; color: #555; margin-top: 18px; padding-top: 10px; border-top: 1px solid #ccc; }
   </style>
 </head>
 <body>
-  <!-- No clinic letterhead — receipts print on pre-printed stationery -->
+  ${receiptLetterheadHtml(typeof window !== "undefined" ? window.location.origin : "")}
   <div style="border-top:2.5px solid #111;border-bottom:2.5px solid #111;padding:2px 0;text-align:center;font-weight:bold;font-size:9.5pt;text-transform:uppercase;letter-spacing:1px;margin:8px 0;">Payment Receipt</div>
 
-  <div style="margin-bottom:8px;font-size:9.5pt;display:flex;justify-content:space-between;">
-    <div>
-      <p><strong>Name: ${data.patientName.toUpperCase()}</strong></p>
-      ${data.srNo ? `<p>SR No: #${data.srNo}</p>` : ""}
-      ${data.age > 0 ? `<p>Age: ${data.age} Yrs &nbsp;/&nbsp; Sex: ${data.gender.toUpperCase()}</p>` : ""}
-      ${data.refDoctor ? `<p>Referred By: ${data.refDoctor}</p>` : ""}
-    </div>
-    <div style="text-align:right;">
-      <p><strong>Bill No:</strong> ${data.billNo}</p>
-      <p><strong>Date:</strong> ${new Date(data.billDate).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</p>
-    </div>
-  </div>
+  ${receiptPatientBoxHtml({ name: data.patientName, date: dateStr, age: data.age, gender: data.gender, contact: data.contact, referredBy: data.refDoctor, srNo: data.srNo })}
 
-  <table style="margin-bottom:8px;">
-    <thead>
-      <tr>
-        <th style="width:40px;">Sr.<br>No.</th>
-        <th>Investigation of Patient</th>
-        <th style="width:70px;">Charges</th>
-        <th style="width:70px;">Discount</th>
-        <th style="width:70px;">Paid</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${itemRows}
-      <tr class="total-row">
-        <td colspan="2" style="border:1px solid #111;padding:4px 6px;text-align:center;">Total</td>
-        <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${totalCharges.toLocaleString()}</td>
-        <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${data.discount.toLocaleString()}</td>
-        <td style="border:1px solid #111;padding:4px 6px;text-align:center;">${data.paidAmount.toLocaleString()}</td>
-      </tr>
-    </tbody>
-  </table>
+  ${receiptItemsTableHtml(rows, totalCharges, data.paidAmount)}
 
   <div style="font-size:9.5pt;">
+    <p><strong>Bill No:</strong> ${data.billNo}</p>
     <p><strong>Payment Method</strong> - ${data.paymentMode.toUpperCase()}</p>
-    ${Math.max(0, data.balance) > 0 ? `<p style="color:#dc2626;font-weight:bold;">Balance Due: &#8377;${Math.max(0, data.balance).toLocaleString()}</p>` : ""}
   </div>
 
   <div class="footer-text">Thank you for visiting Aarya Diagnostic Center</div>
@@ -199,7 +158,9 @@ function NewBillingForm() {
   const contactParam   = params.get("contact")  ?? ""
   const refByParam     = params.get("refBy")    ?? ""
   const billIdParam    = params.get("billId")   ?? ""
-  const sidxParam      = parseInt(params.get("sidx") ?? "0", 10)
+  // sidx present → bill just that one study; absent → whole-patient bill (all studies)
+  const sidxRaw        = params.get("sidx")
+  const sidxParam      = sidxRaw !== null && sidxRaw !== "" ? parseInt(sidxRaw, 10) : -1
 
   const [loading,      setLoading]      = useState(false)
   const [billNo,       setBillNo]       = useState("—")
@@ -208,7 +169,6 @@ function NewBillingForm() {
   const [savedDoctors, setSavedDoctors] = useState<string[]>(() => getSavedDoctors())
   const [billDate,     setBillDate]     = useState(() => new Date().toISOString().split("T")[0])
   const [notes,        setNotes]        = useState("")
-  const [discount,     setDiscount]     = useState(0)
   const [paidAmount,   setPaidAmount]   = useState(0)
   const [paymentMode,  setPaymentMode]  = useState("Cash")
   const [saved,        setSaved]        = useState(false)
@@ -223,14 +183,14 @@ function NewBillingForm() {
   const [contact,   setContact]   = useState(contactParam)
 
   const [items, setItems] = useState<BillItem[]>([
-    { id: 1, study: studyParam, studyInput: studyParam, price: 0, qty: 1 },
+    { id: 1, study: studyParam, studyInput: studyParam, price: 0, qty: 1, discount: 0 },
   ])
 
   // Patient picker (when the page is opened without a patient link)
   interface PickerPatient {
     _id: string; srNo: number; name: string; age: number; gender: string
     contact: string; referredBy: string; study: string
-    studies?: { name: string }[]
+    studies?: { name: string; billId?: string | null }[]
   }
   const [allPatients, setAllPatients] = useState<PickerPatient[]>([])
 
@@ -242,11 +202,16 @@ function NewBillingForm() {
     setGender(p.gender || "")
     setContact(p.contact || "")
     if (!refByParam) setRefDoctor(p.referredBy && p.referredBy !== "Self" ? p.referredBy : "")
-    const names = p.studies?.[sidxParam]?.name
+    // Whole-patient bill (sidxParam < 0): list every study that isn't billed yet
+    // (so a study already on another bill isn't double-charged). Single-study
+    // bill: just the one at sidxParam. Falls back to the legacy single study.
+    const allStudies = p.studies?.length ? p.studies : (p.study ? [{ name: p.study }] : [])
+    const unbilled   = allStudies.filter((s) => !(s as { billId?: string | null }).billId)
+    const names = (sidxParam >= 0 && p.studies?.[sidxParam]?.name)
       ? [p.studies[sidxParam].name]
-      : (p.studies?.length ? p.studies.map((s) => s.name) : [p.study]).filter(Boolean)
+      : (unbilled.length ? unbilled : allStudies).map((s) => s.name).filter(Boolean)
     if (names.length > 0) {
-      setItems(names.map((n, i) => ({ id: i + 1, study: n, studyInput: n, price: 0, qty: 1 })))
+      setItems(names.map((n, i) => ({ id: i + 1, study: n, studyInput: n, price: 0, qty: 1, discount: 0 })))
       // Fill known catalogue prices for the patient's studies
       fetch("/api/studies")
         .then((r) => r.json())
@@ -285,8 +250,8 @@ function NewBillingForm() {
   // Edit mode: snapshot of values at load time, used for live change detection
   const [originalValues, setOriginalValues] = useState<{
     patientName: string; referredBy: string; billDate: string; notes: string
-    discount: number; paidAmount: number; paymentMode: string
-    items: { study: string; price: number; qty: number }[]
+    paidAmount: number; paymentMode: string
+    items: { study: string; price: number; qty: number; discount: number }[]
   } | null>(null)
   const [editHistory, setEditHistory] = useState<EditEntry[]>([])
 
@@ -313,13 +278,17 @@ function NewBillingForm() {
         const loadedRef     = b.referredBy  || refByParam
         const loadedDate    = b.billDate    || new Date().toISOString().split("T")[0]
         const loadedNotes   = b.notes       || ""
-        const loadedDisc    = b.discount    || 0
         const loadedPaid    = b.paid        || 0
         const loadedPayMode = b.paymentMode || "Cash"
         const loadedItems: BillItem[] = (b.items ?? []).map(
-          (item: { study: string; quantity: number; price: number }, idx: number) => ({
+          (item: { study: string; quantity: number; price: number; discount?: number }, idx: number) => ({
             id: idx + 1, study: item.study, studyInput: item.study,
             price: item.price, qty: item.quantity,
+            // Older bills (before per-study discount existed) only have a
+            // whole-bill discount and no item.discount at all — migrate that
+            // onto the first item on load so editing an old bill doesn't
+            // silently drop its discount to zero once re-saved.
+            discount: item.discount ?? (idx === 0 ? (b.discount || 0) : 0),
           })
         )
 
@@ -334,7 +303,6 @@ function NewBillingForm() {
         setRefDoctor(loadedRef)
         setBillDate(loadedDate)
         setNotes(loadedNotes)
-        setDiscount(loadedDisc)
         setPaidAmount(loadedPaid)
         setPaymentMode(loadedPayMode)
         if (loadedItems.length > 0) setItems(loadedItems)
@@ -344,12 +312,46 @@ function NewBillingForm() {
           referredBy:  loadedRef,
           billDate:    loadedDate,
           notes:       loadedNotes,
-          discount:    loadedDisc,
           paidAmount:  loadedPaid,
           paymentMode: loadedPayMode,
-          items:       loadedItems.map(i => ({ study: i.study, price: i.price, qty: i.qty })),
+          items:       loadedItems.map(i => ({ study: i.study, price: i.price, qty: i.qty, discount: i.discount })),
         })
         setEditHistory(b.editHistory ?? [])
+
+        // Studies added to the patient AFTER this bill was raised (and not
+        // billed anywhere else) are pulled in as fresh line items — priced
+        // from the catalogue, removable before saving — instead of staying
+        // invisible on the bill forever. Deliberately added after the
+        // originalValues snapshot so they register as an "items" change,
+        // keeping the change-highlight and the edit history honest.
+        if (b.patientId) {
+          fetch(`/api/patients/${b.patientId}`)
+            .then((r) => r.json())
+            .then(async (pd) => {
+              const studies: { name?: string; billId?: string | null }[] = pd.patient?.studies ?? []
+              const onBill = new Set(loadedItems.map((i) => i.study.trim().toLowerCase()))
+              const extras = studies.filter((s) =>
+                s.name?.trim() &&
+                !onBill.has(s.name.trim().toLowerCase()) &&
+                (!s.billId || String(s.billId) === billIdParam)
+              )
+              if (extras.length === 0) return
+              let priceMap: Record<string, number> = {}
+              try {
+                const sd = await fetch("/api/studies").then((r) => r.json())
+                priceMap = Object.fromEntries((sd.studies || []).map((s: { name: string; price: number }) => [s.name, s.price]))
+              } catch {}
+              setItems((prev) => [
+                ...prev,
+                ...extras.map((s, i) => ({
+                  id: Date.now() + i,
+                  study: s.name!.trim(), studyInput: s.name!.trim(),
+                  price: priceMap[s.name!.trim()] || 0, qty: 1, discount: 0,
+                })),
+              ])
+            })
+            .catch(() => {})
+        }
       })
       .catch(() => {})
       .finally(() => setLoading(false))
@@ -363,22 +365,25 @@ function NewBillingForm() {
     if (billDate    !== originalValues.billDate)    ch.add("billDate")
     if (refDoctor   !== originalValues.referredBy)  ch.add("referredBy")
     if (notes       !== originalValues.notes)       ch.add("notes")
-    if (discount    !== originalValues.discount)    ch.add("discount")
     if (paidAmount  !== originalValues.paidAmount)  ch.add("paid")
     if (paymentMode !== originalValues.paymentMode) ch.add("paymentMode")
-    const curItems  = JSON.stringify(items.map(i => ({ study: i.study, price: i.price, qty: i.qty })))
+    // Discount now lives per-item, so a discount edit shows up as an items change.
+    const curItems  = JSON.stringify(items.map(i => ({ study: i.study, price: i.price, qty: i.qty, discount: i.discount })))
     const origItems = JSON.stringify(originalValues.items)
     if (curItems !== origItems) ch.add("items")
     return ch
-  }, [originalValues, billIdParam, patientName, billDate, refDoctor, notes, discount, paidAmount, paymentMode, items])
+  }, [originalValues, billIdParam, patientName, billDate, refDoctor, notes, paidAmount, paymentMode, items])
 
   const patientSectionChanged = liveChangedFields.has("patientName") || liveChangedFields.has("billDate")
   const doctorSectionChanged  = liveChangedFields.has("referredBy")  || liveChangedFields.has("notes")
   const studiesSectionChanged = liveChangedFields.has("items")
-  const paymentSectionChanged = liveChangedFields.has("discount") || liveChangedFields.has("paid") || liveChangedFields.has("paymentMode")
+  const paymentSectionChanged = liveChangedFields.has("paid") || liveChangedFields.has("paymentMode")
 
   const addItem = () =>
-    setItems((prev) => [...prev, { id: Date.now(), study: "", studyInput: "", price: 0, qty: 1 }])
+    setItems((prev) => [...prev, { id: Date.now(), study: "", studyInput: "", price: 0, qty: 1, discount: 0 }])
+
+  const updateItemDiscount = (id: number, discount: number) =>
+    setItems((prev) => prev.map((i) => i.id === id ? { ...i, discount } : i))
 
   const removeItem = (id: number) => {
     if (items.length === 1) return
@@ -392,6 +397,7 @@ function NewBillingForm() {
     setItems((prev) => prev.map((i) => i.id === id ? { ...i, studyInput: val, study: val } : i))
 
   const subtotal  = items.reduce((acc, i) => acc + i.price * i.qty, 0)
+  const discount  = items.reduce((acc, i) => acc + (i.discount || 0), 0)
   const netAmount = subtotal - discount
   const balance   = netAmount - paidAmount
 
@@ -415,7 +421,7 @@ function NewBillingForm() {
             editor:      editorName,
             patientName: patientName || nameParam,
             referredBy:  refDoctor || refByParam || "Self",
-            items:       items.map((i) => ({ study: i.study, quantity: i.qty, price: i.price })),
+            items:       items.map((i) => ({ study: i.study, quantity: i.qty, price: i.price, discount: i.discount || 0 })),
             charges:     subtotal,
             discount,
             paid:        paidAmount,
@@ -436,7 +442,7 @@ function NewBillingForm() {
             gender,
             contact,
             referredBy:  refDoctor || refByParam || "Self",
-            items:       items.map((i) => ({ study: i.study, quantity: i.qty, price: i.price })),
+            items:       items.map((i) => ({ study: i.study, quantity: i.qty, price: i.price, discount: i.discount || 0 })),
             charges:     subtotal,
             discount,
             paid:        paidAmount,
@@ -657,9 +663,11 @@ function NewBillingForm() {
           <CardContent className="space-y-3">
             {/* Desktop header */}
             <div className="hidden sm:grid grid-cols-12 gap-2 text-xs font-medium text-muted-foreground px-1">
-              <div className="col-span-6">Test / Study Name</div>
-              <div className="col-span-2 text-center">Qty</div>
-              <div className="col-span-3 text-right">Price (&#8377;)</div>
+              <div className="col-span-4">Test / Study Name</div>
+              <div className="col-span-1 text-center">Qty</div>
+              <div className="col-span-2 text-right">Price (&#8377;)</div>
+              <div className="col-span-2 text-right">Discount (&#8377;)</div>
+              <div className="col-span-2 text-right">Net (&#8377;)</div>
               <div className="col-span-1"></div>
             </div>
 
@@ -667,7 +675,7 @@ function NewBillingForm() {
               <div key={item.id}>
                 {/* Desktop View */}
                 <div className="hidden sm:grid grid-cols-12 gap-2 items-start">
-                  <div className="col-span-6">
+                  <div className="col-span-4">
                     <StudyComboInput
                       value={item.studyInput}
                       onChange={(v) => updateItemStudyInput(item.id, v)}
@@ -675,7 +683,7 @@ function NewBillingForm() {
                       placeholder="Type to search test..."
                     />
                   </div>
-                  <div className="col-span-2">
+                  <div className="col-span-1">
                     <Input
                       type="number" min={1}
                       value={item.qty}
@@ -685,7 +693,7 @@ function NewBillingForm() {
                       className="text-center"
                     />
                   </div>
-                  <div className="col-span-3">
+                  <div className="col-span-2">
                     <Input
                       type="number" min={0}
                       value={item.price || ""}
@@ -695,6 +703,18 @@ function NewBillingForm() {
                       className="text-right"
                       placeholder="0"
                     />
+                  </div>
+                  <div className="col-span-2">
+                    <Input
+                      type="number" min={0}
+                      value={item.discount || ""}
+                      onChange={(e) => updateItemDiscount(item.id, +e.target.value)}
+                      className="text-right"
+                      placeholder="0"
+                    />
+                  </div>
+                  <div className="col-span-2 flex items-center justify-end pt-2 text-sm font-medium text-muted-foreground">
+                    &#8377;{Math.max(0, item.price * item.qty - item.discount).toLocaleString()}
                   </div>
                   <div className="col-span-1 flex justify-center pt-1">
                     <Button
@@ -727,7 +747,7 @@ function NewBillingForm() {
                     onSelect={(name, price) => updateItemStudy(item.id, name, price)}
                     placeholder="Type to search test..."
                   />
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-3 gap-2.5">
                     <div className="space-y-1">
                       <Label className="text-[11px] text-muted-foreground font-semibold uppercase">Qty</Label>
                       <Input
@@ -751,7 +771,20 @@ function NewBillingForm() {
                         placeholder="0"
                       />
                     </div>
+                    <div className="space-y-1">
+                      <Label className="text-[11px] text-muted-foreground font-semibold uppercase">Discount (₹)</Label>
+                      <Input
+                        type="number" min={0}
+                        value={item.discount || ""}
+                        onChange={(e) => updateItemDiscount(item.id, +e.target.value)}
+                        className="text-right h-8 text-xs"
+                        placeholder="0"
+                      />
+                    </div>
                   </div>
+                  <p className="text-[11px] text-muted-foreground text-right">
+                    Net: &#8377;{Math.max(0, item.price * item.qty - item.discount).toLocaleString()}
+                  </p>
                 </div>
               </div>
             ))}
@@ -781,15 +814,9 @@ function NewBillingForm() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="space-y-2">
-                {changedFieldLabel("discount", "Discount (₹)")}
-                <Input
-                  type="number" min={0} placeholder="0"
-                  value={discount || ""}
-                  onChange={(e) => setDiscount(+e.target.value)}
-                  className={changedInputClass("discount")}
-                />
-              </div>
+              <p className="text-[11px] text-muted-foreground -mt-1">
+                Discount is set per study in the table above.
+              </p>
               <div className="space-y-2">
                 {changedFieldLabel("paid", "Paid Amount (₹)", true)}
                 <Input
@@ -848,7 +875,7 @@ function NewBillingForm() {
             paid:        paidAmount,
             paymentMode,
             charges:     subtotal,
-            items:       items.map((i) => ({ study: i.study, quantity: i.qty, price: i.price })),
+            items:       items.map((i) => ({ study: i.study, quantity: i.qty, price: i.price, discount: i.discount || 0 })),
           }
           return (
             <Card className="border-blue-200 bg-blue-50/20">

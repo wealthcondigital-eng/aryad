@@ -70,9 +70,21 @@ export async function POST(req: NextRequest) {
     const patient = await Patient.findById(body.patientId)
     if (patient) {
       ensureStudies(patient)
-      const studyIndex = Math.min(Math.max(Number(body.studyIndex) || 0, 0), Math.max(patient.studies.length - 1, 0))
-      const entry = patient.studies[studyIndex]
-      if (entry) {
+      const rawIdx = Number(body.studyIndex)
+      // studyIndex < 0 (or missing) → this bill covers the whole patient, so
+      // link every study whose name appears on the bill. Otherwise link just
+      // the one billed study.
+      const linkAll = !Number.isFinite(rawIdx) || rawIdx < 0
+      let targets
+      if (linkAll) {
+        const billed = new Set((body.items ?? []).map((i: { study?: string }) => (i.study || "").trim().toLowerCase()))
+        targets = patient.studies.filter((s: { name?: string }) => billed.has((s.name || "").trim().toLowerCase()))
+        if (targets.length === 0) targets = patient.studies   // fallback: nothing matched by name
+      } else {
+        targets = [patient.studies[Math.min(Math.max(rawIdx, 0), Math.max(patient.studies.length - 1, 0))]]
+      }
+      for (const entry of targets) {
+        if (!entry) continue
         entry.charges = body.charges
         entry.paid = body.paid
         entry.discount = body.discount
@@ -81,7 +93,25 @@ export async function POST(req: NextRequest) {
       }
       syncLegacyMirror(patient)
       patient.markModified("studies")
+
+      // A name/referral correction typed while raising this bill is a patient-
+      // record correction, not just this bill's detail — write it through to
+      // the patient so reports and every other bill for them stay in sync too.
+      const identitySync: Record<string, unknown> = {}
+      if (typeof body.patientName === "string" && body.patientName.trim() && body.patientName.trim() !== patient.name) {
+        patient.name = body.patientName.trim()
+        identitySync.patientName = patient.name
+      }
+      if (typeof body.referredBy === "string" && body.referredBy.trim() && body.referredBy.trim() !== patient.referredBy) {
+        patient.referredBy = body.referredBy.trim()
+        identitySync.referredBy = patient.referredBy
+      }
+
       await patient.save()
+
+      if (Object.keys(identitySync).length > 0) {
+        await Bill.updateMany({ patientId: patient._id, _id: { $ne: bill._id } }, { $set: identitySync })
+      }
     }
 
     // Update Study catalogue prices from bill items

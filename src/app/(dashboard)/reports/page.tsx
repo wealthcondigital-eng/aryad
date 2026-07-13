@@ -5,7 +5,7 @@ import Link from "next/link"
 import {
   Search, FileText, MoreHorizontal, Share2, Download,
   Eye, CheckCircle2, Clock, AlertCircle, Printer, Loader2,
-  Activity, User, CalendarDays, Hash,
+  Activity, User, CalendarDays, Hash, Trash2,
 } from "lucide-react"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Button } from "@/components/ui/button"
@@ -19,6 +19,8 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { useRole } from "@/lib/role-context"
+import { printShellHtml } from "@/lib/report-layout"
+import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, dataUrlToBytes, imageFormat, type SignatureLayout } from "@/lib/report-signatures"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { motion } from "motion/react"
 
@@ -119,7 +121,10 @@ function StatusBadge({ status }: { status: string }) {
 
 // ── HTML parse helper (browser-only) ─────────────────────────────────────────
 
-type Seg = { text: string; bold?: boolean; italic?: boolean; underline?: boolean }
+type Seg = {
+  text: string; bold?: boolean; italic?: boolean; underline?: boolean
+  image?: string; imgWidth?: number; imgHeight?: number
+}
 
 function parseHtml(html: string): Seg[] {
   const segs: Seg[] = []
@@ -130,8 +135,17 @@ function parseHtml(html: string): Seg[] {
       const t = node.textContent ?? ""
       if (t) segs.push({ text: t, ...fmt })
     } else if (node.nodeType === 1) {
-      const el = node as Element
+      const el = node as HTMLElement
       const tag = el.tagName.toLowerCase()
+      if (tag === "img") {
+        const src = el.getAttribute("src") || ""
+        if (src) {
+          const w = parseFloat(el.style.width) || parseFloat(el.getAttribute("width") || "") || 0
+          const h = parseFloat(el.style.height) || parseFloat(el.getAttribute("height") || "") || 0
+          segs.push({ text: "", image: src, imgWidth: w, imgHeight: h })
+        }
+        return
+      }
       const f = { ...fmt }
       if (tag === "b" || tag === "strong") f.bold = true
       if (tag === "i" || tag === "em")     f.italic = true
@@ -147,8 +161,10 @@ function parseHtml(html: string): Seg[] {
 // ── Generate DOCX base64 (fallback when no stored DOCX) ──────────────────────
 // Matches the clinic Word format: starts at the study heading, no letterhead.
 
-async function generateDocxBase64(r: ReportRow, reportHtml: string): Promise<string> {
-  const { Document, Packer, Paragraph, TextRun, AlignmentType, Table, TableRow, TableCell, WidthType, BorderStyle } = await import("docx")
+async function generateDocxBase64(r: ReportRow, reportHtml: string, signatureLayout: (SignatureLayout | null | undefined)[]): Promise<string> {
+  const { Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType, Table, TableRow, TableCell, WidthType, BorderStyle } = await import("docx")
+  const signatories = await fetchSignatories()
+  const sigCells = await buildDocxSignatureCells(signatories, signatureLayout)
 
   const cleanHtml = reportHtml.replace(
     /<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1"
@@ -163,6 +179,16 @@ async function generateDocxBase64(r: ReportRow, reportHtml: string): Promise<str
       line = []
     }
     segs.forEach((s) => {
+      if (s.image) {
+        if (line.length) flush()
+        const w = Math.min(s.imgWidth || 150, 450)
+        const h = s.imgWidth && s.imgHeight ? Math.round(w * (s.imgHeight / s.imgWidth)) : Math.min(s.imgHeight || 60, 300)
+        paras.push(new Paragraph({
+          children: [new ImageRun({ type: imageFormat(s.image), data: dataUrlToBytes(s.image), transformation: { width: w, height: h } })],
+          spacing: { after: 80 },
+        }))
+        return
+      }
       if (s.text === "\n") { flush() }
       else { line.push(new TextRun({ text: s.text, bold: s.bold, italics: s.italic, underline: s.underline ? {} : undefined, size })) }
     })
@@ -191,22 +217,29 @@ async function generateDocxBase64(r: ReportRow, reportHtml: string): Promise<str
       width: { size: 100, type: WidthType.PERCENTAGE },
       borders: noBorders,
       rows: [
+        // Row 1: Signature Images
         new TableRow({
           children: [
             new TableCell({
               width: { size: 50, type: WidthType.PERCENTAGE },
-              children: [
-                new Paragraph({ children: [new TextRun({ text: "DR. PRADNYA GORE", bold: true, size: 20 })], spacing: { after: 40 } }),
-                new Paragraph({ children: [new TextRun({ text: "CONSULTANT RADIOLOGIST", size: 16 })] }),
-              ],
+              children: sigCells.imgLeft,
             }),
             new TableCell({
               width: { size: 50, type: WidthType.PERCENTAGE },
-              children: [
-                new Paragraph({ children: [new TextRun({ text: "DR. RAMNATH GHUTE", bold: true, size: 20 })], spacing: { after: 40 } }),
-                new Paragraph({ children: [new TextRun({ text: "CONSULTANT RADIOLOGIST", size: 16 })] }),
-                new Paragraph({ children: [new TextRun({ text: "M.D. RADIOLOGY", size: 16 })] }),
-              ],
+              children: sigCells.imgRight,
+            }),
+          ],
+        }),
+        // Row 2: Doctor Names & Credentials
+        new TableRow({
+          children: [
+            new TableCell({
+              width: { size: 50, type: WidthType.PERCENTAGE },
+              children: sigCells.textLeft,
+            }),
+            new TableCell({
+              width: { size: 50, type: WidthType.PERCENTAGE },
+              children: sigCells.textRight,
             }),
           ],
         }),
@@ -214,8 +247,9 @@ async function generateDocxBase64(r: ReportRow, reportHtml: string): Promise<str
     }),
   ]
 
+  // 40mm top / 30mm bottom (in twips) keep the pre-printed letterhead bands empty
   return await Packer.toBase64String(new Document({
-    sections: [{ properties: { page: { margin: { top: 1080, bottom: 1080, left: 1440, right: 1440 } } }, children }],
+    sections: [{ properties: { page: { margin: { top: 2270, bottom: 1700, left: 1440, right: 1440 } } }, children }],
   }))
 }
 
@@ -235,7 +269,7 @@ function downloadDocx(base64: string, filename: string) {
 
 // ── Fetch the report body for one study of a patient ─────────────────────────
 
-async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: string }> {
+async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: string; signatureLayout: (SignatureLayout | null | undefined)[] }> {
   // localStorage draft first (kept per study)
   const key = `aarya_report_${r.p.srNo || r.p.name.replace(/\s+/g, "_")}${r.sidx > 0 ? `_s${r.sidx}` : ""}`
   let body = ""
@@ -245,15 +279,17 @@ async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: str
   } catch {}
 
   let docx = ""
+  let signatureLayout: (SignatureLayout | null | undefined)[] = []
   try {
     const res = await fetch(`/api/patients/${r.p._id}`)
     const d   = await res.json()
     const entry = d.patient?.studies?.[r.sidx]
     if (!body) body = entry?.reportBody || d.patient?.reportBody || ""
     docx = entry?.reportDocx || (r.sidx === 0 ? d.patient?.reportDocx : "") || ""
+    signatureLayout = entry?.signatureLayout || []
   } catch {}
 
-  return { body, docx }
+  return { body, docx, signatureLayout }
 }
 
 // ── Print a submitted report directly ────────────────────────────────────────
@@ -261,15 +297,14 @@ async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: str
 // Print output matches the Word file: starts directly at the study heading
 // (no letterhead / patient block — reports print on pre-printed stationery).
 async function printReportDirect(r: ReportRow) {
-  const { body: reportBody } = await fetchStudyReport(r)
+  const { body: reportBody, signatureLayout } = await fetchStudyReport(r)
+  const signatories = await fetchSignatories()
   const p = r.p
 
   const cleanBody = reportBody.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
   const body      = cleanBody || "<em style='color:#aaa;font-size:12px'>No report content saved.</em>"
 
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Report – ${p.name}</title>
-<style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.5;padding:15mm 20mm;color:#111;}@media print{body{padding:8mm 12mm;}}</style>
-</head><body>
+  const html = printShellHtml(`Report – ${p.name}`, `
 <div style="border-bottom: 1.5px solid #111; padding-bottom: 8px; margin-bottom: 14px; font-family: Arial, sans-serif; font-size: 9pt;">
   <table style="width: 100%; border-collapse: collapse; border: none;">
     <tr style="border: none;">
@@ -292,18 +327,7 @@ async function printReportDirect(r: ReportRow) {
 </div>
 <div style="text-align:center;font-weight:bold;font-size:12pt;text-transform:uppercase;text-decoration:underline;margin:12px 0 18px;">${r.study}</div>
 <div style="font-size:10pt;line-height:1.6;">${body}</div>
-<div style="display:flex;gap:30px;margin-top:50px;">
-  <div style="flex:1;">
-    <p style="font-weight:bold;font-size:10pt;text-transform:uppercase;">DR. PRADNYA GORE</p>
-    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">Consultant Radiologist</p>
-  </div>
-  <div style="flex:1;">
-    <p style="font-weight:bold;font-size:10pt;text-transform:uppercase;">DR. RAMNATH GHUTE</p>
-    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">Consultant Radiologist</p>
-    <p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">M.D. Radiology</p>
-  </div>
-</div>
-</body></html>`
+<div style="display:flex;gap:30px;margin-top:50px;page-break-inside:avoid;break-inside:avoid;">${signatureColumnsHtml(signatories, signatureLayout)}</div>`)
 
   const blob = new Blob([html], { type: "text/html" })
   const url  = URL.createObjectURL(blob)
@@ -335,14 +359,14 @@ export default function ReportsPage() {
   const handleDownloadDocx = async (r: ReportRow) => {
     setDownloadingKey(rowKey(r))
     try {
-      const { body, docx } = await fetchStudyReport(r)
+      const { body, docx, signatureLayout } = await fetchStudyReport(r)
       let base64 = docx
       if (!base64) {
         if (!body) {
           alert("No report content found. The report has not been submitted yet.")
           return
         }
-        base64 = await generateDocxBase64(r, body)
+        base64 = await generateDocxBase64(r, body, signatureLayout)
       }
       downloadDocx(base64, `Report_${r.p.name.replace(/\s+/g, "_")}_${r.study.replace(/[^A-Za-z0-9]+/g, "_")}.docx`)
     } catch {
@@ -352,13 +376,37 @@ export default function ReportsPage() {
     }
   }
 
-  useEffect(() => {
+  const fetchPatients = () => {
     fetch("/api/patients")
       .then((r) => r.json())
       .then((data) => setPatients(data.patients || []))
       .catch(() => {})
       .finally(() => setLoading(false))
-  }, [])
+  }
+
+  useEffect(() => { fetchPatients() }, [])
+
+  // Removes the study (and its report) from the patient, pulls its line off
+  // the linked bill (deleting the bill if that was its only line), and — if
+  // it was the patient's only study — the whole patient record.
+  const handleDeleteReport = async (r: ReportRow) => {
+    const isLast = (r.p.studies?.length ?? 1) <= 1
+    const msg = isLast
+      ? `Delete the "${r.study}" report for ${r.p.name}?\n\nThis is their only study, so the patient record and their bill will be deleted too. This cannot be undone.`
+      : `Delete the "${r.study}" report for ${r.p.name}?\n\nThe study is removed from the patient and its line comes off their bill. This cannot be undone.`
+    if (!confirm(msg)) return
+    try {
+      const res = await fetch(`/api/patients/${r.p._id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ removeStudyIndex: r.sidx }),
+      })
+      if (!res.ok) throw new Error()
+      fetchPatients()
+    } catch {
+      alert("Failed to delete the report. Please try again.")
+    }
+  }
 
   // Everyone (receptionist, doctor, admin) can create and edit reports now
   const canCreate = user?.permissions.reports.create ?? false
@@ -605,6 +653,17 @@ export default function ReportsPage() {
                               <DropdownMenuItem className="flex items-center gap-2 text-green-700" onClick={() => whatsAppShare(first)}>
                                 <Share2 className="h-3.5 w-3.5" />Share on WhatsApp
                               </DropdownMenuItem>
+                              {canCreate && (
+                                <>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    className="flex items-center gap-2 text-red-600 focus:text-red-600"
+                                    onClick={() => handleDeleteReport(first)}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />Delete Report
+                                  </DropdownMenuItem>
+                                </>
+                              )}
                             </DropdownMenuContent>
                           </DropdownMenu>
                         </div>
@@ -716,6 +775,17 @@ export default function ReportsPage() {
                                 <DropdownMenuItem className="flex items-center gap-2 text-green-700" onClick={() => whatsAppShare(r)}>
                                   <Share2 className="h-3.5 w-3.5" />Share on WhatsApp
                                 </DropdownMenuItem>
+                                {canCreate && (
+                                  <>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem
+                                      className="flex items-center gap-2 text-red-600 focus:text-red-600"
+                                      onClick={() => handleDeleteReport(r)}
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />Delete Report
+                                    </DropdownMenuItem>
+                                  </>
+                                )}
                               </DropdownMenuContent>
                             </DropdownMenu>
                           </div>

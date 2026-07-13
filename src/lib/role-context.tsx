@@ -22,34 +22,24 @@ export interface CurrentUser {
   permissions: Permissions
 }
 
+// Clinical/operational modules are wide open for every role — admin, doctor
+// and receptionist can all view/create/edit patients, billing, reports, etc.
+// User Management (staff accounts + their permissions) is admin/doctor only —
+// receptionist does not manage logins.
+const FULL_PERMISSIONS: Permissions = {
+  patients:  { view: true,  create: true,  edit: true  },
+  billing:   { view: true,  create: true               },
+  reports:   { view: true,  create: true,  edit: true  },
+  analytics: { view: true                              },
+  users:     { manage: true                            },
+  doctors:   { view: true,  manage: true               },
+  studies:   { view: true,  manage: true               },
+}
+
 export const DEFAULT_PERMISSIONS: Record<Role, Permissions> = {
-  admin: {
-    patients:  { view: true,  create: true,  edit: true  },
-    billing:   { view: true,  create: true               },
-    reports:   { view: true,  create: true,  edit: true  },
-    analytics: { view: true                              },
-    users:     { manage: true                            },
-    doctors:   { view: true,  manage: true               },
-    studies:   { view: true,  manage: true               },
-  },
-  doctor: {
-    patients:  { view: true,  create: true,  edit: true  },
-    billing:   { view: true,  create: true               },
-    reports:   { view: true,  create: true,  edit: true  },
-    analytics: { view: false                             },
-    users:     { manage: false                           },
-    doctors:   { view: true,  manage: false              },
-    studies:   { view: true,  manage: true               },
-  },
-  receptionist: {
-    patients:  { view: true,  create: true,  edit: true  },
-    billing:   { view: true,  create: true               },
-    reports:   { view: true,  create: true,  edit: true  },
-    analytics: { view: false                             },
-    users:     { manage: false                           },
-    doctors:   { view: true,  manage: false              },
-    studies:   { view: true,  manage: true               },
-  },
+  admin:  FULL_PERMISSIONS,
+  doctor: FULL_PERMISSIONS,
+  receptionist: { ...FULL_PERMISSIONS, users: { manage: false } },
 }
 
 interface RoleContextType {

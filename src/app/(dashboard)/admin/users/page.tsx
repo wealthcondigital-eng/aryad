@@ -9,6 +9,7 @@ import {
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { PasswordInput } from "@/components/ui/password-input"
 import { Label } from "@/components/ui/label"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import {
@@ -65,28 +66,20 @@ const PERMISSION_MODULES = [
   { key: "users", label: "Users", actions: ["view", "create", "edit"] },
 ] as const
 
+// Clinical/operational modules default to full access for every role. Only
+// User Management is restricted — receptionist can't view/create/edit staff logins.
+const FULL_DB_PERMISSIONS: DBPermissions = {
+  patients: { view: true, create: true, edit: true },
+  billing: { view: true, create: true, edit: true },
+  reports: { view: true, create: true, edit: true },
+  analytics: { view: true },
+  users: { view: true, create: true, edit: true },
+}
+
 const ROLE_DEFAULTS: Record<Role, DBPermissions> = {
-  admin: {
-    patients: { view: true, create: true, edit: true },
-    billing: { view: true, create: true, edit: true },
-    reports: { view: true, create: true, edit: true },
-    analytics: { view: true },
-    users: { view: true, create: true, edit: true },
-  },
-  doctor: {
-    patients: { view: true, create: true, edit: true },
-    billing: { view: true, create: true, edit: true },
-    reports: { view: true, create: true, edit: true },
-    analytics: { view: false },
-    users: { view: false, create: false, edit: false },
-  },
-  receptionist: {
-    patients: { view: true, create: true, edit: true },
-    billing: { view: true, create: true, edit: true },
-    reports: { view: true, create: true, edit: true },
-    analytics: { view: false },
-    users: { view: false, create: false, edit: false },
-  },
+  admin:  FULL_DB_PERMISSIONS,
+  doctor: FULL_DB_PERMISSIONS,
+  receptionist: { ...FULL_DB_PERMISSIONS, users: { view: false, create: false, edit: false } },
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -97,10 +90,10 @@ function initials(name: string) {
 
 function permissionSummary(permissions: DBPermissions | undefined, role: Role): string {
   if (role === "admin") return "Full access"
-  if (!permissions) return "Default"
+  const perms = permissions ?? ROLE_DEFAULTS[role]
   const total = PERMISSION_MODULES.reduce((s, m) => s + m.actions.length, 0)
   const granted = PERMISSION_MODULES.reduce(
-    (s, m) => s + m.actions.filter(a => (permissions as unknown as Record<string, Record<string, boolean>>)[m.key]?.[a]).length,
+    (s, m) => s + m.actions.filter(a => (perms as unknown as Record<string, Record<string, boolean>>)[m.key]?.[a]).length,
     0
   )
   if (granted === total) return "Full access"
@@ -198,8 +191,8 @@ export default function AdminUsersPage() {
   useEffect(() => { loadUsers() }, [loadUsers])
 
   // ── Guard ─────────────────────────────────────────────────────────────────────
-
-  if (!me || me.role !== "admin") {
+  // Admin and doctor can manage staff logins; receptionist cannot.
+  if (!me || me.role === "receptionist") {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-3">
         <ShieldCheck className="h-10 w-10 text-muted-foreground" />
@@ -551,8 +544,7 @@ export default function AdminUsersPage() {
 
             <div className="space-y-1.5">
               <Label className="text-sm font-medium">Password</Label>
-              <Input
-                type="password"
+              <PasswordInput
                 placeholder="Set a strong password"
                 value={form.password}
                 onChange={e => setForm({ ...form, password: e.target.value })}
@@ -677,8 +669,7 @@ export default function AdminUsersPage() {
             </p>
             <div className="space-y-1.5">
               <Label className="text-sm font-medium">New Password</Label>
-              <Input
-                type="password"
+              <PasswordInput
                 placeholder="Enter new password"
                 value={newPwd}
                 onChange={e => setNewPwd(e.target.value)}

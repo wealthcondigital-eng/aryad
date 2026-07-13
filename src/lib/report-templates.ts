@@ -10,6 +10,8 @@ export interface ReportTemplate {
   heading: string   // study heading shown centered + underlined, editable in the editor
   preview: string
   body: string      // HTML for the contentEditable report body
+  _id?: string      // present only on clinic-added templates (backed by MongoDB) — lets
+                     // the UI tell them apart from the built-in bundled ones and offer delete
 }
 
 export const REPORT_TEMPLATES: Record<TemplateCategory, ReportTemplate[]> = {

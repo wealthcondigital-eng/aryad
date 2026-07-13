@@ -5,37 +5,32 @@ import { usePathname, useRouter } from "next/navigation"
 import {
   LayoutDashboard, Users, UserCog, FlaskConical, Receipt,
   FileText, CalendarDays, Activity, LogOut, X, UserPlus,
-  ShieldCheck, ClipboardList, Stethoscope, ChevronRight,
+  ShieldCheck, ClipboardList, Stethoscope, ChevronRight, LayoutTemplate, PenTool,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useRole, Role } from "@/lib/role-context"
 
+// Clinical/operational nav — every role sees these.
+const BASE_NAV: { href: string; label: string; icon: React.ElementType; highlight?: boolean }[] = [
+  { href: "/dashboard",    label: "Dashboard",       icon: LayoutDashboard },
+  { href: "/patients/new", label: "New Patient",     icon: UserPlus,       highlight: true },
+  { href: "/patients",     label: "All Patients",    icon: Users },
+  { href: "/billing",      label: "Billing",         icon: Receipt },
+  { href: "/reports",      label: "Reports",         icon: FileText },
+  { href: "/doctors",      label: "Doctors",         icon: UserCog },
+  { href: "/signatures",   label: "Add Signature",  icon: PenTool },
+  { href: "/add-template", label: "Add Template", icon: LayoutTemplate },
+  { href: "/studies",      label: "Studies & Tests", icon: FlaskConical },
+  { href: "/analytics",    label: "Analytics",       icon: CalendarDays },
+]
+
+const USER_MANAGEMENT_NAV = { href: "/admin/users", label: "User Management", icon: ShieldCheck }
+
+// Admin and doctor can manage staff logins; receptionist cannot.
 const NAV_BY_ROLE: Record<Role, { href: string; label: string; icon: React.ElementType; highlight?: boolean }[]> = {
-  admin: [
-    { href: "/dashboard",    label: "Dashboard",       icon: LayoutDashboard },
-    { href: "/patients/new", label: "New Patient",     icon: UserPlus,       highlight: true },
-    { href: "/patients",     label: "All Patients",    icon: Users },
-    { href: "/billing",      label: "Billing",         icon: Receipt },
-    { href: "/reports",      label: "Reports",         icon: FileText },
-    { href: "/doctors",      label: "Doctors",         icon: UserCog },
-    { href: "/studies",      label: "Studies & Tests", icon: FlaskConical },
-    { href: "/analytics",    label: "Analytics",       icon: CalendarDays },
-    { href: "/admin/users",  label: "User Management", icon: ShieldCheck },
-  ],
-  doctor: [
-    { href: "/dashboard",    label: "Dashboard",       icon: LayoutDashboard },
-    { href: "/patients/new", label: "New Patient",     icon: UserPlus,       highlight: true },
-    { href: "/patients",     label: "All Patients",    icon: Users },
-    { href: "/billing",      label: "Billing",         icon: Receipt },
-    { href: "/reports",      label: "Reports",         icon: FileText },
-  ],
-  receptionist: [
-    { href: "/dashboard",    label: "Dashboard",       icon: LayoutDashboard },
-    { href: "/patients/new", label: "New Patient",     icon: UserPlus,       highlight: true },
-    { href: "/patients",     label: "All Patients",    icon: Users },
-    { href: "/billing",      label: "Billing",         icon: Receipt },
-    { href: "/reports",      label: "Reports",         icon: FileText },
-  ],
+  admin:        [...BASE_NAV, USER_MANAGEMENT_NAV],
+  doctor:       [...BASE_NAV, USER_MANAGEMENT_NAV],
+  receptionist: BASE_NAV,
 }
 
 const ROLE_ICON: Record<Role, React.ElementType> = {

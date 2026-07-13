@@ -129,11 +129,11 @@ function buildFillHref(p: PatientDoc, sidx = 0, mode: "fill" | "edit" = "fill") 
   return `/reports/new?${params}`
 }
 
-function billHrefFor(p: PatientDoc, sidx = 0) {
-  const study = studiesOf(p)[sidx]?.name || p.study
+// Omit `sidx` for a whole-patient bill (all studies); pass it to bill one study.
+function billHrefFor(p: PatientDoc, sidx?: number) {
+  const study = (sidx !== undefined ? studiesOf(p)[sidx]?.name : undefined) || p.study
   const params = new URLSearchParams({
     id: p._id,
-    sidx: String(sidx),
     name: p.name,
     srNo: String(p.srNo),
     age: String(p.age),
@@ -142,6 +142,7 @@ function billHrefFor(p: PatientDoc, sidx = 0) {
     refBy: p.referredBy || "Self",
     study: study,
   })
+  if (sidx !== undefined) params.set("sidx", String(sidx))
   return `/billing/new?${params}`
 }
 
@@ -488,7 +489,7 @@ function EditPatientModal({
                   </div>
                 ))}
                 <p className="text-[11px] text-muted-foreground">
-                  Removing a study deletes its report. Each study keeps its own separate report.
+                  Removing a study deletes its report and removes it from billing. Each study keeps its own separate report.
                 </p>
               </div>
             </div>
@@ -1438,7 +1439,7 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
                                         </DropdownMenuItem>
                                       ) : canCreate && (
                                         <DropdownMenuItem asChild>
-                                          <Link href={billHrefFor(p, 0)} className="flex items-center gap-2">
+                                          <Link href={billHrefFor(p)} className="flex items-center gap-2">
                                             <Receipt className="h-3.5 w-3.5" />Create Bill
                                           </Link>
                                         </DropdownMenuItem>
@@ -1716,7 +1717,7 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
                                     </DropdownMenuItem>
                                   ) : canCreate && (
                                     <DropdownMenuItem asChild>
-                                      <Link href={billHrefFor(p, 0)} className="flex items-center gap-2">
+                                      <Link href={billHrefFor(p)} className="flex items-center gap-2">
                                         <Receipt className="h-3.5 w-3.5" />Create Bill
                                       </Link>
                                     </DropdownMenuItem>

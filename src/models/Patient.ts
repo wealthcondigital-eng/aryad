@@ -13,6 +13,18 @@ export interface IRegistrationEditEntry {
   previousValues: Record<string, unknown>
 }
 
+// Per-report drag/resize override for a signatory's signature image (index 0/1
+// matches the two signature-block columns) — left/top are unset until the
+// signature has been manually dragged; width/height until manually resized.
+export interface ISignatureLayout {
+  left?: number
+  top?: number
+  width?: number
+  height?: number
+  hidden?: boolean
+  overrideImage?: string
+}
+
 // One study booked for the patient — each study gets its own separate report
 export interface IStudyEntry {
   name: string
@@ -28,6 +40,7 @@ export interface IStudyEntry {
   paid?: number
   discount?: number
   paymentMode?: string
+  signatureLayout?: (ISignatureLayout | null)[]
 }
 
 export interface IPatient extends Document {
@@ -80,6 +93,7 @@ const StudyEntrySchema = new Schema<IStudyEntry>(
     paid:         { type: Number, default: 0 },
     discount:     { type: Number, default: 0 },
     paymentMode:  { type: String, default: "Cash" },
+    signatureLayout: { type: [Schema.Types.Mixed], default: undefined },
   },
   { _id: false }
 )
