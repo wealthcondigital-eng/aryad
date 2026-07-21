@@ -25,11 +25,6 @@ import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, dataUr
 import { SignatureColumns } from "@/components/signature-columns"
 import { SignaturePadDialog } from "@/components/signature-pad-dialog"
 
-const SAMPLE_PATIENTS = [
-  "Ramesh Kumar (P-1046)", "Priya Sharma (P-1045)", "Arjun Patel (P-1044)",
-  "Sunita Devi (P-1043)", "Vikram Singh (P-1042)", "Meena Rao (P-1041)",
-]
-
 // ── HTML ↔ DOCX formatting helpers ───────────────────────────────────────────
 
 type Seg = {
@@ -272,6 +267,16 @@ function ReportEditorInner() {
   const [selContact,   setSelContact]   = useState("")
   const [savedDoctors, setSavedDoctors] = useState<string[]>(() => getSavedDoctors())
   const [pickerDone,   setPickerDone]   = useState(false)
+  const [patientNames, setPatientNames] = useState<string[]>([])
+
+  useEffect(() => {
+    if (hasPatient) return
+    fetch("/api/patients")
+      .then((r) => r.json())
+      .then((d) => setPatientNames((d.patients ?? []).map((p: { name: string; srNo: number }) => `${p.name} (#${p.srNo})`)))
+      .catch(() => {})
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // For patient with no study yet (came from registration without study)
   const [extraStudy,  setExtraStudy]  = useState("")
@@ -1663,7 +1668,7 @@ function ReportEditorInner() {
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <Label className="text-xs">Patient</Label>
-                  <ComboInput value={selPatient} onChange={setSelPatient} suggestions={SAMPLE_PATIENTS} placeholder="Search patient..." />
+                  <ComboInput value={selPatient} onChange={setSelPatient} suggestions={patientNames} placeholder="Search patient..." />
                 </div>
                 <div className="space-y-1">
                   <Label className="text-xs">Study / Test</Label>

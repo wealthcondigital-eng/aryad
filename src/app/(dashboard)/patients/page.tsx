@@ -129,9 +129,9 @@ function buildFillHref(p: PatientDoc, sidx = 0, mode: "fill" | "edit" = "fill") 
   return `/reports/new?${params}`
 }
 
-// Omit `sidx` for a whole-patient bill (all studies); pass it to bill one study.
-function billHrefFor(p: PatientDoc, sidx?: number) {
-  const study = (sidx !== undefined ? studiesOf(p)[sidx]?.name : undefined) || p.study
+// A patient's "Create Bill" always covers every study of theirs that isn't
+// billed yet, so one bill is raised per patient rather than one per study.
+function billHrefFor(p: PatientDoc) {
   const params = new URLSearchParams({
     id: p._id,
     name: p.name,
@@ -140,9 +140,8 @@ function billHrefFor(p: PatientDoc, sidx?: number) {
     gender: p.gender,
     contact: p.contact,
     refBy: p.referredBy || "Self",
-    study: study,
+    study: p.study,
   })
-  if (sidx !== undefined) params.set("sidx", String(sidx))
   return `/billing/new?${params}`
 }
 
@@ -1590,7 +1589,7 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
                                             </DropdownMenuItem>
                                           ) : canCreate && (
                                             <DropdownMenuItem asChild>
-                                              <Link href={billHrefFor(p, sidx)} className="flex items-center gap-2">
+                                              <Link href={billHrefFor(p)} className="flex items-center gap-2">
                                                 <Receipt className="h-3.5 w-3.5" />Create Bill
                                               </Link>
                                             </DropdownMenuItem>
@@ -1819,7 +1818,7 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
                                           </DropdownMenuItem>
                                         ) : canCreate && (
                                           <DropdownMenuItem asChild>
-                                            <Link href={billHrefFor(p, realIdx)} className="flex items-center gap-2">
+                                            <Link href={billHrefFor(p)} className="flex items-center gap-2">
                                               <Receipt className="h-3.5 w-3.5" />Create Bill
                                             </Link>
                                           </DropdownMenuItem>
