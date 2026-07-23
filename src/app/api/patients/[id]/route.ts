@@ -36,6 +36,8 @@ function syncLegacyMirror(patient: PatientDoc) {
   const first = patient.studies?.[0]
   if (!first) return
   patient.study       = first.name
+  patient.heading     = first.heading
+  patient.headingFont = first.headingFont
   patient.reportBody  = first.reportBody
   patient.reportDocx  = first.reportDocx
   patient.reportPdf   = first.reportPdf
@@ -203,7 +205,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       removeStudyIndex,
       studyName,
       studies: studiesUpdate,
-      reportStatus, reportBody, reportDocx, reportPdf, signatureLayout,
+      reportStatus, reportBody, reportDocx, reportPdf, heading, headingFont, signatureLayout,
       ...regularFields
     } = body
 
@@ -345,7 +347,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     const hasReportFields =
       reportStatus !== undefined || reportBody !== undefined ||
       reportDocx !== undefined || reportPdf !== undefined || !!editHistoryEntry ||
-      signatureLayout !== undefined
+      signatureLayout !== undefined || heading !== undefined || headingFont !== undefined
 
     if (hasReportFields) {
       const idx = Math.min(Math.max(Number(rawStudyIndex) || 0, 0), Math.max(patient.studies.length - 1, 0))
@@ -354,6 +356,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         if (reportStatus !== undefined) entry.reportStatus = reportStatus
         if (reportBody   !== undefined) entry.reportBody   = reportBody
         if (reportDocx   !== undefined) entry.reportDocx   = reportDocx
+        if (heading      !== undefined) entry.heading      = heading
+        if (headingFont  !== undefined) entry.headingFont  = headingFont
         if (reportPdf    !== undefined) {
           entry.reportPdf = reportPdf
           if (!entry.reportSlug) entry.reportSlug = await generateSlug(patient, entry.name, id)

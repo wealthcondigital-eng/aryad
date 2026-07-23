@@ -4,20 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { X, Printer, Share2, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { reportHeaderHtml, reportTitleHtml, printShellHtml, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX } from "@/lib/report-layout"
-import { REPORT_TEMPLATES } from "@/lib/report-templates"
+import { reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
 import { SignatureColumns } from "@/components/signature-columns"
-
-const getDisplayTitle = (studyName: string) => {
-  if (!studyName) return ""
-  for (const cat of Object.keys(REPORT_TEMPLATES)) {
-    const list = REPORT_TEMPLATES[cat as keyof typeof REPORT_TEMPLATES]
-    const found = list.find(t => t.name.toLowerCase() === studyName.toLowerCase())
-    if (found) return found.heading
-  }
-  return studyName
-}
 
 export interface ViewablePatient {
   _id: string
@@ -52,6 +41,12 @@ export function ReportViewModal({
   const date = dateOf(patient.createdAt)
   const [signatories, setSignatories] = useState<Signatory[]>([])
   const [signatureLayout, setSignatureLayout] = useState<(SignatureLayout | null | undefined)[]>([])
+  // The doctor-edited heading, if one was saved at submit time — falls back to
+  // the generic study-name-derived heading when the report predates this field
+  // or the heading was never customized.
+  const [savedHeading, setSavedHeading] = useState("")
+  const [savedHeadingFont, setSavedHeadingFont] = useState<string | undefined>(undefined)
+  const displayTitle = savedHeading || getDisplayTitle(patient.study)
   useEffect(() => { fetchSignatories().then(setSignatories) }, [])
 
   // Pagination: lay the preview out as A4 sheets so the doctor sees where pages
@@ -147,6 +142,8 @@ export function ReportViewModal({
         if (!hasLocal) {
           setReportBody(d.patient?.studies?.[sidx]?.reportBody || d.patient?.reportBody || "")
         }
+        setSavedHeading(d.patient?.studies?.[sidx]?.heading || d.patient?.heading || "")
+        setSavedHeadingFont(d.patient?.studies?.[sidx]?.headingFont || d.patient?.headingFont || undefined)
         setSignatureLayout(d.patient?.studies?.[sidx]?.signatureLayout || [])
       })
       .catch(() => {
@@ -211,7 +208,7 @@ export function ReportViewModal({
           name: patient.name, refBy: patient.referredBy, date,
           age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined,
         }),
-        titleHtml: reportTitleHtml(getDisplayTitle(patient.study)),
+        titleHtml: reportTitleHtml(displayTitle, savedHeadingFont),
         bodyHtml,
         signaturesHtml: signatureColumnsHtml(signatories, signatureLayout),
       })
@@ -264,7 +261,7 @@ export function ReportViewModal({
 
     const html = printShellHtml(`Report – ${patient.name}`, `
 ${reportHeaderHtml({ name: patient.name, refBy: patient.referredBy, date, age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined })}
-${reportTitleHtml(getDisplayTitle(patient.study))}
+${reportTitleHtml(displayTitle, savedHeadingFont)}
 <div style="font-size:10pt;line-height:1.6;">${currentBody}</div>
 <div style="display:flex;gap:30px;margin-top:80px;page-break-inside:avoid;break-inside:avoid;">${signatureColumnsHtml(signatories, signatureLayout)}</div>`)
 
@@ -353,8 +350,11 @@ ${reportTitleHtml(getDisplayTitle(patient.study))}
 
                 {/* Study title — boxed like the printed report */}
                 <div ref={titleWrapRef} className="flex justify-center mb-5">
-                  <div className="text-center font-bold uppercase text-sm py-1.5 px-8 border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900">
-                    {getDisplayTitle(patient.study)}
+                  <div
+                    style={savedHeadingFont ? { fontFamily: savedHeadingFont } : undefined}
+                    className="text-center font-bold uppercase text-sm py-1.5 px-8 border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900"
+                  >
+                    {displayTitle}
                   </div>
                 </div>
 

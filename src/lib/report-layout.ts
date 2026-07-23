@@ -5,6 +5,23 @@
 // print output and the WhatsApp-shared PDF so they all look identical.
 
 import type { jsPDF } from "jspdf"
+import { REPORT_TEMPLATES } from "@/lib/report-templates"
+
+// Shared title fallback: a report only gets a custom heading once a doctor
+// has actually edited it — until then, every view of it (editor, view modal,
+// reports list) should fall back to the SAME canonical template heading
+// (e.g. study "Abd Pelvis" -> "ULTRASONOGRAPHY OF ABDOMEN AND PELVIS"), not
+// just the raw study name, or the same report would show a different title
+// depending on which screen you printed it from.
+export function getDisplayTitle(studyName: string): string {
+  if (!studyName) return ""
+  for (const cat of Object.keys(REPORT_TEMPLATES)) {
+    const list = REPORT_TEMPLATES[cat as keyof typeof REPORT_TEMPLATES]
+    const found = list.find((t) => t.name.toLowerCase() === studyName.toLowerCase())
+    if (found) return found.heading
+  }
+  return studyName
+}
 
 export interface ReportHeaderInfo {
   name: string
@@ -34,7 +51,7 @@ export const LETTERHEAD_TOP_PX = Math.round(LETTERHEAD_TOP_MM * MM_TO_PX)       
 export const LETTERHEAD_BOTTOM_PX = Math.round(LETTERHEAD_BOTTOM_MM * MM_TO_PX) // 113
 
 export function printShellCss(): string {
-  return `*{box-sizing:border-box;margin:0;padding:0;}
+  return `*{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
 @page{size:A4;margin:0;}
 body{font-family:Arial,sans-serif;font-size:11pt;line-height:1.5;color:#111;}
 table.pg{width:100%;border-collapse:collapse;}
@@ -64,7 +81,7 @@ ${innerHtml}
 
 export function reportHeaderHtml(i: ReportHeaderInfo): string {
   return `
-<table style="width:100%;border-collapse:collapse;border:3px double #333;">
+<table style="width:100%;border-collapse:collapse;border:5px double #000;">
   <tr>
     <td style="padding:12px 16px;border:none;vertical-align:top;">
       <p style="margin:0 0 5px;font-weight:bold;font-size:11pt;">NAME - ${i.name.toUpperCase()}</p>
@@ -80,10 +97,11 @@ export function reportHeaderHtml(i: ReportHeaderInfo): string {
 </table>`
 }
 
-export function reportTitleHtml(title: string): string {
+export function reportTitleHtml(title: string, fontFamily?: string): string {
+  const fontCss = fontFamily ? `font-family:${fontFamily};` : ""
   return `
 <div style="text-align:center;margin:20px 0 18px;">
-  <span style="display:inline-block;border:1.5px solid #333;padding:5px 30px;font-weight:bold;font-size:12.5pt;text-transform:uppercase;text-decoration:underline;">${title}</span>
+  <span style="display:inline-block;border:1.5px solid #333;padding:5px 30px;font-weight:bold;font-size:12.5pt;text-transform:uppercase;text-decoration:underline;${fontCss}">${title}</span>
 </div>`
 }
 
@@ -95,10 +113,10 @@ export function drawPdfReportHeader(doc: jsPDF, i: ReportHeaderInfo, y = 15): nu
   const boxH = 26
 
   // Double border: outer + inner rectangle
-  doc.setDrawColor(60)
-  doc.setLineWidth(0.5)
+  doc.setDrawColor(0)
+  doc.setLineWidth(0.6)
   doc.rect(M, y, W - 2 * M, boxH)
-  doc.setLineWidth(0.2)
+  doc.setLineWidth(0.3)
   doc.rect(M + 1.2, y + 1.2, W - 2 * M - 2.4, boxH - 2.4)
 
   doc.setTextColor(0)

@@ -129,22 +129,74 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   --sidebar-ring: oklch(0.623 0.214 259.815);
 }
 
-* {
-  border-color: var(--border);
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: Arial, Helvetica, sans-serif;
+  }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
-}
-
-/* Placeholder for contenteditable fields in the report document editor */
+/* Placeholder for contenteditable fields in the report document editor —
+   the heading is still a plain contentEditable div (uses :empty::before);
+   the report body is a Tiptap editor, whose Placeholder extension marks the
+   empty paragraph with a class + data-placeholder attribute instead. */
 .doc-field:empty::before {
   content: attr(data-placeholder);
   color: #d1d5db;
   pointer-events: none;
   font-style: italic;
+}
+.doc-field p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  color: #d1d5db;
+  pointer-events: none;
+  font-style: italic;
+  float: left;
+  height: 0;
+}
+
+/* The report body is rendered by Tiptap's <EditorContent>, which wraps the
+   actual editable element (.ProseMirror) in its own outer <div> — className
+   on <EditorContent> lands on that outer wrapper, not the editable element
+   itself, so the browser's default contentEditable focus outline/border
+   needs to be suppressed on .ProseMirror directly, not via a Tailwind
+   utility on the wrapper. */
+.doc-field .ProseMirror {
+  outline: none;
+}
+.doc-field .ProseMirror table {
+  border-collapse: collapse;
+}
+
+/* Consistent paragraph spacing regardless of whether a block came from typing
+   (browsers insert <div>, which has no default margin) or from an imported
+   Word document (mammoth emits <p>, which does) — without this, spacing looks
+   uneven depending on how a paragraph was created. */
+.doc-field p,
+.doc-field div {
+  margin: 0 0 0.5em;
+}
+.doc-field > :last-child {
+  margin-bottom: 0;
+}
+
+/* Tables inserted/pasted into the report body always render with visible
+   borders, even if they arrive without their own inline border styling. */
+.doc-field table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+}
+.doc-field table td,
+.doc-field table th {
+  border: 1px solid #9ca3af;
+  padding: 5px 8px;
+  min-width: 40px;
 }
 
 /* Highlight sections edited/added after initial submission */

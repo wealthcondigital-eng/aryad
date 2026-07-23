@@ -29,6 +29,8 @@ export interface ISignatureLayout {
 export interface IStudyEntry {
   name: string
   category: string            // "X-Ray" | "Sonography" | "Pathology"
+  heading?: string            // doctor-edited report heading (falls back to the study name if unset)
+  headingFont?: string        // font family chosen for the heading, applied in print/DOCX output
   reportStatus: "pending" | "in_progress" | "completed"
   reportBody: string
   reportDocx: string
@@ -52,6 +54,8 @@ export interface IPatient extends Document {
   address?: string
   referredBy?: string
   study: string               // legacy mirror: name of the first study (kept for backward compat)
+  heading?: string            // legacy mirror of studies[0].heading
+  headingFont?: string        // legacy mirror of studies[0].headingFont
   studies: IStudyEntry[]      // all studies for this patient, each with its own report
   reportStatus: "pending" | "in_progress" | "completed"  // aggregate across studies
   reportBody: string          // legacy mirror of studies[0]
@@ -82,6 +86,8 @@ const StudyEntrySchema = new Schema<IStudyEntry>(
   {
     name:         { type: String, required: true, trim: true },
     category:     { type: String, default: "" },
+    heading:      { type: String, default: "" },
+    headingFont:  { type: String, default: "" },
     reportStatus: { type: String, default: "pending", enum: ["pending", "in_progress", "completed"] },
     reportBody:   { type: String, default: "" },
     reportDocx:   { type: String, default: "" },
@@ -118,6 +124,8 @@ const PatientSchema = new Schema<IPatient>(
     address:                 { type: String, default: "" },
     referredBy:              { type: String, default: "Self" },
     study:                   { type: String, required: true },
+    heading:                 { type: String, default: "" },
+    headingFont:             { type: String, default: "" },
     studies:                 { type: [StudyEntrySchema], default: [] },
     reportStatus:            { type: String, default: "pending", enum: ["pending", "in_progress", "completed"] },
     reportBody:              { type: String, default: "" },

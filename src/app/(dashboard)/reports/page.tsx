@@ -19,7 +19,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { useRole } from "@/lib/role-context"
-import { printShellHtml } from "@/lib/report-layout"
+import { printShellHtml, reportHeaderHtml, reportTitleHtml, getDisplayTitle } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, dataUrlToBytes, imageFormat, type SignatureLayout } from "@/lib/report-signatures"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { motion } from "motion/react"
@@ -27,6 +27,8 @@ import { motion } from "motion/react"
 interface StudyEntry {
   name: string
   category?: string
+  heading?: string
+  headingFont?: string
   reportStatus: "pending" | "in_progress" | "completed"
   reportBody?: string
   reportSlug?: string
@@ -49,6 +51,7 @@ interface PatientDoc {
   studies?: StudyEntry[]
   reportStatus: "pending" | "in_progress" | "completed"
   reportSlug?: string
+  headingFont?: string
   createdAt: string
 }
 
@@ -57,6 +60,8 @@ interface ReportRow {
   p: PatientDoc
   sidx: number
   study: string
+  heading?: string   // doctor-edited report heading, if one was saved — falls back to `study` when absent
+  headingFont?: string
   status: "pending" | "in_progress" | "completed"
   slug?: string
 }
@@ -68,9 +73,11 @@ function toRows(patients: PatientDoc[]): ReportRow[] {
       : [{ name: p.study, reportStatus: p.reportStatus, reportSlug: p.reportSlug }]
     return entries.map((s, sidx) => ({
       p, sidx,
-      study:  s.name,
-      status: s.reportStatus ?? "pending",
-      slug:   s.reportSlug || (sidx === 0 ? p.reportSlug : undefined),
+      study:       s.name,
+      heading:     s.heading,
+      headingFont: s.headingFont,
+      status:      s.reportStatus ?? "pending",
+      slug:        s.reportSlug || (sidx === 0 ? p.reportSlug : undefined),
     }))
   })
 }
@@ -161,7 +168,7 @@ function parseHtml(html: string): Seg[] {
 // ── Generate DOCX base64 (fallback when no stored DOCX) ──────────────────────
 // Matches the clinic Word format: starts at the study heading, no letterhead.
 
-async function generateDocxBase64(r: ReportRow, reportHtml: string, signatureLayout: (SignatureLayout | null | undefined)[]): Promise<string> {
+async function generateDocxBase64(r: ReportRow, reportHtml: string, signatureLayout: (SignatureLayout | null | undefined)[], heading?: string): Promise<string> {
   const { Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType, Table, TableRow, TableCell, WidthType, BorderStyle } = await import("docx")
   const signatories = await fetchSignatories()
   const sigCells = await buildDocxSignatureCells(signatories, signatureLayout)
@@ -208,7 +215,7 @@ async function generateDocxBase64(r: ReportRow, reportHtml: string, signatureLay
   const children = [
     new Paragraph({
       alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: r.study.toUpperCase(), bold: true, size: 26, underline: {} })],
+      children: [new TextRun({ text: (heading || r.study).toUpperCase(), bold: true, size: 26, underline: {} })],
       spacing: { before: 120, after: 240 },
     }),
     ...makeParas(cleanHtml),
@@ -269,16 +276,20 @@ function downloadDocx(base64: string, filename: string) {
 
 // ── Fetch the report body for one study of a patient ─────────────────────────
 
-async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: string; signatureLayout: (SignatureLayout | null | undefined)[] }> {
+async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: string; heading: string; headingFont?: string; signatureLayout: (SignatureLayout | null | undefined)[] }> {
   // localStorage draft first (kept per study)
   const key = `aarya_report_${r.p.srNo || r.p.name.replace(/\s+/g, "_")}${r.sidx > 0 ? `_s${r.sidx}` : ""}`
   let body = ""
+  let draftHeadingFont: string | undefined
   try {
     const saved = JSON.parse(localStorage.getItem(key) || "null")
     if (saved?.body) body = saved.body
+    draftHeadingFont = saved?.headingFont || undefined
   } catch {}
 
   let docx = ""
+  let heading = r.heading || ""
+  let headingFont = r.headingFont || draftHeadingFont
   let signatureLayout: (SignatureLayout | null | undefined)[] = []
   try {
     const res = await fetch(`/api/patients/${r.p._id}`)
@@ -286,48 +297,34 @@ async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: str
     const entry = d.patient?.studies?.[r.sidx]
     if (!body) body = entry?.reportBody || d.patient?.reportBody || ""
     docx = entry?.reportDocx || (r.sidx === 0 ? d.patient?.reportDocx : "") || ""
+    heading = entry?.heading || d.patient?.heading || heading
+    headingFont = entry?.headingFont || d.patient?.headingFont || headingFont
     signatureLayout = entry?.signatureLayout || []
   } catch {}
 
-  return { body, docx, signatureLayout }
+  return { body, docx, heading, headingFont, signatureLayout }
 }
 
 // ── Print a submitted report directly ────────────────────────────────────────
 
-// Print output matches the Word file: starts directly at the study heading
-// (no letterhead / patient block — reports print on pre-printed stationery).
+// Mirrors ReportViewModal's handlePrint exactly (double-bordered patient info
+// box, bordered underlined study heading with its chosen font, same signature
+// spacing) — the "Print" button beside Edit and the one inside the View
+// modal must always produce the same output, whichever one you click first.
 async function printReportDirect(r: ReportRow) {
-  const { body: reportBody, signatureLayout } = await fetchStudyReport(r)
+  const { body: reportBody, heading, headingFont, signatureLayout } = await fetchStudyReport(r)
   const signatories = await fetchSignatories()
   const p = r.p
+  const title = heading || getDisplayTitle(r.study)
 
   const cleanBody = reportBody.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
   const body      = cleanBody || "<em style='color:#aaa;font-size:12px'>No report content saved.</em>"
 
   const html = printShellHtml(`Report – ${p.name}`, `
-<div style="border-bottom: 1.5px solid #111; padding-bottom: 8px; margin-bottom: 14px; font-family: Arial, sans-serif; font-size: 9pt;">
-  <table style="width: 100%; border-collapse: collapse; border: none;">
-    <tr style="border: none;">
-      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>NAME:</strong> ${p.name.toUpperCase()}</td>
-      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>DATE:</strong> ${dateOf(p.createdAt)}</td>
-    </tr>
-    <tr style="border: none;">
-      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>AGE:</strong> ${p.age} YRS</td>
-      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>MOBILE:</strong> ${p.contact}</td>
-    </tr>
-    <tr style="border: none;">
-      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>REF. BY:</strong> ${(p.referredBy || "Self").toUpperCase()}</td>
-      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>SEX:</strong> ${p.gender.toUpperCase()}</td>
-    </tr>
-    <tr style="border: none;">
-      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"><strong>SR. NO:</strong> #${p.srNo}</td>
-      <td style="width: 50%; padding: 2px 0; border: none; vertical-align: top;"></td>
-    </tr>
-  </table>
-</div>
-<div style="text-align:center;font-weight:bold;font-size:12pt;text-transform:uppercase;text-decoration:underline;margin:12px 0 18px;">${r.study}</div>
+${reportHeaderHtml({ name: p.name, refBy: p.referredBy, date: dateOf(p.createdAt), age: p.age, gender: p.gender, srNo: p.srNo || undefined })}
+${reportTitleHtml(title, headingFont)}
 <div style="font-size:10pt;line-height:1.6;">${body}</div>
-<div style="display:flex;gap:30px;margin-top:50px;page-break-inside:avoid;break-inside:avoid;">${signatureColumnsHtml(signatories, signatureLayout)}</div>`)
+<div style="display:flex;gap:30px;margin-top:80px;page-break-inside:avoid;break-inside:avoid;">${signatureColumnsHtml(signatories, signatureLayout)}</div>`)
 
   const blob = new Blob([html], { type: "text/html" })
   const url  = URL.createObjectURL(blob)
@@ -359,16 +356,16 @@ export default function ReportsPage() {
   const handleDownloadDocx = async (r: ReportRow) => {
     setDownloadingKey(rowKey(r))
     try {
-      const { body, docx, signatureLayout } = await fetchStudyReport(r)
+      const { body, docx, heading, signatureLayout } = await fetchStudyReport(r)
       let base64 = docx
       if (!base64) {
         if (!body) {
           alert("No report content found. The report has not been submitted yet.")
           return
         }
-        base64 = await generateDocxBase64(r, body, signatureLayout)
+        base64 = await generateDocxBase64(r, body, signatureLayout, heading)
       }
-      downloadDocx(base64, `Report_${r.p.name.replace(/\s+/g, "_")}_${r.study.replace(/[^A-Za-z0-9]+/g, "_")}.docx`)
+      downloadDocx(base64, `Report_${r.p.name.replace(/\s+/g, "_")}_${(heading || r.study).replace(/[^A-Za-z0-9]+/g, "_")}.docx`)
     } catch {
       alert("Failed to download. Please try again.")
     } finally {

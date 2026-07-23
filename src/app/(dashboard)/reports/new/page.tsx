@@ -8,7 +8,7 @@ import {
   Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
   List, Share2, Pencil, LayoutTemplate, Minus, Plus, ChevronDown, ChevronUp,
   ChevronLeft, ChevronRight,
-  Search, X, Upload, PenTool,
+  Search, X, Upload, PenTool, Table2, Trash2,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -20,10 +20,23 @@ import { ComboInput, StudyComboInput, getSavedDoctors, saveDoctor } from "@/comp
 import { useRole } from "@/lib/role-context"
 import { motion, AnimatePresence } from "framer-motion"
 import { REPORT_TEMPLATES, ReportTemplate, TemplateCategory } from "@/lib/report-templates"
-import { reportHeaderHtml, reportTitleHtml, printShellHtml, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX } from "@/lib/report-layout"
+import { reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, dataUrlToBytes, imageFormat, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
 import { SignatureColumns } from "@/components/signature-columns"
 import { SignaturePadDialog } from "@/components/signature-pad-dialog"
+import { useEditor, EditorContent } from "@tiptap/react"
+import type { Editor } from "@tiptap/core"
+import StarterKit from "@tiptap/starter-kit"
+import { TextStyleKit } from "@tiptap/extension-text-style"
+import TextAlign from "@tiptap/extension-text-align"
+import { Table } from "@tiptap/extension-table"
+import TableRow from "@tiptap/extension-table-row"
+import TableCell from "@tiptap/extension-table-cell"
+import TableHeader from "@tiptap/extension-table-header"
+import Placeholder from "@tiptap/extension-placeholder"
+import { SignatureExtension, type SignatureAttrs } from "@/lib/tiptap-signature-extension"
+import { PaginationExtension, computeBodyPageDecorations, paginationPluginKey } from "@/lib/tiptap-pagination-extension"
+import { LineHeight } from "@/lib/tiptap-line-height-extension"
 
 // ── HTML ↔ DOCX formatting helpers ───────────────────────────────────────────
 
@@ -38,6 +51,41 @@ function fontOf(el: HTMLElement): string | undefined {
   if (el.tagName.toLowerCase() === "font" && el.getAttribute("face")) return el.getAttribute("face") || undefined
   const styleFont = el.style?.fontFamily
   return styleFont ? styleFont.split(",")[0].trim().replace(/^["']|["']$/g, "") : undefined
+}
+
+// Tiptap's HTML parser only recognizes font-family as `<span style="font-family:...">`
+// — it silently drops legacy `<font face="...">` wrappers entirely (confirmed:
+// loading `<font face="Arial">text</font>` into the editor comes back out as
+// plain `<p>text</p>`, no font info at all). Since that's exactly the shape
+// execCommand("fontName", ...) produces — and therefore what every existing
+// saved report and template body already contains — anything loaded straight
+// into editor.commands.setContent() would silently lose all its font-family
+// styling. This rewrites `<font face>` to the `<span style>` shape Tiptap
+// does understand before content ever reaches the editor.
+function normalizeLegacyHtml(html: string): string {
+  if (typeof window === "undefined" || !html) return html
+  const doc = new DOMParser().parseFromString(html, "text/html")
+  doc.querySelectorAll("font[face]").forEach((el) => {
+    const face = el.getAttribute("face")
+    const span = doc.createElement("span")
+    if (face) span.style.fontFamily = face
+    while (el.firstChild) span.appendChild(el.firstChild)
+    el.replaceWith(span)
+  })
+  // The old editor treated a top-level <div> exactly like a <p> (its own
+  // line-spacing code applied to whichever of P/DIV/LI was closest), but
+  // Tiptap's schema only has a paragraph node — a raw <div> doesn't match
+  // its parse rule, so any line-height (or other) styling on it would
+  // otherwise be silently dropped instead of just losing the tag name.
+  Array.from(doc.body.children).forEach((el) => {
+    if (el.tagName === "DIV") {
+      const p = doc.createElement("p")
+      if (el.getAttribute("style")) p.setAttribute("style", el.getAttribute("style")!)
+      while (el.firstChild) p.appendChild(el.firstChild)
+      el.replaceWith(p)
+    }
+  })
+  return doc.body.innerHTML
 }
 
 function parseHtml(html: string): Seg[] {
@@ -66,7 +114,12 @@ function parseHtml(html: string): Seg[] {
       if (tag === "u")                     f.underline = true
       f.font = fontOf(el) ?? f.font
       el.childNodes.forEach((c) => walk(c, f))
-      if (["div", "p", "br", "li"].includes(tag)) segs.push({ text: "\n" })
+      // Table cells/rows have no natural line-break tag of their own, so a
+      // DOCX/plain-text export would otherwise run every cell's text together
+      // with no separator at all — space cells with a tab and end each row
+      // with a newline so an exported table still reads as a table.
+      if (tag === "td" || tag === "th") segs.push({ text: "\t" })
+      if (["div", "p", "br", "li", "tr"].includes(tag)) segs.push({ text: "\n" })
     }
   }
   doc.body.childNodes.forEach((n) => walk(n, { bold: false, italic: false, underline: false }))
@@ -141,10 +194,11 @@ function markChanges(originalHtml: string, newHtml: string, editorName?: string,
 // then the bordered underlined study heading, body and signatures.
 function buildPrintHtml(opts: {
   patient: string; study: string; body: string; age?: string; gender?: string; contact?: string; refBy?: string; date?: string; srNo?: string
+  titleFont?: string
   signatories: Signatory[]
   signatureLayouts?: (SignatureLayout | null | undefined)[]
 }): string {
-  const { patient, study, body, age, gender, refBy, date, srNo, signatories, signatureLayouts } = opts
+  const { patient, study, body, age, gender, refBy, date, srNo, titleFont, signatories, signatureLayouts } = opts
   const displayDate = date || new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
 
   const extraCss = `
@@ -152,7 +206,7 @@ function buildPrintHtml(opts: {
 
   return printShellHtml(`Report – ${patient}`, `
 ${reportHeaderHtml({ name: patient, refBy, date: displayDate, age, gender, srNo })}
-${reportTitleHtml(study)}
+${reportTitleHtml(study, titleFont)}
 <div class="body" style="font-size:10pt;line-height:1.6;">${body}</div>
 <div class="sigs">${signatureColumnsHtml(signatories, signatureLayouts)}</div>`, extraCss)
 }
@@ -168,11 +222,11 @@ const FONT_FAMILIES = [
 
 // ── Formatting toolbar button ─────────────────────────────────────────────────
 
-function FmtBtn({ cmd, label, title, value }: { cmd: string; label: React.ReactNode; title: string; value?: string }) {
+function FmtBtn({ onRun, label, title }: { onRun: () => void; label: React.ReactNode; title: string }) {
   return (
     <button
       type="button" title={title}
-      onMouseDown={(e) => { e.preventDefault(); document.execCommand(cmd, false, value) }}
+      onMouseDown={(e) => { e.preventDefault(); onRun() }}
       className="h-7 w-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors"
     >
       {label}
@@ -216,16 +270,6 @@ function TemplateCard({
       </p>
     </button>
   )
-}
-
-const getDisplayTitle = (studyName: string) => {
-  if (!studyName) return ""
-  for (const cat of Object.keys(REPORT_TEMPLATES)) {
-    const list = REPORT_TEMPLATES[cat as keyof typeof REPORT_TEMPLATES]
-    const found = list.find(t => t.name.toLowerCase() === studyName.toLowerCase())
-    if (found) return found.heading
-  }
-  return studyName
 }
 
 // Friendly label for a category tab — the 4 built-in ones get a short display
@@ -365,14 +409,63 @@ function ReportEditorInner() {
   // Toolbar extras
   const [fontSize,   setFontSize]   = useState(14)
   const [fontFamily, setFontFamily] = useState("Arial")
+  // The heading is still plain text under the hood (getDocTitle() reads
+  // .innerText, and print/DOCX generation always render it bold+underlined+
+  // centered regardless of anything else typed into it) — but unlike the
+  // rest of the heading's formatting, the chosen font family is tracked here
+  // as its own value so it can actually persist through save/print/DOCX.
+  const [headingFont, setHeadingFont] = useState<string | undefined>(undefined)
 
   const showDoc   = hasPatient || pickerDone
   const needStudy = showDoc && !study
 
-  const bodyRef         = useRef<HTMLDivElement | null>(null)
   const titleRef        = useRef<HTMLDivElement | null>(null)
   const originalBodyRef = useRef<string>("")
   const submittedRef    = useRef(false)
+
+  // Which editable region the toolbar's next action should target — heading
+  // (still plain contentEditable + execCommand) or body (Tiptap). Toolbar
+  // buttons use onMouseDown+preventDefault so focus never actually leaves
+  // whichever region is currently focused; a native <select> does steal
+  // focus though, so this flag is what lets font/spacing dropdowns route
+  // correctly even after that.
+  const lastActiveRef = useRef<"heading" | "body">("body")
+
+  // Heading-only selection capture — Tiptap keeps its own selection
+  // internally even once DOM focus moves to a toolbar control, so unlike
+  // execCommand, body-targeted commands need no equivalent save/restore.
+  const toolbarSelRangeRef = useRef<Range | null>(null)
+
+  const editor = useEditor({
+    immediatelyRender: false,
+    editable: !isReadOnly,
+    extensions: [
+      StarterKit.configure({
+        heading: false,
+        blockquote: false,
+        codeBlock: false,
+        horizontalRule: false,
+        link: false,
+        code: false,
+        strike: false,
+      }),
+      TextStyleKit.configure({ lineHeight: false }),
+      LineHeight.configure({ types: ["paragraph"] }),
+      TextAlign.configure({ types: ["paragraph"] }),
+      Table.configure({ resizable: false }),
+      TableRow,
+      TableHeader,
+      TableCell,
+      SignatureExtension,
+      PaginationExtension,
+      Placeholder.configure({ placeholder: "Start typing the report here..." }),
+    ],
+    onFocus: () => { lastActiveRef.current = "body" },
+  })
+
+  useEffect(() => {
+    editor?.setEditable(!isReadOnly)
+  }, [editor, isReadOnly])
 
   // Saved per-report drag/resize override for the two doctor-signature images
   // (index 0/1 matches the columns; overrideImage holds custom drawn dataUrls)
@@ -396,67 +489,72 @@ function ReportEditorInner() {
   const A4_GAP_PX  = 28                                    // grey gap drawn between sheets
   const A4_STRIDE  = A4_PAGE_PX + A4_GAP_PX                // sheet-to-sheet distance
 
-  // Return the report body HTML without the transient pagination margins we add
-  // for on-screen layout, so saved / printed / exported output stays clean.
+  // Pagination margins for the body are ProseMirror decorations now (see
+  // tiptap-pagination-extension.ts) — they were never part of the document,
+  // so editor.getHTML() already excludes them without any stripping step.
   const readCleanBody = useCallback(() => {
-    const el = bodyRef.current
-    if (!el) return ""
-    const clone = el.cloneNode(true) as HTMLElement
-    clone.querySelectorAll<HTMLElement>("[data-pgb]").forEach((n) => {
-      n.style.marginTop = n.getAttribute("data-pgb-base") || ""
-      n.removeAttribute("data-pgb")
-      n.removeAttribute("data-pgb-base")
-      if (!n.getAttribute("style")) n.removeAttribute("style")
-    })
-    return clone.innerHTML
-  }, [])
+    return editor?.getHTML() ?? ""
+  }, [editor])
+
+  // Push a single non-ProseMirror-owned block (patient box / heading /
+  // signature block) to the next page if it overflows the current page's
+  // footer band. Same footer-band-overflow check the body uses via
+  // computeBodyPageDecorations, just applied as a direct style write since
+  // these blocks are plain React-rendered DOM, not ProseMirror-owned.
+  const pushIfOverflowing = useCallback((it: HTMLElement, wrapTop: number, page: number): number => {
+    if (it.dataset.pgb) {
+      it.style.marginTop = it.getAttribute("data-pgb-base") || ""
+      delete it.dataset.pgb
+      it.removeAttribute("data-pgb-base")
+    }
+    const r      = it.getBoundingClientRect()
+    const top    = r.top - wrapTop
+    const bottom = top + r.height
+    const footerLimit = page * A4_STRIDE + (A4_PAGE_PX - LETTERHEAD_BOTTOM_PX)
+    const pageTop      = page * A4_STRIDE + LETTERHEAD_TOP_PX
+    if (bottom > footerLimit + 1 && top > pageTop + 2) {
+      page++
+      const target = page * A4_STRIDE + LETTERHEAD_TOP_PX
+      const delta  = target - top
+      if (delta > 0) {
+        const base = parseFloat(getComputedStyle(it).marginTop) || 0
+        it.setAttribute("data-pgb-base", it.style.marginTop || "")
+        it.dataset.pgb = "1"
+        it.style.marginTop = `${base + delta}px`
+      }
+    }
+    return page
+  }, [A4_STRIDE])
 
   // Measure the flowing blocks and push any that would cross a page's footer band
   // down to the next sheet's content area. Sets the sheet count for the backdrop.
+  // The report body's own blocks are computed as ProseMirror decorations
+  // (computeBodyPageDecorations) rather than direct style writes, since that
+  // content is ProseMirror-owned — see tiptap-pagination-extension.ts.
   const paginate = useCallback(() => {
     const wrap = wrapRef.current
-    if (!wrap) return
-
-    const items: HTMLElement[] = []
-    if (patientBoxRef.current) items.push(patientBoxRef.current)
-    if (titleWrapRef.current)  items.push(titleWrapRef.current)
-    if (bodyRef.current) Array.from(bodyRef.current.children).forEach((c) => items.push(c as HTMLElement))
-    if (sigsRef.current)   items.push(sigsRef.current)
-
-    // Clear previous pagination pushes first so measurements are natural
-    items.forEach((it) => {
-      if (it.dataset.pgb) {
-        it.style.marginTop = it.getAttribute("data-pgb-base") || ""
-        delete it.dataset.pgb
-        it.removeAttribute("data-pgb-base")
-      }
-    })
+    const view = editor?.view
+    if (!wrap || !view) return
 
     const wrapTop = wrap.getBoundingClientRect().top
     let page = 0
-    for (const it of items) {
-      const r      = it.getBoundingClientRect()
-      const top    = r.top - wrapTop
-      const bottom = top + r.height
-      const footerLimit  = page * A4_STRIDE + (A4_PAGE_PX - LETTERHEAD_BOTTOM_PX)
-      const pageTop      = page * A4_STRIDE + LETTERHEAD_TOP_PX
-      // Break only if it overflows the footer band AND isn't already the first
-      // block on this page (an oversized single block can't be split further).
-      if (bottom > footerLimit + 1 && top > pageTop + 2) {
-        page++
-        const target = page * A4_STRIDE + LETTERHEAD_TOP_PX
-        const delta  = target - top
-        if (delta > 0) {
-          const base = parseFloat(getComputedStyle(it).marginTop) || 0
-          it.setAttribute("data-pgb-base", it.style.marginTop || "")
-          it.dataset.pgb = "1"
-          it.style.marginTop = `${base + delta}px`
-        }
-      }
-    }
+
+    if (patientBoxRef.current) page = pushIfOverflowing(patientBoxRef.current, wrapTop, page)
+    if (titleWrapRef.current)  page = pushIfOverflowing(titleWrapRef.current, wrapTop, page)
+
+    const bodyEntryTop = view.dom.getBoundingClientRect().top - wrapTop
+    const { decorationSet, exitPage } = computeBodyPageDecorations(view, {
+      wrapTop, entryPage: page, entryTopPx: bodyEntryTop,
+      stride: A4_STRIDE, a4PagePx: A4_PAGE_PX,
+      letterheadTopPx: LETTERHEAD_TOP_PX, letterheadBottomPx: LETTERHEAD_BOTTOM_PX,
+    })
+    view.dispatch(view.state.tr.setMeta(paginationPluginKey, decorationSet))
+    page = exitPage
+
+    if (sigsRef.current) page = pushIfOverflowing(sigsRef.current, wrapTop, page)
 
     setNumPages(page + 1)
-  }, [A4_STRIDE])
+  }, [A4_STRIDE, editor, pushIfOverflowing])
 
   const schedulePaginate = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current)
@@ -464,10 +562,9 @@ function ReportEditorInner() {
   }, [paginate])
 
   // ── Insert Signature ─────────────────────────────────────────────────────────
-  // The caret position is saved when the toolbar button is pressed, since
-  // opening the dialog moves focus into it and would otherwise lose where the
-  // cursor was in the report body.
-  const savedRangeRef = useRef<Range | null>(null)
+  // Tiptap/ProseMirror keeps its own selection internally even once DOM focus
+  // moves into the signature-pad dialog, so — unlike the old raw-DOM
+  // insertion — no Range needs to be manually saved/restored here.
   const [sigPadOpen, setSigPadOpen] = useState(false)
   // Remounts the dialog fresh each time it opens (rather than resetting state
   // in an effect) so a leftover drawn/typed/uploaded signature from a
@@ -475,59 +572,17 @@ function ReportEditorInner() {
   const [sigPadKey, setSigPadKey] = useState(0)
 
   const openSignaturePad = () => {
-    const sel = window.getSelection()
-    savedRangeRef.current =
-      sel && sel.rangeCount > 0 && bodyRef.current?.contains(sel.anchorNode)
-        ? sel.getRangeAt(0).cloneRange()
-        : null
     setSigPadKey((k) => k + 1)
     setSigPadOpen(true)
   }
 
-  // Inserted as a plain <img> at the caret. Native HTML5 image dragging is
-  // switched off (draggable=false) so our own pointer-based drag/resize below
-  // gets clean pointermove/pointerup events instead of the browser hijacking
-  // them into a native "drag this image out of the page" gesture.
+  // Inserted as a signature node at the caret — an atomic Tiptap node whose
+  // position/size live in its attrs (not raw style), so drag/resize survive
+  // ProseMirror's own redraws and undo/redo. See tiptap-signature-extension.ts.
   const insertSignature = ({ dataUrl, width, height }: { dataUrl: string; width: number; height: number }) => {
-    const body = bodyRef.current
-    if (!body) return
-    body.focus()
-    const sel = window.getSelection()
-    let range: Range
-    if (savedRangeRef.current) {
-      range = savedRangeRef.current
-    } else {
-      range = document.createRange()
-      range.selectNodeContents(body)
-      range.collapse(false)
-    }
-    sel?.removeAllRanges()
-    sel?.addRange(range)
-
-    const img = document.createElement("img")
-    img.src = dataUrl
-    img.setAttribute("width", String(width))
-    img.setAttribute("height", String(height))
-    img.setAttribute("data-sig-stamp", "1")
-    img.setAttribute("data-sig-kind", "stamp")
-    img.draggable = false
-    img.style.display = "inline-block"
-    img.style.verticalAlign = "middle"
-    img.style.position = "relative"   // lets drag/nudge shift it via top/left without disturbing text flow
-    img.style.cursor = "move"
-    img.style.userSelect = "none"
-    img.style.setProperty("-webkit-user-drag", "none")
-    range.deleteContents()
-    range.insertNode(img)
-    range.setStartAfter(img)
-    range.setEndAfter(img)
-    sel?.removeAllRanges()
-    sel?.addRange(range)
-
-    selectSigStamp(img)
-
+    const attrs: SignatureAttrs = { src: dataUrl, width, height, left: 0, top: 0, kind: "stamp" }
+    editor?.chain().focus().insertSignature(attrs).run()
     setSigPadOpen(false)
-    schedulePaginate()
   }
 
   // ── Drag / resize / nudge for an inserted signature stamp ────────────────────
@@ -604,9 +659,13 @@ function ReportEditorInner() {
     setSigOverlayPos(null)
   }
 
+  // Only the two fixed "doctor" signature slots (outside the editor, in
+  // <SignatureColumns>) still go through this generic overlay system —
+  // in-body stamps are now a Tiptap node with their own self-contained
+  // drag/resize/delete (see tiptap-signature-extension.ts).
   const handleBodyClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement
-    if (target.tagName === "IMG" && target.getAttribute("data-sig-stamp") === "1") {
+    if (target.tagName === "IMG" && target.getAttribute("data-sig-kind") === "doctor") {
       selectSigStamp(target as HTMLImageElement)
     } else {
       deselectSig()
@@ -757,7 +816,7 @@ function ReportEditorInner() {
   // pointerdown, regardless of when it was inserted or reloaded from saved HTML.
   const handleBodyPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement
-    if (target.tagName === "IMG" && target.getAttribute("data-sig-stamp") === "1") {
+    if (target.tagName === "IMG" && target.getAttribute("data-sig-kind") === "doctor") {
       beginDragSig(e, target as HTMLImageElement)
     }
   }
@@ -765,13 +824,13 @@ function ReportEditorInner() {
   // Re-paginate whenever the body content or viewport changes. Attribute
   // mutations (our own margin writes) are intentionally not observed to avoid loops.
   useEffect(() => {
-    if (!showDoc || !study) return
+    if (!showDoc || !study || !editor) return
     schedulePaginate()
-    const bodyEl = bodyRef.current
-    const mo = bodyEl ? new MutationObserver(schedulePaginate) : null
-    if (bodyEl) mo?.observe(bodyEl, { childList: true, subtree: true, characterData: true })
+    const bodyEl = editor.view.dom
+    const mo = new MutationObserver(schedulePaginate)
+    mo.observe(bodyEl, { childList: true, subtree: true, characterData: true })
     const ro = new ResizeObserver(schedulePaginate)
-    if (bodyEl) ro.observe(bodyEl)
+    ro.observe(bodyEl)
     // The signature block grows/shrinks when a signature image is inserted,
     // resized or removed — its placement must be recomputed then too, or the
     // taller block spills into the footer band it was measured to sit above.
@@ -780,11 +839,60 @@ function ReportEditorInner() {
     if (sigsRef.current) ro.observe(sigsRef.current)
     window.addEventListener("resize", schedulePaginate)
     return () => {
-      mo?.disconnect()
+      mo.disconnect()
       ro.disconnect()
       window.removeEventListener("resize", schedulePaginate)
     }
-  }, [showDoc, study, schedulePaginate])
+  }, [showDoc, study, schedulePaginate, editor])
+
+  // ── Track the last selection made inside either editable region ──────────────
+  // `selectionchange` alone is not reliable here: it fires asynchronously, so
+  // it can lose the race against a toolbar <select>'s own focus/change
+  // sequence — the select's "change" handler can run before the very last
+  // selectionchange event (from e.g. Ctrl+A) has been delivered, leaving the
+  // saved range stale or empty. `onBlur` on the editable element itself fires
+  // synchronously as focus leaves it — guaranteed to run before the toolbar
+  // control that stole focus gets to react — so it's the authoritative
+  // capture; the `selectionchange` listener just keeps it fresh in between.
+  const captureToolbarSelection = (el: HTMLDivElement | null) => {
+    if (!el) return
+    const sel = window.getSelection()
+    if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
+      toolbarSelRangeRef.current = sel.getRangeAt(0).cloneRange()
+      lastActiveRef.current = "heading"
+    }
+  }
+
+  useEffect(() => {
+    const onSelectionChange = () => {
+      const sel = window.getSelection()
+      if (!sel || sel.rangeCount === 0) return
+      const range = sel.getRangeAt(0)
+      const node = range.commonAncestorContainer
+      const el = node.nodeType === 1 ? (node as Element) : node.parentElement
+      if (titleRef.current?.contains(el)) {
+        toolbarSelRangeRef.current = range.cloneRange()
+        lastActiveRef.current = "heading"
+      }
+    }
+    document.addEventListener("selectionchange", onSelectionChange)
+    return () => document.removeEventListener("selectionchange", onSelectionChange)
+  }, [])
+
+  // Restores the last selection made inside the heading/body onto the given
+  // element and focuses it — used before toolbar commands that would otherwise
+  // run against whatever picked up focus last (e.g. a <select>).
+  const restoreEditableSelection = (): HTMLDivElement | null => {
+    const target = titleRef.current
+    if (!target) return null
+    target.focus()
+    const sel = window.getSelection()
+    if (sel && toolbarSelRangeRef.current) {
+      sel.removeAllRanges()
+      sel.addRange(toolbarSelRangeRef.current)
+    }
+    return target
+  }
 
   // Current heading text (falls back to the study name)
   const getDocTitle = () => (titleRef.current?.innerText ?? "").trim() || getDisplayTitle(study).toUpperCase()
@@ -792,6 +900,12 @@ function ReportEditorInner() {
   const [submitting,         setSubmitting]          = useState(false)
   const [submitted,          setSubmitted]           = useState(false)
   const [submittedDocxBase64, setSubmittedDocxBase64] = useState("")
+  // Captured from the live heading at submit time — the editor (and titleRef)
+  // unmounts once the "Report Submitted" screen renders, so getDocTitle() would
+  // otherwise fall back to the original study name and the download filename
+  // would silently revert to it even though the saved DOCX has the edited title.
+  const [submittedDocTitle,  setSubmittedDocTitle]  = useState("")
+  const [submittedHeadingFont, setSubmittedHeadingFont] = useState<string | undefined>(undefined)
   const [shareLoading,       setShareLoading]        = useState(false)
 
   // Storage key for this patient's report (per study — a patient can have several)
@@ -812,11 +926,12 @@ function ReportEditorInner() {
   // ── Auto-save draft to localStorage on unmount (navigate away) ───────────────
   useEffect(() => {
     return () => {
-      if (!submittedRef.current && bodyRef.current?.innerHTML) {
+      if (!submittedRef.current && editor && !editor.isEmpty) {
         try {
           localStorage.setItem(storageKey, JSON.stringify({
             body: readCleanBody(),
             docTitle: titleRef.current?.innerText?.trim() || undefined,
+            headingFont,
             patient, study, date, age, gender, contact, srNo, refBy,
             savedAt: new Date().toISOString(),
           }))
@@ -824,28 +939,27 @@ function ReportEditorInner() {
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storageKey, patient, study, date, age, gender, contact, srNo, refBy])
+  }, [storageKey, patient, study, date, age, gender, contact, srNo, refBy, editor, headingFont])
 
   // ── Load report body: localStorage draft first, then the submitted body from DB ──
   useEffect(() => {
-    if (!showDoc) return
+    if (!showDoc || !editor) return
 
-    const setBody = (html: string, title?: string) => {
-      if (bodyRef.current) {
-        bodyRef.current.innerHTML = html
-        if (paramLoad || paramView) originalBodyRef.current = html
-      }
+    const setBody = (html: string, title?: string, font?: string) => {
+      editor.commands.setContent(normalizeLegacyHtml(html))
+      if (paramLoad || paramView) originalBodyRef.current = html
       if (title && titleRef.current) titleRef.current.innerText = title
+      setHeadingFont(font || undefined)
       schedulePaginate()
     }
 
-    let draft: { body?: string; docTitle?: string; study?: string } | null = null
+    let draft: { body?: string; docTitle?: string; headingFont?: string; study?: string } | null = null
     try { draft = JSON.parse(localStorage.getItem(storageKey) || "null") } catch {}
 
     if (draft?.body) {
       const d = draft
       setTimeout(() => {
-        setBody(d.body!, d.docTitle)
+        setBody(d.body!, d.docTitle, d.headingFont)
         if (d.study) setCurrentStudy(d.study)
       }, 80)
     }
@@ -860,7 +974,9 @@ function ReportEditorInner() {
           const entry = p.studies?.[paramSidx]
           if (!draft?.body) {
             const html: string = entry?.reportBody || p.reportBody || ""
-            if (html) setTimeout(() => setBody(html), 80)
+            const savedHeading: string = entry?.heading || p.heading || ""
+            const savedHeadingFont: string = entry?.headingFont || p.headingFont || ""
+            if (html) setTimeout(() => setBody(html, savedHeading || undefined, savedHeadingFont || undefined), 80)
           }
           if (entry?.name) setCurrentStudy(entry.name)
           const savedLayouts = entry?.signatureLayout
@@ -873,7 +989,7 @@ function ReportEditorInner() {
         .catch(() => {})
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showDoc])
+  }, [showDoc, editor])
 
   // ── Seed the editable heading with the study name (drafts/templates override it) ──
   useEffect(() => {
@@ -886,13 +1002,13 @@ function ReportEditorInner() {
   // ── Save draft on browser close / hard refresh (belt-and-suspenders) ─────────
   useEffect(() => {
     const save = () => {
-      if (submittedRef.current) return
+      if (submittedRef.current || !editor || editor.isEmpty) return
       const html = readCleanBody()
-      if (!html || html === "<br>") return
       try {
         localStorage.setItem(storageKey, JSON.stringify({
           body: html,
           docTitle: titleRef.current?.innerText?.trim() || undefined,
+          headingFont,
           patient, study, date, age, gender, contact, srNo, refBy,
           savedAt: new Date().toISOString(),
         }))
@@ -901,7 +1017,7 @@ function ReportEditorInner() {
     window.addEventListener("beforeunload", save)
     return () => window.removeEventListener("beforeunload", save)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storageKey, patient, study, date, age, gender, contact, srNo, refBy])
+  }, [storageKey, patient, study, date, age, gender, contact, srNo, refBy, editor, headingFont])
 
   // ── Build DOCX blob from current report body ─────────────────────────────────
   const buildDocxBase64 = async (bodyHtml: string): Promise<string> => {
@@ -940,7 +1056,7 @@ function ReportEditorInner() {
     const { Table, TableRow, TableCell, WidthType } = await import("docx")
 
     const noBorder     = { style: BorderStyle.NONE,   size: 0, color: "ffffff" }
-    const doubleBorder = { style: BorderStyle.DOUBLE, size: 4, color: "333333" }
+    const doubleBorder = { style: BorderStyle.DOUBLE, size: 6, color: "000000" }
     const boldLine = (text: string, spaceAfter = 0) =>
       new Paragraph({ children: [new TextRun({ text, bold: true, size: 22 })], spacing: { after: spaceAfter } })
 
@@ -999,7 +1115,7 @@ function ReportEditorInner() {
                 children: [
                   new Paragraph({
                     alignment: AlignmentType.CENTER,
-                    children: [new TextRun({ text: getDocTitle().toUpperCase(), bold: true, size: 26, underline: {} })],
+                    children: [new TextRun({ text: getDocTitle().toUpperCase(), bold: true, size: 26, underline: {}, ...(headingFont ? { font: headingFont } : {}) })],
                   }),
                 ],
               }),
@@ -1077,20 +1193,23 @@ function ReportEditorInner() {
     })
 
     // When editing a submitted report, stamp attribution on changed sections
-    if (paramLoad && originalBodyRef.current && bodyRef.current) {
+    if (paramLoad && originalBodyRef.current && editor) {
       const marked = markChanges(originalBodyRef.current, readCleanBody(), editorName, editedAtDisplay)
-      bodyRef.current.innerHTML = marked
+      editor.commands.setContent(normalizeLegacyHtml(marked))
       schedulePaginate()
     }
 
     // Final body HTML (with attribution spans if edit mode)
     const finalBody = readCleanBody()
+    setSubmittedDocTitle(getDocTitle())
+    setSubmittedHeadingFont(headingFont)
 
     // Save to localStorage
     try {
       localStorage.setItem(storageKey, JSON.stringify({
         body: finalBody,
         docTitle: titleRef.current?.innerText?.trim() || undefined,
+        headingFont,
         patient, study, date, age, gender, contact, srNo, refBy,
         savedAt: now.toISOString(),
       }))
@@ -1121,6 +1240,8 @@ function ReportEditorInner() {
             reportBody:   cleanBody,
             reportDocx,
             studyName:    study,
+            heading:      getDocTitle(),
+            headingFont:  headingFont || "",
             signatureLayout: readSignatureLayout(),
             ...(localSrNo ? { srNo: Number(localSrNo) } : {}),
             editHistoryEntry: {
@@ -1153,54 +1274,156 @@ function ReportEditorInner() {
 
   // ── Template apply ───────────────────────────────────────────────────────────
   const applyTemplate = (tpl: ReportTemplate) => {
-    if (!bodyRef.current) return
-    const hasContent = bodyRef.current.innerHTML.trim() !== "" && bodyRef.current.innerHTML !== "<br>"
+    if (!editor) return
+    const hasContent = !editor.isEmpty
     if (hasContent && !confirm(`Replace current report content with "${tpl.name}"?`)) return
-    bodyRef.current.innerHTML = tpl.body
+    editor.commands.setContent(normalizeLegacyHtml(tpl.body))
     // Update local study state
     setCurrentStudy(tpl.name)
     // Template always drives the heading (falls back to the study name)
     if (titleRef.current) titleRef.current.textContent = tpl.heading || tpl.name.toUpperCase()
+    setHeadingFont(undefined)
     // Persist immediately so a stale draft can't bring the old heading back
     try {
       localStorage.setItem(storageKey, JSON.stringify({
         body: tpl.body,
         docTitle: tpl.heading || tpl.name.toUpperCase(),
+        headingFont: undefined,
         patient, study: tpl.name, date, age, gender, contact, srNo, refBy,
         savedAt: new Date().toISOString(),
       }))
     } catch {}
     setShowTemplates(false)
-    bodyRef.current.focus()
+    editor.commands.focus()
     schedulePaginate()
   }
 
   // ── Font size change (applies to selection or sets cursor default) ────────────
+  // Heading path: execCommand("fontSize", ..., "7") + swapping the resulting
+  // legacy <font size="7"> tags for a precise pixel style is deliberate — a
+  // Range-based surroundContents() throws whenever the selection spans more
+  // than one paragraph, so multi-paragraph selections only got the first
+  // block resized; execCommand splits/reassembles nodes at paragraph
+  // boundaries itself. Body path: Tiptap's own FontSize mark (TextStyleKit)
+  // does this natively without any of that DOM surgery.
   const changeFontSize = (delta: number) => {
     const newSize = Math.max(8, Math.min(72, fontSize + delta))
     setFontSize(newSize)
-    bodyRef.current?.focus()
-    const sel = window.getSelection()
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return
-    const range = sel.getRangeAt(0)
-    const span  = document.createElement("span")
-    span.style.fontSize = `${newSize}px`
-    try {
-      range.surroundContents(span)
-    } catch {
-      const frag = range.extractContents()
-      span.appendChild(frag)
-      range.insertNode(span)
+    if (lastActiveRef.current === "body") {
+      editor?.chain().focus().setFontSize(`${newSize}px`).run()
+      schedulePaginate()
+      return
     }
+    const target = restoreEditableSelection()
+    const sel = window.getSelection()
+    if (!target || !sel || sel.rangeCount === 0 || sel.isCollapsed) return
+    document.execCommand("fontSize", false, "7")
+    target.querySelectorAll('font[size="7"]').forEach((el) => {
+      el.removeAttribute("size")
+      ;(el as HTMLElement).style.fontSize = `${newSize}px`
+    })
     schedulePaginate()
   }
 
   // ── Font family apply ─────────────────────────────────────────────────────────
   const applyFontFamily = (family: string) => {
     setFontFamily(family)
-    bodyRef.current?.focus()
+    if (lastActiveRef.current === "body") {
+      editor?.chain().focus().setFontFamily(family).run()
+      schedulePaginate()
+      return
+    }
+    // The heading only ever persists as plain text (getDocTitle() reads
+    // .innerText), so per-character formatting from execCommand here is
+    // cosmetic-only — but the font choice itself is tracked separately in
+    // headingFont so it actually survives save/print/DOCX for the heading
+    // as a whole.
+    setHeadingFont(family)
+    restoreEditableSelection()
     document.execCommand("fontName", false, family)
     schedulePaginate()
+  }
+
+  // ── Line spacing apply ────────────────────────────────────────────────────────
+  // Word-style per-paragraph spacing: sets line-height only on the block(s) the
+  // selection actually touches, so different paragraphs can carry different
+  // spacing at the same time instead of one global value for the whole report.
+  // Body path: Tiptap's LineHeight extension is configured for the paragraph
+  // node type (not the inline textStyle mark), so it already applies to every
+  // paragraph the selection touches — no manual block-walking needed.
+  const applyLineSpacing = (value: string) => {
+    if (lastActiveRef.current === "body") {
+      editor?.chain().focus().setLineHeight(value).run()
+      schedulePaginate()
+      return
+    }
+    const target = restoreEditableSelection()
+    const sel = window.getSelection()
+    if (!target || !sel || sel.rangeCount === 0) return
+    const range = sel.getRangeAt(0)
+
+    const closestBlock = (node: Node | null): HTMLElement | null => {
+      let el = node?.nodeType === 1 ? (node as HTMLElement) : node?.parentElement ?? null
+      while (el && el !== target && !["P", "DIV", "LI"].includes(el.tagName)) el = el.parentElement
+      return el && el !== target ? el : null
+    }
+
+    const blocks = new Set<HTMLElement>()
+    const startBlock = closestBlock(range.startContainer)
+    if (startBlock) blocks.add(startBlock)
+    if (!range.collapsed) {
+      const endBlock = closestBlock(range.endContainer)
+      if (endBlock) blocks.add(endBlock)
+      const walker = document.createTreeWalker(target, NodeFilter.SHOW_ELEMENT)
+      let node: Node | null
+      while ((node = walker.nextNode())) {
+        if (range.intersectsNode(node)) {
+          const block = closestBlock(node)
+          if (block) blocks.add(block)
+        }
+      }
+    }
+
+    if (blocks.size === 0) {
+      // No wrapping paragraph element at the caret (e.g. an empty editor) —
+      // apply to the whole editable area instead of silently doing nothing.
+      target.style.lineHeight = value
+    } else {
+      blocks.forEach((b) => { b.style.lineHeight = value })
+    }
+    schedulePaginate()
+  }
+
+  // ── Table insert / delete ─────────────────────────────────────────────────────
+  // Tables only ever make sense in the report body, so these always target
+  // the editor regardless of which region last had focus.
+  const insertTable = () => {
+    editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: false }).run()
+    schedulePaginate()
+  }
+
+  const deleteTable = () => {
+    editor?.chain().focus().deleteTable().run()
+    schedulePaginate()
+  }
+
+  // Row/column editing — no-ops when the cursor isn't inside a table cell
+  // (Tiptap's own commands already handle that; nothing to guard here).
+  const addTableRow = () => { editor?.chain().focus().addRowAfter().run(); schedulePaginate() }
+  const deleteTableRow = () => { editor?.chain().focus().deleteRow().run(); schedulePaginate() }
+  const addTableColumn = () => { editor?.chain().focus().addColumnAfter().run(); schedulePaginate() }
+  const deleteTableColumn = () => { editor?.chain().focus().deleteColumn().run(); schedulePaginate() }
+
+  // ── Shared toolbar-button dispatch (Bold/Italic/Underline/Align/List/Clear) ──
+  // Routes to the heading's execCommand (unchanged) or the body's Tiptap
+  // chain, based on which region last had real focus (see lastActiveRef).
+  const runFormat = (headingCmd: string, bodyRun: (e: Editor) => void) => {
+    if (lastActiveRef.current === "heading") {
+      restoreEditableSelection()
+      document.execCommand(headingCmd)
+    } else if (editor) {
+      bodyRun(editor)
+    }
   }
 
   // ── Persist SR. NO change to backend immediately on blur/enter ──────────────
@@ -1226,6 +1449,7 @@ function ReportEditorInner() {
       localStorage.setItem(storageKey, JSON.stringify({
         body: bodyHtml,
         docTitle: titleRef.current?.innerText?.trim() || undefined,
+        headingFont,
         patient, study, date, age, gender, contact, srNo, refBy,
         savedAt: new Date().toISOString(),
       }))
@@ -1244,6 +1468,7 @@ function ReportEditorInner() {
       refBy,
       date,
       srNo: localSrNo || srNo,
+      titleFont: headingFont,
       signatories,
       signatureLayouts: readSignatureLayout(),
     })
@@ -1262,9 +1487,12 @@ function ReportEditorInner() {
   // (Georgia, Calibri, Tahoma, ...) instead of jsPDF's built-in Helvetica.
   const buildPdfBlob = async (bodyHtml: string): Promise<Blob> => {
     const { buildPagedPdfBlob } = await import("@/lib/dom-to-pdf")
+    // On the post-submit screen titleRef has already unmounted, so getDocTitle()
+    // can only fall back to the generic study name — submittedDocTitle (captured
+    // live, right before submission) is what still has the doctor's edited heading.
     return buildPagedPdfBlob({
       headerHtml: reportHeaderHtml({ name: patient, refBy, date, age, gender, srNo: localSrNo || srNo }),
-      titleHtml: reportTitleHtml(getDocTitle()),
+      titleHtml: reportTitleHtml(submittedDocTitle || getDocTitle(), submittedHeadingFont ?? headingFont),
       bodyHtml,
       signaturesHtml: signatureColumnsHtml(signatories, readSignatureLayout()),
     })
@@ -1346,7 +1574,8 @@ function ReportEditorInner() {
     setDocxLoading(true)
     try {
       const base64 = await buildDocxBase64(readCleanBody())
-      downloadDocxFromBase64(base64, `Report_${(patient || "Patient").replace(/\s+/g, "_")}${study ? `_${study.replace(/[^A-Za-z0-9]+/g, "_")}` : ""}.docx`)
+      const docTitle = getDocTitle()
+      downloadDocxFromBase64(base64, `Report_${(patient || "Patient").replace(/\s+/g, "_")}${docTitle ? `_${docTitle.replace(/[^A-Za-z0-9]+/g, "_")}` : ""}.docx`)
     } finally { setDocxLoading(false) }
   }
 
@@ -1369,7 +1598,7 @@ function ReportEditorInner() {
                 if (submittedDocxBase64) {
                   downloadDocxFromBase64(
                     submittedDocxBase64,
-                    `Report_${(patient || "Patient").replace(/\s+/g, "_")}${study ? `_${study.replace(/[^A-Za-z0-9]+/g, "_")}` : ""}.docx`
+                    `Report_${(patient || "Patient").replace(/\s+/g, "_")}${submittedDocTitle ? `_${submittedDocTitle.replace(/[^A-Za-z0-9]+/g, "_")}` : ""}.docx`
                   )
                 }
               }}
@@ -1472,19 +1701,87 @@ function ReportEditorInner() {
               </button>
             </div>
 
+            {/* Line spacing — applies to the paragraph(s) touched by the selection */}
+            <select
+              defaultValue=""
+              onChange={(e) => {
+                if (e.target.value) applyLineSpacing(e.target.value)
+                e.target.value = ""
+              }}
+              className="h-7 text-[11px] border border-gray-200 rounded px-1.5 mr-1 bg-white text-gray-700 cursor-pointer focus:outline-none focus:border-blue-400"
+              title="Line spacing"
+            >
+              <option value="" disabled>Spacing</option>
+              {["1", "1.15", "1.5", "2", "2.5"].map((v) => (
+                <option key={v} value={v}>{v}</option>
+              ))}
+            </select>
+
             <Sep />
-            <FmtBtn cmd="bold"      label={<Bold      className="h-3.5 w-3.5 stroke-[2.5]" />} title="Bold (Ctrl+B)" />
-            <FmtBtn cmd="italic"    label={<Italic    className="h-3.5 w-3.5" />}              title="Italic (Ctrl+I)" />
-            <FmtBtn cmd="underline" label={<Underline className="h-3.5 w-3.5" />}              title="Underline (Ctrl+U)" />
+            <FmtBtn onRun={() => runFormat("bold", (e) => { e.chain().focus().toggleBold().run() })}
+              label={<Bold className="h-3.5 w-3.5 stroke-[2.5]" />} title="Bold (Ctrl+B)" />
+            <FmtBtn onRun={() => runFormat("italic", (e) => { e.chain().focus().toggleItalic().run() })}
+              label={<Italic className="h-3.5 w-3.5" />} title="Italic (Ctrl+I)" />
+            <FmtBtn onRun={() => runFormat("underline", (e) => { e.chain().focus().toggleUnderline().run() })}
+              label={<Underline className="h-3.5 w-3.5" />} title="Underline (Ctrl+U)" />
             <Sep />
-            <FmtBtn cmd="justifyLeft"   label={<AlignLeft   className="h-3.5 w-3.5" />} title="Align left" />
-            <FmtBtn cmd="justifyCenter" label={<AlignCenter className="h-3.5 w-3.5" />} title="Center" />
-            <FmtBtn cmd="justifyRight"  label={<AlignRight  className="h-3.5 w-3.5" />} title="Align right" />
+            <FmtBtn onRun={() => runFormat("justifyLeft", (e) => { e.chain().focus().setTextAlign("left").run() })}
+              label={<AlignLeft className="h-3.5 w-3.5" />} title="Align left" />
+            <FmtBtn onRun={() => runFormat("justifyCenter", (e) => { e.chain().focus().setTextAlign("center").run() })}
+              label={<AlignCenter className="h-3.5 w-3.5" />} title="Center" />
+            <FmtBtn onRun={() => runFormat("justifyRight", (e) => { e.chain().focus().setTextAlign("right").run() })}
+              label={<AlignRight className="h-3.5 w-3.5" />} title="Align right" />
             <Sep />
-            <FmtBtn cmd="insertUnorderedList" label={<List className="h-3.5 w-3.5" />}                    title="Bullet list" />
-            <FmtBtn cmd="insertOrderedList"   label={<span className="text-[11px] font-semibold">1.</span>} title="Numbered list" />
+            <FmtBtn onRun={() => runFormat("insertUnorderedList", (e) => { e.chain().focus().toggleBulletList().run() })}
+              label={<List className="h-3.5 w-3.5" />} title="Bullet list" />
+            <FmtBtn onRun={() => runFormat("insertOrderedList", (e) => { e.chain().focus().toggleOrderedList().run() })}
+              label={<span className="text-[11px] font-semibold">1.</span>} title="Numbered list" />
             <Sep />
-            <FmtBtn cmd="removeFormat" label={<span className="text-[11px] text-gray-400 font-medium">Clear</span>} title="Clear formatting" />
+            <FmtBtn onRun={() => runFormat("removeFormat", (e) => { e.chain().focus().unsetAllMarks().clearNodes().run() })}
+              label={<span className="text-[11px] text-gray-400 font-medium">Clear</span>} title="Clear formatting" />
+            <Sep />
+            <button
+              type="button" title="Insert table"
+              onMouseDown={(e) => { e.preventDefault(); insertTable() }}
+              className="h-7 w-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors"
+            >
+              <Table2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button" title="Delete table (click inside a table first)"
+              onMouseDown={(e) => { e.preventDefault(); deleteTable() }}
+              className="h-7 w-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button" title="Add row below (click inside a table row first)"
+              onMouseDown={(e) => { e.preventDefault(); addTableRow() }}
+              className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
+            >
+              +Row
+            </button>
+            <button
+              type="button" title="Delete current row (click inside a table row first)"
+              onMouseDown={(e) => { e.preventDefault(); deleteTableRow() }}
+              className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
+            >
+              -Row
+            </button>
+            <button
+              type="button" title="Add column after (click inside a table column first)"
+              onMouseDown={(e) => { e.preventDefault(); addTableColumn() }}
+              className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
+            >
+              +Col
+            </button>
+            <button
+              type="button" title="Delete current column (click inside a table column first)"
+              onMouseDown={(e) => { e.preventDefault(); deleteTableColumn() }}
+              className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
+            >
+              -Col
+            </button>
             <Sep />
             <button
               type="button" title="Insert signature"
@@ -1726,7 +2023,7 @@ function ReportEditorInner() {
           {showDoc && study && (
             <>
               {/* Patient info — NON-EDITABLE (except SR. NO), matches the printed report header */}
-              <div ref={patientBoxRef} className="select-none mb-5 border-4 border-double border-gray-700 px-3.5 sm:px-5 py-2.5 sm:py-3.5 flex flex-col sm:flex-row justify-between gap-3 sm:gap-6 text-[13px] font-bold text-gray-900">
+              <div ref={patientBoxRef} className="select-none mb-5 border-[6px] border-double border-black px-3.5 sm:px-5 py-2.5 sm:py-3.5 flex flex-col sm:flex-row justify-between gap-3 sm:gap-6 text-[13px] font-bold text-gray-900">
                 <div className="space-y-1 min-w-0">
                   <p className="truncate">NAME - {patient.toUpperCase()}</p>
                   <p className="truncate">REF. BY - {(refBy || "SELF").toUpperCase()}</p>
@@ -1787,7 +2084,10 @@ function ReportEditorInner() {
                   contentEditable={!isReadOnly}
                   suppressContentEditableWarning
                   spellCheck={false}
+                  onFocus={() => { lastActiveRef.current = "heading" }}
+                  onBlur={(e) => captureToolbarSelection(e.currentTarget)}
                   title={isReadOnly ? undefined : "Click to edit the study heading"}
+                  style={headingFont ? { fontFamily: headingFont } : undefined}
                   className={`text-center font-bold uppercase text-base py-1.5 px-10 min-w-[280px] border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900 focus:outline-none${
                     isReadOnly ? "" : " hover:bg-blue-50/60 focus:bg-blue-50/60 transition-colors cursor-text"
                   }`}
@@ -1795,12 +2095,9 @@ function ReportEditorInner() {
               </div>
 
               {/* Report body — editable or read-only depending on mode */}
-              <div
-                ref={bodyRef}
-                contentEditable={!isReadOnly}
-                suppressContentEditableWarning
-                data-placeholder="Start typing the report here..."
-                className={`doc-field min-h-[400px] text-sm leading-relaxed text-gray-900 focus:outline-none${isReadOnly ? " cursor-default select-text" : ""}`}
+              <EditorContent
+                editor={editor}
+                className={`doc-field min-h-[400px] text-sm leading-relaxed text-gray-900${isReadOnly ? " cursor-default select-text" : ""}`}
               />
 
               {/* Two-doctor signature block — the signature images are drag/resize

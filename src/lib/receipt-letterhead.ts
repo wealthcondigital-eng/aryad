@@ -29,7 +29,7 @@ export function receiptPatientBoxHtml(p: {
   referredBy?: string
   srNo?: number | string
 }): string {
-  return `<table style="width:100%;border-collapse:collapse;border:3px double #333;margin-bottom:10px;">
+  return `<table style="width:100%;border-collapse:collapse;border:5px double #000;margin-bottom:10px;">
   <tr>
     <td style="padding:10px 14px;border:none;vertical-align:top;">
       <p style="margin:0 0 4px;font-weight:bold;font-size:9.5pt;">NAME - ${p.name.toUpperCase()}</p>
@@ -110,10 +110,10 @@ export function drawReceiptPatientBox(doc: jsPDF, p: {
   const W = 210, M = 20
   const boxH = 30
 
-  doc.setDrawColor(60)
-  doc.setLineWidth(0.5)
+  doc.setDrawColor(0)
+  doc.setLineWidth(0.6)
   doc.rect(M, y, W - 2 * M, boxH)
-  doc.setLineWidth(0.2)
+  doc.setLineWidth(0.3)
   doc.rect(M + 1.2, y + 1.2, W - 2 * M - 2.4, boxH - 2.4)
 
   doc.setTextColor(0)
