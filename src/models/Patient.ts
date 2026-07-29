@@ -31,6 +31,10 @@ export interface IStudyEntry {
   category: string            // "X-Ray" | "Sonography" | "Pathology"
   heading?: string            // doctor-edited report heading (falls back to the study name if unset)
   headingFont?: string        // font family chosen for the heading, applied in print/DOCX output
+  patientBoxFont?: string     // font family chosen for the NAME/REF.BY/DATE/AGE/SEX box, applied in print/DOCX output
+  headerHeightPx?: number     // resized top letterhead band (editor/print/PDF); unset falls back to LETTERHEAD_TOP_PX
+  footerHeightPx?: number     // resized bottom letterhead band (editor/print/PDF); unset falls back to LETTERHEAD_BOTTOM_PX
+  reportDate?: string         // per-study override for the date shown in the patient box (falls back to the patient's registration date)
   reportStatus: "pending" | "in_progress" | "completed"
   reportBody: string
   reportDocx: string
@@ -56,6 +60,10 @@ export interface IPatient extends Document {
   study: string               // legacy mirror: name of the first study (kept for backward compat)
   heading?: string            // legacy mirror of studies[0].heading
   headingFont?: string        // legacy mirror of studies[0].headingFont
+  patientBoxFont?: string     // legacy mirror of studies[0].patientBoxFont
+  headerHeightPx?: number     // legacy mirror of studies[0].headerHeightPx
+  footerHeightPx?: number     // legacy mirror of studies[0].footerHeightPx
+  reportDate?: string        // legacy mirror of studies[0].reportDate
   studies: IStudyEntry[]      // all studies for this patient, each with its own report
   reportStatus: "pending" | "in_progress" | "completed"  // aggregate across studies
   reportBody: string          // legacy mirror of studies[0]
@@ -88,6 +96,10 @@ const StudyEntrySchema = new Schema<IStudyEntry>(
     category:     { type: String, default: "" },
     heading:      { type: String, default: "" },
     headingFont:  { type: String, default: "" },
+    patientBoxFont: { type: String, default: "" },
+    headerHeightPx: { type: Number },
+    footerHeightPx: { type: Number },
+    reportDate:   { type: String, default: "" },
     reportStatus: { type: String, default: "pending", enum: ["pending", "in_progress", "completed"] },
     reportBody:   { type: String, default: "" },
     reportDocx:   { type: String, default: "" },
@@ -126,6 +138,10 @@ const PatientSchema = new Schema<IPatient>(
     study:                   { type: String, required: true },
     heading:                 { type: String, default: "" },
     headingFont:             { type: String, default: "" },
+    patientBoxFont:          { type: String, default: "" },
+    headerHeightPx:          { type: Number },
+    footerHeightPx:          { type: Number },
+    reportDate:              { type: String, default: "" },
     studies:                 { type: [StudyEntrySchema], default: [] },
     reportStatus:            { type: String, default: "pending", enum: ["pending", "in_progress", "completed"] },
     reportBody:              { type: String, default: "" },

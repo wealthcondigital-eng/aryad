@@ -1,4 +1,4 @@
-﻿@import "tailwindcss";
+@import "tailwindcss";
 
 input[type="date"] {
   display: flex;
@@ -151,6 +151,7 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   pointer-events: none;
   font-style: italic;
 }
+
 .doc-field p.is-editor-empty:first-child::before {
   content: attr(data-placeholder);
   color: #d1d5db;
@@ -158,6 +159,38 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   font-style: italic;
   float: left;
   height: 0;
+}
+
+/* Reports (built-in editor, view modal, print/PDF/DOCX all match this) render
+   in Cambria clinic-wide — patient box, heading, and body all inherit this
+   unless a doctor explicitly picks a different heading font, which still
+   wins via its own inline style. */
+.report-paper {
+  font-family: Cambria, Georgia, serif;
+  font-size: 12pt;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* Paragraph and line spacing in a report body.
+   Scoped to .doc-field elements so top-level page components (patient info box,
+   study title box, signature block) keep their own Tailwind layout margins. */
+.report-paper .doc-field p,
+.report-paper .doc-field div {
+  margin: 0 0 0.5em;
+  min-height: 1.5em;
+  white-space: pre-wrap;
+}
+
+.report-paper .doc-field p:empty::before,
+.report-paper .doc-field div:empty::before {
+  content: "\00a0";
+  visibility: hidden;
+}
+
+.report-paper .doc-field> :last-child {
+  margin-bottom: 0;
 }
 
 /* The report body is rendered by Tiptap's <EditorContent>, which wraps the
@@ -168,9 +201,31 @@ input[type="date"]::-webkit-calendar-picker-indicator {
    utility on the wrapper. */
 .doc-field .ProseMirror {
   outline: none;
+  white-space: pre-wrap;
+  word-wrap: break-word;
 }
+
 .doc-field .ProseMirror table {
   border-collapse: collapse;
+}
+
+/* Tiptap/prosemirror-tables' column-resize plugin drags the border between
+   cells, but the browser only honors the colgroup <col> widths it writes
+   (letting a column shrink smaller than its content) when the table uses
+   fixed layout — under the default "auto" layout, content re-expands the
+   column and dragging narrower has no visible effect. The wrapper needs its
+   own scrollbar since a fixed-layout table can no longer shrink itself back
+   under the page width once columns are dragged wider. */
+.doc-field .ProseMirror .tableWrapper {
+  overflow-x: auto;
+}
+
+.doc-field .ProseMirror table {
+  table-layout: fixed;
+}
+
+.doc-field .ProseMirror.resize-cursor {
+  cursor: col-resize;
 }
 
 /* Consistent paragraph spacing regardless of whether a block came from typing
@@ -180,23 +235,106 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 .doc-field p,
 .doc-field div {
   margin: 0 0 0.5em;
+  min-height: 1.5em;
+  white-space: pre-wrap;
 }
-.doc-field > :last-child {
+
+/* Report body = its own stacking context, so a "Behind Text" image (which is
+   position:absolute with z-index:-1 — see report-image.ts) paints UNDER the
+   report's words but still OVER the white page beneath them. Without this the
+   nearest stacking context is somewhere further up the tree, and a negative
+   z-index child paints below every ancestor background on the way there: the
+   image would be hidden behind the page itself and simply appear to vanish.
+   `z-index: 0` rather than `isolation: isolate` deliberately — html2canvas
+   (which rasterizes the shared PDF) recognizes position+z-index as a stacking
+   context, so the PDF gets the same paint order as the screen.
+   REPORT_BODY_STYLE in report-layout.ts carries the same pair inline for the
+   print window and the PDF host, neither of which loads this stylesheet. */
+.doc-field {
+  position: relative;
+  z-index: 0;
+}
+
+/* An inserted image keeps the exact pixel size it was resized to (the width and
+   height are inline styles from the same builder every consumer shares), so no
+   responsive max-width rule may shrink it — that would silently rescale a
+   placed image and move everything anchored around it. Floated/anchored images
+   also must not inherit the body's `white-space: pre-wrap` line handling. */
+.doc-field span[data-rimg-anchor] {
+  white-space: normal;
+}
+
+.doc-field img[data-rimg] {
+  max-width: none;
+}
+
+.doc-field p:empty::before,
+.doc-field div:empty::before {
+  content: "\00a0";
+  visibility: hidden;
+}
+
+.doc-field> :last-child {
   margin-bottom: 0;
 }
 
 /* Tables inserted/pasted into the report body always render with visible
-   borders, even if they arrive without their own inline border styling. */
+   borders, even if they arrive without their own inline border styling.
+   table-layout: fixed keeps column widths saved from the editor's drag-resize
+   (as inline <col> widths) intact here too — auto layout would let long
+   unwrapped cell content stretch a column back open. */
 .doc-field table {
   border-collapse: collapse;
+  table-layout: fixed;
   width: 100%;
   margin: 8px 0;
 }
+
 .doc-field table td,
 .doc-field table th {
   border: 1px solid #9ca3af;
   padding: 5px 8px;
   min-width: 40px;
+  position: relative;
+  vertical-align: top;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Wider + brighter than prosemirror-tables' own 4px default so the drag
+   handle reads clearly against the report's white page background — a
+   doctor scanning for "what's draggable here" needs to see it, not just
+   stumble onto the right cursor. Shown on hover too (native behavior only
+   shows it once the pointer is within handleWidth of the border), so the
+   affordance is visible before the drag even starts. */
+.doc-field table td:hover > .column-resize-handle,
+.doc-field table th:hover > .column-resize-handle {
+  opacity: 1;
+}
+
+.doc-field table .column-resize-handle {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  background-color: #2563eb;
+  opacity: 0.85;
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 20;
+}
+
+.doc-field table .selectedCell::after {
+  z-index: 2;
+  position: absolute;
+  content: "";
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(200, 200, 255, 0.4);
+  pointer-events: none;
 }
 
 /* Highlight sections edited/added after initial submission */
@@ -229,7 +367,7 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   transform: translateY(3px);
   transition: opacity 0.15s ease, transform 0.15s ease;
   z-index: 200;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 /* Small arrow pointing down from tooltip */
@@ -260,8 +398,13 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 
 /* ── Skeleton shimmer ──────────────────────────────────────────────────────── */
 @keyframes skeleton-shimmer {
-  0%   { transform: translateX(-100%); }
-  100% { transform: translateX(100%); }
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(100%);
+  }
 }
 
 .skeleton-shimmer {
@@ -274,7 +417,7 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   content: "";
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.75) 50%, transparent 100%);
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.75) 50%, transparent 100%);
   animation: skeleton-shimmer 1.5s ease-in-out infinite;
 }
 
@@ -283,5 +426,5 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 }
 
 .dark .skeleton-shimmer::after {
-  background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.07) 50%, transparent 100%);
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.07) 50%, transparent 100%);
 }

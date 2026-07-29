@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { X, Printer, Share2, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX } from "@/lib/report-layout"
+import { reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, MM_TO_PX, applyReportBodySpacing, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
 import { SignatureColumns } from "@/components/signature-columns"
 
@@ -46,7 +46,15 @@ export function ReportViewModal({
   // or the heading was never customized.
   const [savedHeading, setSavedHeading] = useState("")
   const [savedHeadingFont, setSavedHeadingFont] = useState<string | undefined>(undefined)
-  const displayTitle = savedHeading || getDisplayTitle(patient.study)
+  const [savedBoxFont, setSavedBoxFont] = useState<string | undefined>(undefined)
+  // Per-report resized top/bottom letterhead bands (set from the built-in
+  // editor's drag handles) — fall back to the shared defaults when unset, so
+  // older reports keep looking exactly as they always have.
+  const [headerPx, setHeaderPx] = useState<number>(LETTERHEAD_TOP_PX)
+  const [footerPx, setFooterPx] = useState<number>(LETTERHEAD_BOTTOM_PX)
+  // A saved heading keeps the exact casing the doctor typed; only the derived
+  // fallback is upper-cased (matching how the editor seeds it).
+  const displayTitle = savedHeading || getDisplayTitle(patient.study).toUpperCase()
   useEffect(() => { fetchSignatories().then(setSignatories) }, [])
 
   // Pagination: lay the preview out as A4 sheets so the doctor sees where pages
@@ -99,11 +107,11 @@ export function ReportViewModal({
       const r      = it.getBoundingClientRect()
       const top    = r.top - wrapTop
       const bottom = top + r.height
-      const footerLimit = page * A4_STRIDE + (A4_PAGE_PX - LETTERHEAD_BOTTOM_PX)
-      const pageTop     = page * A4_STRIDE + LETTERHEAD_TOP_PX
+      const footerLimit = page * A4_STRIDE + (A4_PAGE_PX - footerPx)
+      const pageTop     = page * A4_STRIDE + headerPx
       if (bottom > footerLimit + 1 && top > pageTop + 2) {
         page++
-        const target = page * A4_STRIDE + LETTERHEAD_TOP_PX
+        const target = page * A4_STRIDE + headerPx
         const delta  = target - top
         if (delta > 0) {
           const base = parseFloat(getComputedStyle(it).marginTop) || 0
@@ -115,7 +123,7 @@ export function ReportViewModal({
     }
 
     setNumPages(page + 1)
-  }, [A4_STRIDE])
+  }, [A4_STRIDE, headerPx, footerPx])
 
   const schedulePaginate = useCallback(() => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current)
@@ -144,6 +152,9 @@ export function ReportViewModal({
         }
         setSavedHeading(d.patient?.studies?.[sidx]?.heading || d.patient?.heading || "")
         setSavedHeadingFont(d.patient?.studies?.[sidx]?.headingFont || d.patient?.headingFont || undefined)
+        setSavedBoxFont(d.patient?.studies?.[sidx]?.patientBoxFont || d.patient?.patientBoxFont || undefined)
+        setHeaderPx(d.patient?.studies?.[sidx]?.headerHeightPx || d.patient?.headerHeightPx || LETTERHEAD_TOP_PX)
+        setFooterPx(d.patient?.studies?.[sidx]?.footerHeightPx || d.patient?.footerHeightPx || LETTERHEAD_BOTTOM_PX)
         setSignatureLayout(d.patient?.studies?.[sidx]?.signatureLayout || [])
       })
       .catch(() => {
@@ -155,12 +166,10 @@ export function ReportViewModal({
   // Render HTML into the body div after load — strip edit-attribution markers for clean display
   useEffect(() => {
     if (!loading && bodyRef.current) {
-      const clean = (reportBody || "").replace(
-        /<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi,
-        "$1"
-      )
+      const clean = stripReportEditMarks(reportBody || "")
       bodyRef.current.innerHTML =
         clean || "<em style='color:#aaa;font-size:12px'>No report content saved yet.</em>"
+      applyReportBodySpacing(bodyRef.current)
       schedulePaginate()
     }
   }, [reportBody, loading, schedulePaginate])
@@ -193,9 +202,7 @@ export function ReportViewModal({
 
   const handleShare = async () => {
     setShareLoading(true)
-    const stripEditMarks = (html: string) =>
-      html.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
-    const bodyHtml  = stripEditMarks(readCleanBody() || reportBody)
+    const bodyHtml  = stripReportEditMarks(readCleanBody() || reportBody)
     const num = patient.contact?.replace(/\D/g, "") ?? ""
 
     try {
@@ -207,10 +214,12 @@ export function ReportViewModal({
         headerHtml: reportHeaderHtml({
           name: patient.name, refBy: patient.referredBy, date,
           age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined,
-        }),
+        }, savedBoxFont),
         titleHtml: reportTitleHtml(displayTitle, savedHeadingFont),
         bodyHtml,
         signaturesHtml: signatureColumnsHtml(signatories, signatureLayout),
+        headerTopPx: headerPx,
+        footerBottomPx: footerPx,
       })
       const arrayBuf  = await pdfBlob.arrayBuffer()
       const bytes     = new Uint8Array(arrayBuf)
@@ -255,15 +264,13 @@ export function ReportViewModal({
   // Print output matches the printed report design: double-bordered patient
   // info box, bordered underlined study heading, body and signatures.
   const handlePrint = () => {
-    const stripEditMarks = (html: string) =>
-      html.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
-    const currentBody = stripEditMarks(readCleanBody() || reportBody)
+    const currentBody = stripReportEditMarks(readCleanBody() || reportBody)
 
     const html = printShellHtml(`Report – ${patient.name}`, `
-${reportHeaderHtml({ name: patient.name, refBy: patient.referredBy, date, age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined })}
+${reportHeaderHtml({ name: patient.name, refBy: patient.referredBy, date, age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined }, savedBoxFont)}
 ${reportTitleHtml(displayTitle, savedHeadingFont)}
-<div style="font-size:10pt;line-height:1.6;">${currentBody}</div>
-<div style="display:flex;gap:30px;margin-top:80px;page-break-inside:avoid;break-inside:avoid;">${signatureColumnsHtml(signatories, signatureLayout)}</div>`)
+<div class="doc-field" style="${REPORT_BODY_STYLE}">${currentBody}</div>
+<div style="${REPORT_SIGS_STYLE}">${signatureColumnsHtml(signatories, signatureLayout)}</div>`, "", headerPx / MM_TO_PX, footerPx / MM_TO_PX)
 
     const blob = new Blob([html], { type: "text/html" })
     const url  = URL.createObjectURL(blob)
@@ -331,11 +338,15 @@ ${reportTitleHtml(displayTitle, savedHeadingFont)}
 
               {/* Content overlay — transparent; header/footer gaps are just empty padding */}
               <div
-                className="relative z-10 px-4 sm:px-14"
-                style={{ paddingTop: `${LETTERHEAD_TOP_PX}px`, paddingBottom: `${LETTERHEAD_BOTTOM_PX}px` }}
+                className="report-paper relative z-10 px-4 sm:px-14"
+                style={{ paddingTop: `${headerPx}px`, paddingBottom: `${footerPx}px` }}
               >
                 {/* Patient info — matches the printed report header */}
-                <div ref={patientBoxRef} className="border-4 border-double border-gray-700 px-3 sm:px-4 py-2.5 sm:py-3 mb-5 flex flex-col sm:flex-row justify-between gap-3 sm:gap-4 text-xs font-bold text-gray-900">
+                <div
+                  ref={patientBoxRef}
+                  style={savedBoxFont ? { fontFamily: savedBoxFont } : undefined}
+                  className="border-[6px] border-double border-black px-3.5 sm:px-5 py-2 sm:py-2.5 mb-3 flex flex-col sm:flex-row justify-between gap-3 sm:gap-6 text-[13px] font-bold text-gray-900"
+                >
                   <div className="space-y-1 min-w-0">
                     <p className="truncate">NAME - {patient.name.toUpperCase()}</p>
                     <p className="truncate">REF. BY - {(patient.referredBy || "SELF").toUpperCase()}</p>
@@ -349,23 +360,28 @@ ${reportTitleHtml(displayTitle, savedHeadingFont)}
                 </div>
 
                 {/* Study title — boxed like the printed report */}
-                <div ref={titleWrapRef} className="flex justify-center mb-5">
+                <div ref={titleWrapRef} className="flex justify-center mb-3">
                   <div
                     style={savedHeadingFont ? { fontFamily: savedHeadingFont } : undefined}
-                    className="text-center font-bold uppercase text-sm py-1.5 px-8 border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900"
+                    className="text-center font-bold text-base py-1 px-8 min-w-[240px] border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900"
                   >
                     {displayTitle}
                   </div>
                 </div>
 
-                {/* Report body */}
+                {/* Report body — no min-height: this modal only ever shows a
+                    completed report's real content, and pagination below
+                    measures this element's actual rendered height to decide
+                    page breaks, same as the editor. An artificial floor here
+                    would push the signature block onto an extra page whenever
+                    the real body is shorter than the floor. */}
                 <div
                   ref={bodyRef}
-                  className="text-sm leading-relaxed text-gray-900 min-h-[200px]"
+                  className="doc-field text-base leading-normal text-gray-900 whitespace-pre-wrap"
                 />
 
                 {/* Two-doctor signature block — matches print / Word */}
-                <div ref={sigsRef} className="mt-24 select-none text-gray-900 w-full">
+                <div ref={sigsRef} className="mt-0 select-none text-gray-900 w-full">
                   <SignatureColumns signatories={signatories} layouts={signatureLayout} />
                 </div>
               </div>

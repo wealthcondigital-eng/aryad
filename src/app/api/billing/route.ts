@@ -4,6 +4,7 @@ import Bill from "@/models/Bill"
 import Patient from "@/models/Patient"
 import Study from "@/models/Study"
 import { autoCategory } from "@/lib/study-catalogue"
+import { syncPatientToRegister } from "@/lib/register-sync"
 
 // GET /api/billing
 export async function GET() {
@@ -108,6 +109,9 @@ export async function POST(req: NextRequest) {
       }
 
       await patient.save()
+
+      // The bill's totals are what the monthly register's money columns show
+      await syncPatientToRegister(patient)
 
       if (Object.keys(identitySync).length > 0) {
         await Bill.updateMany({ patientId: patient._id, _id: { $ne: bill._id } }, { $set: identitySync })

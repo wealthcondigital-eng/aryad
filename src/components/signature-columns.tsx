@@ -1,15 +1,6 @@
 "use client"
 
-import { useState } from "react"
 import type { Signatory, SignatureLayout } from "@/lib/report-signatures"
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import { Button } from "@/components/ui/button"
-import { SignaturePadDialog } from "@/components/signature-pad-dialog"
 
 // Applies a saved drag/resize override exactly once per DOM node (idempotent,
 // tracked via a data attribute) so it survives unrelated re-renders of the
@@ -29,41 +20,36 @@ function applyInitialLayout(el: HTMLImageElement | null, layout?: SignatureLayou
 }
 
 export function SignatureColumns({
-  signatories, layouts, editable, onLayoutChange,
+  signatories, layouts, editable,
 }: {
   signatories: Signatory[]
   layouts?: (SignatureLayout | null | undefined)[]
   editable?: boolean
-  onLayoutChange?: (idx: number, layout: SignatureLayout | null) => void
 }) {
   const s0 = signatories[0]
   const s1 = signatories[1]
   const l0 = layouts?.[0]
   const l1 = layouts?.[1]
 
-  const [showPadIndex, setShowPadIndex] = useState<0 | 1 | null>(null)
-
   const renderImg = (index: 0 | 1, s?: Signatory, layout?: SignatureLayout | null) => {
     if (!s) return <div />
     const isHidden = layout?.hidden
     // The signatory's master image (from the Signatures admin page) is never
-    // shown automatically — only an explicit per-report overrideImage (set by
-    // clicking "+ Add Signature" for this report) renders here.
+    // shown automatically — only a per-report overrideImage renders here, and
+    // only once one actually exists. There's deliberately no "+ Add
+    // Signature" placeholder reserving space above the name when one doesn't:
+    // a signature stamp is placed via the freeform in-body tool instead (see
+    // insertSignature/SignatureExtension), positioned and sized by hand
+    // wherever the doctor wants it — this row only ever shows a signature
+    // that's already been placed that way.
     const displayImg = isHidden ? undefined : layout?.overrideImage
+    // An empty placeholder, not `null`: this is a two-column grid, and a missing
+    // child doesn't leave a hole — it shifts the remaining one into column 1. So
+    // returning null when only the RIGHT doctor had a signature drew that
+    // signature above the LEFT doctor's name. (The print/PDF twin in
+    // signatureColumnsHtml keeps the same empty column for the same reason.)
+    if (!displayImg) return <div />
 
-    if (editable && !displayImg) {
-      return (
-        <div className="w-full h-12">
-          <button
-            type="button"
-            onClick={() => setShowPadIndex(index)}
-            className="w-full h-12 rounded border-2 border-dashed border-gray-300 hover:border-blue-400 bg-gray-50/50 hover:bg-blue-50/30 flex items-center justify-center text-gray-400 hover:text-blue-500 transition-all cursor-pointer pointer-events-auto"
-          >
-            <span className="text-[10px] font-bold tracking-wide uppercase">+ Add Signature</span>
-          </button>
-        </div>
-      )
-    }
 
     const inlineStyle: React.CSSProperties = {
       height: layout?.height ? `${layout.height}px` : "48px",
@@ -126,43 +112,22 @@ export function SignatureColumns({
     )
   }
 
+  const hasAnyImg = (s0 && !l0?.hidden && l0?.overrideImage) || (s1 && !l1?.hidden && l1?.overrideImage)
+
   return (
-    <div className="flex flex-col gap-2 w-full">
-      {/* Signature Images Row (Aligned horizontally at the bottom of the row) */}
-      <div className="grid grid-cols-2 gap-8 items-end">
-        {renderImg(0, s0, l0)}
-        {renderImg(1, s1, l1)}
-      </div>
-      {/* Doctor Names/Credentials Row (Always parallel) */}
-      <div className="grid grid-cols-2 gap-8 mt-1">
+    <div className="flex flex-col w-full">
+      {/* Signature Images Row — only renders if an image actually exists */}
+      {hasAnyImg && (
+        <div className="grid grid-cols-2 gap-8 items-end mb-1">
+          {renderImg(0, s0, l0)}
+          {renderImg(1, s1, l1)}
+        </div>
+      )}
+      {/* Doctor Names/Credentials Row */}
+      <div className="grid grid-cols-2 gap-8">
         {renderText(0, s0, l0)}
         {renderText(1, s1, l1)}
       </div>
-
-
-      {/* Signature Pad Dialog for Custom Signature */}
-      {showPadIndex !== null && (
-        <SignaturePadDialog
-          open={showPadIndex !== null}
-          onClose={() => setShowPadIndex(null)}
-          savedImage={(showPadIndex === 0 ? s0 : s1)?.signatureImage || undefined}
-          savedLabel={(showPadIndex === 0 ? s0 : s1)?.name}
-          onInsert={(res) => {
-            const idx = showPadIndex!
-            const layout = layouts?.[idx]
-            if (onLayoutChange) {
-              onLayoutChange(idx, {
-                ...(layout || {}),
-                hidden: false,
-                overrideImage: res.dataUrl,
-                width: res.width,
-                height: res.height,
-              })
-            }
-            setShowPadIndex(null)
-          }}
-        />
-      )}
     </div>
   )
 }

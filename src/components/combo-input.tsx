@@ -38,7 +38,8 @@ export function ComboInput({
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
 
-  const filtered = suggestions.filter((s) =>
+  // De-duplicate — the same name can appear in several records (repeat visits)
+  const filtered = Array.from(new Set(suggestions)).filter((s) =>
     s.toLowerCase().includes(value.toLowerCase())
   )
 

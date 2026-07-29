@@ -8,6 +8,7 @@
 // always has: blank space for a pen signature, name + credentials in text.
 
 import type { jsPDF } from "jspdf"
+import { DEFAULT_REPORT_FONT } from "@/lib/report-layout"
 
 export interface Signatory {
   _id: string
@@ -57,43 +58,61 @@ export function imageFormat(dataUrl: string): "png" | "jpg" | "gif" | "bmp" {
 }
 
 // ── HTML (print windows / webviews) ──────────────────────────────────────────
-// Renders just the two <div style="flex:1"> columns — the caller keeps its
-// own outer wrapper (each existing call site already has its own spacing).
+// The print/PDF twin of the <SignatureColumns> React component — and it must
+// stay a faithful twin, because the editor and view modal render the component
+// while the print window and the shared PDF render this string. Every number
+// below (48px image row, 32px column gap, 4px row gap, 13px/10px type) is the
+// component's Tailwind class translated to inline CSS; change one side and you
+// have to change the other.
+//
+// It used to always emit the image row, with a `height:38px` spacer in any
+// column that had no signature image. The component renders NO image row at all
+// unless a signature image actually exists (a stamp is placed freehand in the
+// body instead — see insertSignature), so every printed report carried ~42px of
+// blank space above the doctors' names that the editor never showed, pushing the
+// names down and sometimes onto an extra sheet.
 export function signatureColumnsHtml(signatories: Signatory[], layouts?: (SignatureLayout | null | undefined)[]): string {
   const s0 = signatories[0]
   const s1 = signatories[1]
   const l0 = layouts?.[0]
   const l1 = layouts?.[1]
 
-  const imgHtml = (s?: Signatory, layout?: SignatureLayout | null) => {
-    if (!s) return `<div style="flex:1;"></div>`
-    if (layout?.hidden) return `<div style="flex:1;height:38px;"></div>`
-    const displayImg = layout?.overrideImage
-    const h = layout?.height ?? 38
-    const sizeCss = layout?.width ? `width:${layout.width}px;` : `max-width:150px;`
+  // Only a per-report overrideImage ever shows here — never the signatory's
+  // master image from the Signatures page — matching the component exactly.
+  const imageOf = (s?: Signatory, layout?: SignatureLayout | null) =>
+    s && !layout?.hidden ? layout?.overrideImage || undefined : undefined
+  const img0 = imageOf(s0, l0)
+  const img1 = imageOf(s1, l1)
+  const hasAnyImg = !!(img0 || img1)
+
+  const imgHtml = (src?: string, layout?: SignatureLayout | null) => {
+    if (!src) return `<div style="flex:1;"></div>`
+    const h = layout?.height ?? 48                                    // component: height 48px default
+    const sizeCss = layout?.width ? `width:${layout.width}px;` : `max-width:160px;`  // component: max-w-[160px]
     const topVal = layout?.top ? Math.min(0, layout.top) : 0
     const offsetCss = layout?.left || topVal
       ? `position:relative;left:${layout?.left ?? 0}px;top:${topVal}px;`
       : ""
-    return displayImg
-      ? `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;min-height:38px;"><img src="${displayImg}" style="height:${h}px;${sizeCss}object-fit:contain;display:block;margin-bottom:3px;${offsetCss}" /></div>`
-      : `<div style="flex:1;height:38px;"></div>`
+    return `<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;min-height:48px;"><img src="${src}" alt="" style="height:${h}px;${sizeCss}object-fit:contain;display:block;${offsetCss}" /></div>`
   }
 
   const textHtml = (s?: Signatory) => {
     if (!s) return `<div style="flex:1;"></div>`
+    // Sizes in px, not pt: the component uses text-[13px]/text-[10px], and 10pt
+    // (13.3px) / 8pt (10.7px) rendered the printed names slightly larger than
+    // the screen ones. Line height is left to inherit (1.5) on both sides.
     const credentialLines = s.credentials
-      .map((c) => `<p style="font-size:8pt;color:#333;margin-top:2px;text-transform:uppercase;">${c}</p>`)
+      .map((c, i) => `<p style="font-size:10px;text-transform:uppercase;color:#4b5563;${i === 0 ? "margin-top:2px;" : ""}">${c}</p>`)
       .join("")
-    return `<div style="flex:1;"><p style="font-weight:bold;font-size:10pt;text-transform:uppercase;">${s.name}</p>${credentialLines}</div>`
+    return `<div style="flex:1;"><p style="font-weight:bold;font-size:13px;text-transform:uppercase;">${s.name}</p>${credentialLines}</div>`
   }
 
+  // The 4px gap between the rows lives on the image row (component: `mb-1`), so
+  // that with no image row there is no gap left dangling above the names.
   return `
 <div style="width:100%;display:flex;flex-direction:column;">
-  <div style="display:flex;gap:30px;align-items:flex-end;">
-    ${imgHtml(s0, l0)}${imgHtml(s1, l1)}
-  </div>
-  <div style="display:flex;gap:30px;margin-top:4px;">
+  ${hasAnyImg ? `<div style="display:flex;gap:32px;align-items:flex-end;margin-bottom:4px;">${imgHtml(img0, l0)}${imgHtml(img1, l1)}</div>` : ""}
+  <div style="display:flex;gap:32px;">
     ${textHtml(s0)}${textHtml(s1)}
   </div>
 </div>`
@@ -162,7 +181,13 @@ export async function buildDocxSignatureCells(signatories: Signatory[], layouts?
         spacing: { after: 40 },
       }))
     } else {
-      children.push(new Paragraph({ children: [] }))
+      // A table cell must contain at least one block-level element in OOXML, so
+      // the "no signature image" cell can't simply be empty — but it can be a
+      // 1pt paragraph instead of a default-size (11pt) one, which is the
+      // difference between a hairline and a visible blank line above the
+      // doctor's name. On screen and in print that row isn't rendered at all
+      // (see signatureColumnsHtml), so this keeps Word close to both.
+      children.push(new Paragraph({ children: [new TextRun({ text: "", size: 2 })] }))
     }
     return children
   }
@@ -170,11 +195,11 @@ export async function buildDocxSignatureCells(signatories: Signatory[], layouts?
   const makeText = (s?: Signatory) => {
     const children = []
     children.push(new Paragraph({
-      children: [new TextRun({ text: s?.name ?? "", bold: true, size: 20 })],
+      children: [new TextRun({ text: s?.name ?? "", bold: true, size: 20, font: DEFAULT_REPORT_FONT })],
       spacing: { after: 40 },
     }))
     for (const c of s?.credentials ?? []) {
-      children.push(new Paragraph({ children: [new TextRun({ text: c, size: 16 })] }))
+      children.push(new Paragraph({ children: [new TextRun({ text: c, size: 16, font: DEFAULT_REPORT_FONT })] }))
     }
     return children
   }

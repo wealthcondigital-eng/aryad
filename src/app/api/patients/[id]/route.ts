@@ -5,7 +5,10 @@ import Patient from "@/models/Patient"
 import Study from "@/models/Study"
 import Bill from "@/models/Bill"
 import Notification from "@/models/Notification"
+import RegisterEntry from "@/models/RegisterEntry"
 import { autoCategory } from "@/lib/study-catalogue"
+import { generateReportSlug } from "@/lib/report-slug"
+import { syncPatientToRegister } from "@/lib/register-sync"
 
 type PatientDoc = InstanceType<typeof Patient>
 
@@ -38,6 +41,10 @@ function syncLegacyMirror(patient: PatientDoc) {
   patient.study       = first.name
   patient.heading     = first.heading
   patient.headingFont = first.headingFont
+  patient.patientBoxFont = first.patientBoxFont
+  patient.headerHeightPx = first.headerHeightPx
+  patient.footerHeightPx = first.footerHeightPx
+  patient.reportDate     = first.reportDate
   patient.reportBody  = first.reportBody
   patient.reportDocx  = first.reportDocx
   patient.reportPdf   = first.reportPdf
@@ -56,20 +63,10 @@ function syncLegacyMirror(patient: PatientDoc) {
     "pending"
 }
 
-async function generateSlug(patient: PatientDoc, studyName: string, excludeId: string): Promise<string> {
-  const nameBase  = patient.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
-  const studyBase = studyName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
-  let slug = `${nameBase}-${studyBase}-report`
-  const taken = await Patient.findOne({
-    _id: { $ne: excludeId },
-    $or: [{ reportSlug: slug }, { "studies.reportSlug": slug }],
-  }).select("_id")
-  if (taken) slug = `${nameBase}-${studyBase}-${patient.srNo}-report`
-  // also make sure it doesn't clash with another study of the same patient
-  const clash = patient.studies.filter((s: { reportSlug: string }) => s.reportSlug === slug).length
-  if (clash) slug = `${slug}-${clash + 1}`
-  return slug
-}
+// Slug rule lives in @/lib/report-slug, shared with the WhatsApp/print sharing
+// flow which needs the same byte-identical slug for a given report.
+const generateSlug = (patient: PatientDoc, studyName: string, excludeId: string) =>
+  generateReportSlug(patient, studyName, excludeId)
 
 // When a study is dropped from a patient's study list, pull its line off
 // whatever Bill it was billed on (deleting the Bill outright if that was the
@@ -205,7 +202,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       removeStudyIndex,
       studyName,
       studies: studiesUpdate,
-      reportStatus, reportBody, reportDocx, reportPdf, heading, headingFont, signatureLayout,
+      reportStatus, reportBody, reportDocx, reportPdf, heading, headingFont, patientBoxFont, headerHeightPx, footerHeightPx, reportDate, signatureLayout,
       ...regularFields
     } = body
 
@@ -225,11 +222,13 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       await cascadeRemoveStudiesFromBills(patient, removed)
       if (patient.studies.length === 0) {
         await Patient.findByIdAndDelete(id)
+        await RegisterEntry.deleteMany({ sourceType: "system", patientId: patient._id })
         return NextResponse.json({ patient: null, deleted: true })
       }
       syncLegacyMirror(patient)
       patient.markModified("studies")
       await patient.save()
+      await syncPatientToRegister(patient)
       return NextResponse.json({ patient })
     }
 
@@ -344,10 +343,19 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
 
     // ── Per-study report fields ──
+    const {
+      patientBoxOffsetX, patientBoxOffsetY, titleBoxOffsetX, titleBoxOffsetY,
+      patientBoxWidthPx, titleBoxWidthPx
+    } = body
     const hasReportFields =
       reportStatus !== undefined || reportBody !== undefined ||
       reportDocx !== undefined || reportPdf !== undefined || !!editHistoryEntry ||
-      signatureLayout !== undefined || heading !== undefined || headingFont !== undefined
+      signatureLayout !== undefined || heading !== undefined || headingFont !== undefined ||
+      patientBoxFont !== undefined ||
+      headerHeightPx !== undefined || footerHeightPx !== undefined || reportDate !== undefined ||
+      patientBoxOffsetX !== undefined || patientBoxOffsetY !== undefined ||
+      titleBoxOffsetX !== undefined || titleBoxOffsetY !== undefined ||
+      patientBoxWidthPx !== undefined || titleBoxWidthPx !== undefined
 
     if (hasReportFields) {
       const idx = Math.min(Math.max(Number(rawStudyIndex) || 0, 0), Math.max(patient.studies.length - 1, 0))
@@ -358,6 +366,16 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         if (reportDocx   !== undefined) entry.reportDocx   = reportDocx
         if (heading      !== undefined) entry.heading      = heading
         if (headingFont  !== undefined) entry.headingFont  = headingFont
+        if (patientBoxFont !== undefined) entry.patientBoxFont = patientBoxFont
+        if (headerHeightPx !== undefined) entry.headerHeightPx = headerHeightPx
+        if (footerHeightPx !== undefined) entry.footerHeightPx = footerHeightPx
+        if (reportDate !== undefined) entry.reportDate = reportDate
+        if (patientBoxOffsetX !== undefined) entry.patientBoxOffsetX = patientBoxOffsetX
+        if (patientBoxOffsetY !== undefined) entry.patientBoxOffsetY = patientBoxOffsetY
+        if (titleBoxOffsetX !== undefined)   entry.titleBoxOffsetX   = titleBoxOffsetX
+        if (titleBoxOffsetY !== undefined)   entry.titleBoxOffsetY   = titleBoxOffsetY
+        if (patientBoxWidthPx !== undefined) entry.patientBoxWidthPx = patientBoxWidthPx
+        if (titleBoxWidthPx !== undefined)   entry.titleBoxWidthPx   = titleBoxWidthPx
         if (reportPdf    !== undefined) {
           entry.reportPdf = reportPdf
           if (!entry.reportSlug) entry.reportSlug = await generateSlug(patient, entry.name, id)
@@ -392,6 +410,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     syncLegacyMirror(patient)
     patient.markModified("studies")
     await patient.save()
+
+    // Keep this patient's rows in the monthly register in step with the edit
+    await syncPatientToRegister(patient)
 
     // Notify receptionists when a completed report is submitted
     if (editHistoryEntry && reportStatus === "completed") {

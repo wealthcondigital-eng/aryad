@@ -13,7 +13,26 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
   const { user, ready } = useRole()
   const router   = useRouter()
   const pathname = usePathname()
-  const [sidebarOpen, setSidebarOpen] = useState(false)
+  // Which route the drawer was opened on, rather than a plain boolean. Reading
+  // "open" as "opened for the route we're still on" means navigating away closes
+  // it for free — no effect, and no chance of the drawer being stranded open
+  // over a page that already has a permanent sidebar underneath it.
+  const [openedFor, setOpenedFor] = useState<string | null>(null)
+  const sidebarOpen = openedFor !== null && openedFor === pathname
+
+  // Icon-only rail vs. the full labeled column — desktop only, remembered
+  // across visits so the choice sticks between sessions.
+  const [collapsed, setCollapsed] = useState(false)
+  useEffect(() => {
+    setCollapsed(localStorage.getItem("sidebar-collapsed") === "1")
+  }, [])
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      const next = !prev
+      localStorage.setItem("sidebar-collapsed", next ? "1" : "0")
+      return next
+    })
+  }
 
   useEffect(() => {
     if (ready && !user) {
@@ -85,9 +104,14 @@ function DashboardContent({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       <TopLoader />
-      <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
-      <div className="flex flex-1 flex-col overflow-hidden lg:ml-0">
-        <Header onMenuClick={() => setSidebarOpen(true)} />
+      <Sidebar
+        open={sidebarOpen}
+        onClose={() => setOpenedFor(null)}
+        collapsed={collapsed}
+        onToggleCollapsed={toggleCollapsed}
+      />
+      <div className="flex flex-1 flex-col overflow-hidden lg:ml-0 min-w-0">
+        <Header onMenuClick={() => setOpenedFor(pathname)} />
         <main className="flex-1 overflow-y-auto p-4 lg:p-6">
           <motion.div
             key={pathname}

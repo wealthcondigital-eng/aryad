@@ -58,6 +58,16 @@ export interface PageBreakResult {
   decorationSet: DecorationSet
   exitPage: number
   exitBottomPx: number
+  /**
+   * Fingerprint of the margins this pass decided on. A single pass cannot be
+   * trusted on its own: every node is measured against a DOM that still
+   * reflects the PREVIOUS pass's margins, so the moment one node's push
+   * changes, every node after it was measured from a stale position. The
+   * caller re-runs until two consecutive passes produce the same fingerprint
+   * (see paginate()) — that's the point at which measurements and applied
+   * margins finally agree.
+   */
+  signature: string
 }
 
 // Reads how much margin-top WE previously decorated this exact node with
@@ -78,6 +88,7 @@ export function computeBodyPageDecorations(view: EditorView, opts: PageBreakOpts
   let page = opts.entryPage
   let exitBottomPx = opts.entryTopPx
   const decorations: Decoration[] = []
+  const sigParts: string[] = []
 
   view.state.doc.forEach((node, offset) => {
     const dom = view.nodeDOM(offset)
@@ -103,6 +114,9 @@ export function computeBodyPageDecorations(view: EditorView, opts: PageBreakOpts
       decorations.push(
         Decoration.node(offset, offset + node.nodeSize, { style: `margin-top:${margin}px` }, { pgbMargin: margin })
       )
+      // Rounded: sub-pixel jitter in getBoundingClientRect would otherwise
+      // keep the fingerprint changing forever and never let the caller settle.
+      sigParts.push(`${offset}:${Math.round(margin)}`)
     }
 
     exitBottomPx = naturalBottom + margin
@@ -112,5 +126,6 @@ export function computeBodyPageDecorations(view: EditorView, opts: PageBreakOpts
     decorationSet: DecorationSet.create(view.state.doc, decorations),
     exitPage: page,
     exitBottomPx,
+    signature: sigParts.join("|"),
   }
 }

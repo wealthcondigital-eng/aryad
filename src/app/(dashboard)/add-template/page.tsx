@@ -15,15 +15,16 @@ import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, Sele
 import { motion } from "motion/react"
 import { REPORT_TEMPLATES, TemplateCategory } from "@/lib/report-templates"
 
-const BUILT_IN_CATS: TemplateCategory[] = ["usg", "doppler", "xray", "pathology"]
+const BUILT_IN_CATS: TemplateCategory[] = ["usg", "doppler", "xray", "pathology", "obstetric"]
 const CATEGORY_LABEL: Record<TemplateCategory, string> = {
-  usg: "USG / Sonography", doppler: "Doppler", xray: "X-Ray", pathology: "Pathology",
+  usg: "USG / Sonography", doppler: "Doppler", xray: "X-Ray", pathology: "Pathology", obstetric: "Obstetric USG",
 }
 const CATEGORY_COLOR: Record<TemplateCategory, string> = {
   usg:       "bg-blue-100 text-blue-700",
   doppler:   "bg-violet-100 text-violet-700",
   xray:      "bg-amber-100 text-amber-700",
   pathology: "bg-emerald-100 text-emerald-700",
+  obstetric: "bg-pink-100 text-pink-700",
 }
 // Custom (clinic-created) categories don't have a fixed colour, so pick one
 // deterministically from a small palette based on the category name.
@@ -342,12 +343,12 @@ export default function AddTemplatePage() {
           </DialogHeader>
           {previewTpl && (
             <div className="flex-1 overflow-y-auto px-6 py-5 bg-slate-50">
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-8 max-w-xl mx-auto">
-                <div className="text-center font-bold uppercase text-sm underline underline-offset-4 mb-5">
+              <div className="report-paper bg-white rounded-lg shadow-sm border border-gray-200 p-8 max-w-xl mx-auto">
+                <div className="text-center font-bold text-sm underline underline-offset-4 mb-5">
                   {previewTpl.heading}
                 </div>
                 <div
-                  className="text-sm leading-relaxed text-gray-800 [&_p]:mb-2 [&_div]:mb-2"
+                  className="doc-field text-sm leading-relaxed text-gray-900"
                   dangerouslySetInnerHTML={{ __html: previewTpl.body }}
                 />
               </div>

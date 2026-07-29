@@ -134,19 +134,33 @@ function hasVisibleText(html: string): boolean {
   return html.replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, "").trim().length > 0
 }
 
-// Converts mammoth's <p>-per-paragraph output into the same div-per-line +
-// blank-line shape as the rest of the app, preserving whatever inline
-// formatting (bold/italic/underline) and tables mammoth already produced —
-// unlike the plain-text path, real formatting is available here so it's
-// kept as-is rather than re-guessed. Also drops the doctors' signature block
-// and anything after it, same as the plain-text path — unless doing so would
-// leave nothing at all, in which case the untruncated version is kept.
+// Converts mammoth's <p>-per-paragraph output into the same per-line <div>
+// shape as the rest of the app, preserving whatever inline formatting
+// (bold/italic/underline) and tables mammoth already produced.
 export function convertParagraphsToDivs(html: string): string {
-  const converted = html.replace(/<p>([\s\S]*?)<\/p>/gi, (_match, inner: string) => {
+  // Word paragraphs styled "Heading 1"-"Heading 6" (section labels like
+  // "GENERAL SCAN:", "FETAL ANATOMY:" in the clinic's real templates) come
+  // out of mammoth as bare <h1>-<h6>, which the report editor has no
+  // heading styles for — they render at the browser's default heading size
+  // instead of matching the surrounding body text, blowing up a handful of
+  // section labels to giant text while the rest of the page stays 12pt.
+  // mammoth also doesn't carry over the bold that the Heading style itself
+  // defines (only direct run-level bold survives), so it's added back here
+  // to match how these lines actually look in Word.
+  let converted = html.replace(/<h[1-6]>([\s\S]*?)<\/h[1-6]>/gi, (_match, inner: string) => {
     const trimmed = inner.replace(/&nbsp;/gi, "").trim()
     if (!trimmed) return "<div><br></div>"
-    return `<div>${inner}</div><div><br></div>`
+    return `<div><strong>${inner}</strong></div>`
   })
+
+  converted = converted.replace(/<p>([\s\S]*?)<\/p>/gi, (_match, inner: string) => {
+    const trimmed = inner.replace(/&nbsp;/gi, "").trim()
+    if (!trimmed) return "<div><br></div>"
+    return `<div>${inner}</div>`
+  })
+
+  // Collapse 2 or more consecutive blank divs into a single clean section break
+  converted = converted.replace(/(?:<div><br><\/div>\s*){2,}/gi, "<div><br></div>")
 
   const divRe = /<div>([\s\S]*?)<\/div>/gi
   let match: RegExpExecArray | null

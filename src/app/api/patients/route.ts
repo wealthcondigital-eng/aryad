@@ -4,6 +4,7 @@ import Patient from "@/models/Patient"
 import Study from "@/models/Study"
 import Notification from "@/models/Notification"
 import { autoCategory } from "@/lib/study-catalogue"
+import { syncPatientToRegister } from "@/lib/register-sync"
 
 type StudyInput = { name: string; category?: string }
 
@@ -139,6 +140,10 @@ export async function POST(req: NextRequest) {
     })
 
     await upsertCatalogue(studyEntries)
+
+    // Mirror the booking into this month's register sheet, so the month in the
+    // app always shows the imported Excel rows *and* everything booked since
+    await syncPatientToRegister(patient, body.entryBy ?? "")
 
     // Notify all doctors about new patient registration
     const studyNames = studyEntries.map((s) => s.name).join(", ")

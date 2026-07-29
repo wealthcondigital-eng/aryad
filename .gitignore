@@ -40,6 +40,11 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# ONLYOFFICE container runtime state + clinic font files (licensed, and large)
+/deploy/onlyoffice/data/
+/deploy/onlyoffice/fonts/*
+!/deploy/onlyoffice/fonts/.gitkeep
+
 # clinic template files & sensitive docs — do not push to GitHub
 /fwdsonographyformat/
 /fwdxrayformat/

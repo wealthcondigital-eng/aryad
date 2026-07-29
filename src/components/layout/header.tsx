@@ -84,9 +84,11 @@ function StatusBadge({ status }: { status: string }) {
 
 interface HeaderProps {
   onMenuClick: () => void
+  /** Keep the menu button visible on desktop (pages where the sidebar is a drawer). */
+  alwaysShowMenu?: boolean
 }
 
-export function Header({ onMenuClick }: HeaderProps) {
+export function Header({ onMenuClick, alwaysShowMenu = false }: HeaderProps) {
   const { user } = useRole()
   const router   = useRouter()
 
@@ -173,7 +175,7 @@ export function Header({ onMenuClick }: HeaderProps) {
   return (
     <>
       <header className="sticky top-0 z-10 flex h-14 items-center gap-4 border-b border-border bg-background px-4 lg:px-6">
-        <Button variant="ghost" size="icon" className="lg:hidden" onClick={onMenuClick}>
+        <Button variant="ghost" size="icon" className={alwaysShowMenu ? "" : "lg:hidden"} onClick={onMenuClick}>
           <Menu className="h-5 w-5" />
         </Button>
 

@@ -19,8 +19,9 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { useRole } from "@/lib/role-context"
-import { printShellHtml, reportHeaderHtml, reportTitleHtml, getDisplayTitle } from "@/lib/report-layout"
-import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, dataUrlToBytes, imageFormat, type SignatureLayout } from "@/lib/report-signatures"
+import { printShellHtml, reportHeaderHtml, reportTitleHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, MM_TO_PX, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
+import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, type SignatureLayout } from "@/lib/report-signatures"
+import { parseHtml, makeImageRun } from "@/lib/report-docx"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { motion } from "motion/react"
 
@@ -29,6 +30,8 @@ interface StudyEntry {
   category?: string
   heading?: string
   headingFont?: string
+  headerHeightPx?: number
+  footerHeightPx?: number
   reportStatus: "pending" | "in_progress" | "completed"
   reportBody?: string
   reportSlug?: string
@@ -52,6 +55,8 @@ interface PatientDoc {
   reportStatus: "pending" | "in_progress" | "completed"
   reportSlug?: string
   headingFont?: string
+  headerHeightPx?: number
+  footerHeightPx?: number
   createdAt: string
 }
 
@@ -62,6 +67,8 @@ interface ReportRow {
   study: string
   heading?: string   // doctor-edited report heading, if one was saved — falls back to `study` when absent
   headingFont?: string
+  headerHeightPx?: number
+  footerHeightPx?: number
   status: "pending" | "in_progress" | "completed"
   slug?: string
 }
@@ -76,6 +83,8 @@ function toRows(patients: PatientDoc[]): ReportRow[] {
       study:       s.name,
       heading:     s.heading,
       headingFont: s.headingFont,
+      headerHeightPx: s.headerHeightPx,
+      footerHeightPx: s.footerHeightPx,
       status:      s.reportStatus ?? "pending",
       slug:        s.reportSlug || (sidx === 0 ? p.reportSlug : undefined),
     }))
@@ -90,6 +99,10 @@ function dateOf(d: string) {
 }
 
 function fillReportHref(r: ReportRow, mode: "fill" | "edit" = "fill") {
+  return builtInReportHref(r, mode)
+}
+
+function builtInReportHref(r: ReportRow, mode: "fill" | "edit" = "fill") {
   const params = new URLSearchParams({
     id:      r.p._id,
     sidx:    String(r.sidx),
@@ -126,72 +139,45 @@ function StatusBadge({ status }: { status: string }) {
   return <span className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium bg-slate-100 text-slate-600"><AlertCircle className="h-3 w-3" />Pending</span>
 }
 
-// ── HTML parse helper (browser-only) ─────────────────────────────────────────
-
-type Seg = {
-  text: string; bold?: boolean; italic?: boolean; underline?: boolean
-  image?: string; imgWidth?: number; imgHeight?: number
-}
-
-function parseHtml(html: string): Seg[] {
-  const segs: Seg[] = []
-  if (typeof window === "undefined") return [{ text: html }]
-  const doc = new DOMParser().parseFromString(html, "text/html")
-  function walk(node: Node, fmt: { bold: boolean; italic: boolean; underline: boolean }) {
-    if (node.nodeType === 3) {
-      const t = node.textContent ?? ""
-      if (t) segs.push({ text: t, ...fmt })
-    } else if (node.nodeType === 1) {
-      const el = node as HTMLElement
-      const tag = el.tagName.toLowerCase()
-      if (tag === "img") {
-        const src = el.getAttribute("src") || ""
-        if (src) {
-          const w = parseFloat(el.style.width) || parseFloat(el.getAttribute("width") || "") || 0
-          const h = parseFloat(el.style.height) || parseFloat(el.getAttribute("height") || "") || 0
-          segs.push({ text: "", image: src, imgWidth: w, imgHeight: h })
-        }
-        return
-      }
-      const f = { ...fmt }
-      if (tag === "b" || tag === "strong") f.bold = true
-      if (tag === "i" || tag === "em")     f.italic = true
-      if (tag === "u")                     f.underline = true
-      el.childNodes.forEach((c) => walk(c, f))
-      if (["div", "p", "br", "li"].includes(tag)) segs.push({ text: "\n" })
-    }
-  }
-  doc.body.childNodes.forEach((n) => walk(n, { bold: false, italic: false, underline: false }))
-  return segs
-}
-
 // ── Generate DOCX base64 (fallback when no stored DOCX) ──────────────────────
 // Matches the clinic Word format: starts at the study heading, no letterhead.
+//
+// The body HTML is parsed with report-docx's own parseHtml/makeImageRun rather
+// than a private copy of them (this file used to carry its own cut-down
+// parseHtml). Same reason the print CSS is shared: a report downloaded from this
+// list and the same report downloaded from the editor must be the same document,
+// and image placement in particular — wrap mode, offsets — can only match if
+// both go through the one mapping.
 
 async function generateDocxBase64(r: ReportRow, reportHtml: string, signatureLayout: (SignatureLayout | null | undefined)[], heading?: string): Promise<string> {
-  const { Document, Packer, Paragraph, TextRun, ImageRun, AlignmentType, Table, TableRow, TableCell, WidthType, BorderStyle } = await import("docx")
+  const docx = await import("docx")
+  const { Document, Packer, Paragraph, TextRun, AlignmentType, Table, TableRow, TableCell, WidthType, BorderStyle } = docx
   const signatories = await fetchSignatories()
   const sigCells = await buildDocxSignatureCells(signatories, signatureLayout)
 
-  const cleanHtml = reportHtml.replace(
-    /<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1"
-  )
+  const cleanHtml = stripReportEditMarks(reportHtml)
 
   const makeParas = (html: string, size = 20) => {
     const segs = parseHtml(html)
     const paras: InstanceType<typeof Paragraph>[] = []
-    let line: InstanceType<typeof TextRun>[] = []
+    // Pictures wrapped in line with the text ride along in the same run list as
+    // the text, so the array holds either kind of run.
+    let line: (InstanceType<typeof TextRun> | ReturnType<typeof makeImageRun>)[] = []
     const flush = () => {
       paras.push(new Paragraph({ children: line.length ? line : [new TextRun({ text: "", size })], spacing: { after: 80 } }))
       line = []
     }
     segs.forEach((s) => {
       if (s.image) {
+        const run = makeImageRun(docx, s)
+        // In line with text stays in the line; everything else (block, squared,
+        // behind/in front of text) gets its own anchoring paragraph — floating
+        // runs then position themselves relative to it, exactly as in Word.
+        if (s.wrap === "inline") { line.push(run); return }
         if (line.length) flush()
-        const w = Math.min(s.imgWidth || 150, 450)
-        const h = s.imgWidth && s.imgHeight ? Math.round(w * (s.imgHeight / s.imgWidth)) : Math.min(s.imgHeight || 60, 300)
         paras.push(new Paragraph({
-          children: [new ImageRun({ type: imageFormat(s.image), data: dataUrlToBytes(s.image), transformation: { width: w, height: h } })],
+          children: [run],
+          ...(s.wrap === "top-bottom" ? { alignment: AlignmentType.CENTER } : {}),
           spacing: { after: 80 },
         }))
         return
@@ -215,7 +201,7 @@ async function generateDocxBase64(r: ReportRow, reportHtml: string, signatureLay
   const children = [
     new Paragraph({
       alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: (heading || r.study).toUpperCase(), bold: true, size: 26, underline: {} })],
+      children: [new TextRun({ text: heading || r.study.toUpperCase(), bold: true, size: 26, underline: {} })],
       spacing: { before: 120, after: 240 },
     }),
     ...makeParas(cleanHtml),
@@ -276,20 +262,29 @@ function downloadDocx(base64: string, filename: string) {
 
 // ── Fetch the report body for one study of a patient ─────────────────────────
 
-async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: string; heading: string; headingFont?: string; signatureLayout: (SignatureLayout | null | undefined)[] }> {
+async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: string; heading: string; headingFont?: string; patientBoxFont?: string; headerHeightPx?: number; footerHeightPx?: number; signatureLayout: (SignatureLayout | null | undefined)[] }> {
   // localStorage draft first (kept per study)
   const key = `aarya_report_${r.p.srNo || r.p.name.replace(/\s+/g, "_")}${r.sidx > 0 ? `_s${r.sidx}` : ""}`
   let body = ""
   let draftHeadingFont: string | undefined
+  let draftBoxFont: string | undefined
+  let draftHeaderPx: number | undefined
+  let draftFooterPx: number | undefined
   try {
     const saved = JSON.parse(localStorage.getItem(key) || "null")
     if (saved?.body) body = saved.body
     draftHeadingFont = saved?.headingFont || undefined
+    draftBoxFont = saved?.patientBoxFont || undefined
+    draftHeaderPx = saved?.headerPx || undefined
+    draftFooterPx = saved?.footerPx || undefined
   } catch {}
 
   let docx = ""
   let heading = r.heading || ""
   let headingFont = r.headingFont || draftHeadingFont
+  let patientBoxFont = draftBoxFont
+  let headerHeightPx = r.headerHeightPx || draftHeaderPx
+  let footerHeightPx = r.footerHeightPx || draftFooterPx
   let signatureLayout: (SignatureLayout | null | undefined)[] = []
   try {
     const res = await fetch(`/api/patients/${r.p._id}`)
@@ -299,10 +294,13 @@ async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: str
     docx = entry?.reportDocx || (r.sidx === 0 ? d.patient?.reportDocx : "") || ""
     heading = entry?.heading || d.patient?.heading || heading
     headingFont = entry?.headingFont || d.patient?.headingFont || headingFont
+    patientBoxFont = entry?.patientBoxFont || d.patient?.patientBoxFont || patientBoxFont
+    headerHeightPx = entry?.headerHeightPx || d.patient?.headerHeightPx || headerHeightPx
+    footerHeightPx = entry?.footerHeightPx || d.patient?.footerHeightPx || footerHeightPx
     signatureLayout = entry?.signatureLayout || []
   } catch {}
 
-  return { body, docx, heading, headingFont, signatureLayout }
+  return { body, docx, heading, headingFont, patientBoxFont, headerHeightPx, footerHeightPx, signatureLayout }
 }
 
 // ── Print a submitted report directly ────────────────────────────────────────
@@ -312,19 +310,21 @@ async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: str
 // spacing) — the "Print" button beside Edit and the one inside the View
 // modal must always produce the same output, whichever one you click first.
 async function printReportDirect(r: ReportRow) {
-  const { body: reportBody, heading, headingFont, signatureLayout } = await fetchStudyReport(r)
+  const { body: reportBody, heading, headingFont, patientBoxFont, headerHeightPx, footerHeightPx, signatureLayout } = await fetchStudyReport(r)
   const signatories = await fetchSignatories()
   const p = r.p
-  const title = heading || getDisplayTitle(r.study)
+  const title = heading || getDisplayTitle(r.study).toUpperCase()
 
-  const cleanBody = reportBody.replace(/<span\b[^>]*class="[^"]*\breport-edited\b[^"]*"[^>]*>([\s\S]*?)<\/span>/gi, "$1")
+  const cleanBody = stripReportEditMarks(reportBody)
   const body      = cleanBody || "<em style='color:#aaa;font-size:12px'>No report content saved.</em>"
 
   const html = printShellHtml(`Report – ${p.name}`, `
-${reportHeaderHtml({ name: p.name, refBy: p.referredBy, date: dateOf(p.createdAt), age: p.age, gender: p.gender, srNo: p.srNo || undefined })}
+${reportHeaderHtml({ name: p.name, refBy: p.referredBy, date: dateOf(p.createdAt), age: p.age, gender: p.gender, srNo: p.srNo || undefined }, patientBoxFont)}
 ${reportTitleHtml(title, headingFont)}
-<div style="font-size:10pt;line-height:1.6;">${body}</div>
-<div style="display:flex;gap:30px;margin-top:80px;page-break-inside:avoid;break-inside:avoid;">${signatureColumnsHtml(signatories, signatureLayout)}</div>`)
+<div class="doc-field" style="${REPORT_BODY_STYLE}">${body}</div>
+<div style="${REPORT_SIGS_STYLE}">${signatureColumnsHtml(signatories, signatureLayout)}</div>`, "",
+    (headerHeightPx ?? LETTERHEAD_TOP_PX) / MM_TO_PX,
+    (footerHeightPx ?? LETTERHEAD_BOTTOM_PX) / MM_TO_PX)
 
   const blob = new Blob([html], { type: "text/html" })
   const url  = URL.createObjectURL(blob)

@@ -4,6 +4,7 @@ import Bill from "@/models/Bill"
 import Patient from "@/models/Patient"
 import Study from "@/models/Study"
 import { autoCategory } from "@/lib/study-catalogue"
+import { syncPatientToRegister } from "@/lib/register-sync"
 
 function ensureStudies(patient: any) {
   if ((patient.studies?.length ?? 0) === 0 && patient.study) {
@@ -157,6 +158,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
 
     await patient.save()
+
+    // The bill's totals are what the monthly register's money columns show
+    await syncPatientToRegister(patient)
 
     if (Object.keys(identitySync).length > 0) {
       await Bill.updateMany({ patientId: patient._id, _id: { $ne: id } }, { $set: identitySync })
