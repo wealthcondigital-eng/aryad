@@ -287,18 +287,42 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   border-collapse: collapse;
   table-layout: fixed;
   width: 100%;
+  max-width: 100%;
   margin: 8px 0;
 }
 
+/* Padding in em, not px, so it shrinks with the table when a table is scaled
+   down to fit a page (see the `fontScale` attribute in tiptap-custom-table.ts):
+   a table whose text got smaller but kept 3px/6px of padding stops shrinking
+   long before it has to. 0.1875em/0.375em == the previous 3px/6px at the
+   report's 16px body size, so an unscaled table is pixel-identical. */
 .doc-field table td,
 .doc-field table th {
   border: 1px solid #9ca3af;
-  padding: 5px 8px;
-  min-width: 40px;
+  padding: 0.1875em 0.375em;
+  min-width: 0;
   position: relative;
-  vertical-align: top;
+  vertical-align: middle;
   overflow-wrap: break-word;
   word-break: break-word;
+}
+
+/* Only while a whole-table drag is in progress (or a Fit reset is animating
+   back). Without it a scaled table jumps between discrete text sizes as the
+   pointer moves; with it the shrink reads as one continuous motion, which is
+   what tells a doctor the drag is doing something at all. Short enough not to
+   feel laggy, and never on by default so nothing animates on page load. */
+.doc-field table.tbl-resizing {
+  transition: font-size 90ms linear;
+}
+
+.report-paper .doc-field table p,
+.report-paper .doc-field table div,
+.doc-field table p,
+.doc-field table div {
+  margin: 0 !important;
+  min-height: 0 !important;
+  line-height: 1.25;
 }
 
 /* Wider + brighter than prosemirror-tables' own 4px default so the drag

@@ -32,7 +32,7 @@ import type { Editor } from "@tiptap/core"
 import StarterKit from "@tiptap/starter-kit"
 import { TextStyleKit } from "@tiptap/extension-text-style"
 import TextAlign from "@tiptap/extension-text-align"
-import { Table } from "@tiptap/extension-table"
+import { CustomTable as Table, TABLE_FONT_SCALE_MIN, applyTableScaleToDom } from "@/lib/tiptap-custom-table"
 import { TableRowHeight } from "@/lib/tiptap-table-row-height"
 import TableCell from "@tiptap/extension-table-cell"
 import TableHeader from "@tiptap/extension-table-header"
@@ -41,7 +41,7 @@ import { SignatureExtension } from "@/lib/tiptap-signature-extension"
 import { ReportImageExtension } from "@/lib/tiptap-image-extension"
 import { fitInsertedSize } from "@/lib/report-image"
 import { prepareImageFile } from "@/lib/image-effects"
-import { PaginationExtension, computeBodyPageDecorations, paginationPluginKey } from "@/lib/tiptap-pagination-extension"
+import { PaginationExtension, computeBodyPageDecorations, paginationPluginKey, tableBodyRows, PAGE_SPACER_ROW_ATTR } from "@/lib/tiptap-pagination-extension"
 import { DecorationSet, type EditorView } from "@tiptap/pm/view"
 import type { Node as PMNode } from "@tiptap/pm/model"
 import { LineHeight } from "@/lib/tiptap-line-height-extension"
@@ -172,13 +172,14 @@ ${reportTitleHtml(study, titleFont)}
     footerPx !== undefined ? footerPx / MM_TO_PX : undefined)
 }
 
-// Floors for the whole-table corner drag. The column floor matches the
-// `cellMinWidth: 30` the Table extension is configured with, so a drag can't
-// shrink a column past what prosemirror-tables' own border drag allows; the row
-// floor is just under one 16px line at 1.5 line-height, so a row can always
-// still show its text.
-const MIN_TABLE_COL_PX = 30
-const MIN_TABLE_ROW_PX = 22
+// Floors for the whole-table corner drag: effectively none, matching the
+// `cellMinWidth: 1` the Table extension is configured with. A real floor here
+// would be a floor on the DRAG rather than on the table — the cell's own text
+// already stops a column or row from collapsing below what it needs to show
+// (both CSS widths and heights on table parts are minimums), so a bigger number
+// only ever stopped a doctor from pulling an oversized grid back down to size.
+const MIN_TABLE_COL_PX = 1
+const MIN_TABLE_ROW_PX = 1
 
 const FONT_FAMILIES = [
   "Arial", "Arial Black", "Arial Narrow", "Times New Roman", "Courier New",
@@ -499,7 +500,7 @@ function ReportEditorInner() {
       TextStyleKit.configure({ lineHeight: false }),
       LineHeight.configure({ types: ["paragraph"] }),
       TextAlign.configure({ types: ["paragraph"] }),
-      Table.configure({ resizable: true, handleWidth: 8, cellMinWidth: 30 }),
+      Table.configure({ resizable: true, handleWidth: 8, cellMinWidth: 1 }),
       TableRowHeight,
       TableHeader,
       TableCell,
@@ -772,12 +773,71 @@ function ReportEditorInner() {
     if (tr.docChanged) editor.view.dispatch(tr)
   }
 
+  // A table dragged back out to the full text column gets its width attribute
+  // CLEARED rather than pinned to that exact pixel count: pinned, it stops
+  // being a full-width table forever (it no longer follows a header/footer
+  // resize, a different paper width, or the print column), and the doctor has
+  // no way to undo the pin except by dragging to a pixel-perfect match.
+  const commitTableWidth = (tableEl: HTMLTableElement, targetWidth: number) => {
+    if (!editor) return
+    const pos = editor.view.posAtDOM(tableEl, 0)
+    const found = findTable(editor.state.doc.resolve(pos))
+    if (!found) return
+    const { node: table, pos: tablePos } = found
+    const available = tableEl.parentElement?.clientWidth ?? 0
+    const widthStr = available && targetWidth >= available - 1 ? null : `${Math.round(targetWidth)}px`
+    if ((table.attrs.width ?? null) === widthStr) return
+    const tr = editor.state.tr.setNodeMarkup(tablePos, undefined, { ...table.attrs, width: widthStr })
+    if (tr.docChanged) editor.view.dispatch(tr)
+  }
+
   // Commits the drag's final row heights onto the row nodes (see
   // TableRowHeight) — the vertical counterpart to commitTableColumnWidths, and
   // needed for the same reason: without writing them into the document, a
   // resized row is a DOM-only tweak that disappears the next time the report
   // is opened.
-  const commitTableRowHeights = (tableEl: HTMLTableElement, newHeights: number[]) => {
+  // ── Table type scale (the vertical half of a whole-table resize) ─────────
+  // Reads whatever scale the table is currently drawn at, from the element
+  // rather than the document: mid-drag the live value is an inline style that
+  // hasn't been committed yet, and both places spell it the same way.
+  const getTableFontScale = (tableEl: HTMLTableElement): number => {
+    const inline = tableEl.style.fontSize.match(/^([\d.]+)em$/)
+    if (inline) {
+      const n = parseFloat(inline[1])
+      if (Number.isFinite(n) && n > 0) return Math.min(1, n)
+    }
+    if (!editor) return 1
+    try {
+      const found = findTable(editor.state.doc.resolve(editor.view.posAtDOM(tableEl, 0)))
+      const k = found?.node.attrs.fontScale as number | null | undefined
+      return k && k > 0 ? Math.min(1, k) : 1
+    } catch { return 1 }
+  }
+
+  const applyTableFontScale = (tableEl: HTMLTableElement, scale: number) => {
+    applyTableScaleToDom(tableEl, scale)
+  }
+
+  const commitTableFontScale = (tableEl: HTMLTableElement, scale: number) => {
+    if (!editor) return
+    const pos = editor.view.posAtDOM(tableEl, 0)
+    const found = findTable(editor.state.doc.resolve(pos))
+    if (!found) return
+    const { node: table, pos: tablePos } = found
+    // Rounded to whole percent: a scale is a document value a doctor may read
+    // back in the saved HTML, and 0.7231 carries no more meaning than 0.72.
+    const next = scale >= 1 ? null : Math.round(scale * 100) / 100
+    if ((table.attrs.fontScale ?? null) === next) return
+    // Dispatching is enough to update the element too: the plugin in
+    // tiptap-custom-table.ts syncs every table's scale onto its own DOM after
+    // each update, from the document, which is what keeps the live drag's
+    // uncommitted style and the committed attribute from ever disagreeing.
+    editor.view.dispatch(editor.state.tr.setNodeMarkup(tablePos, undefined, { ...table.attrs, fontScale: next }))
+  }
+
+  // `null` for a row means "no height of its own" — the row is cleared back to
+  // whatever its text needs. `undefined` means "leave this row alone".
+  const commitTableRowHeights = (tableEl: HTMLTableElement, newHeights: (number | null)[]) => {
     if (!editor) return
     const pos = editor.view.posAtDOM(tableEl, 0)
     const found = findTable(editor.state.doc.resolve(pos))
@@ -787,11 +847,60 @@ function ReportEditorInner() {
     // `offset` is relative to the table's content start, the same basis
     // `start` is expressed in — so `start + offset` is the row's own position.
     table.forEach((rowNode, offset, index) => {
-      const height = newHeights[index]
-      if (height == null || rowNode.attrs.height === height) return
+      if (index >= newHeights.length) return
+      const height = newHeights[index] ?? null
+      if ((rowNode.attrs.height ?? null) === height) return
       tr.setNodeMarkup(start + offset, undefined, { ...rowNode.attrs, height })
     })
     if (tr.docChanged) editor.view.dispatch(tr)
+  }
+
+  // ── Reset a table to its natural size ────────────────────────────────────
+  // Drops every stored size on the table under the caret: the table node's own
+  // width, its type scale, the `colwidth` on each cell and the height on each
+  // row. Needed as a single action because the drag handles are proportional —
+  // once a table has been dragged several pages tall, dragging it back down
+  // means starting each new drag from a corner that has scrolled off screen, so
+  // "make this fit on one page again" was effectively unreachable. The table
+  // falls back to 100% width, full-size text, and rows exactly as tall as their
+  // text.
+  const resetTableSize = () => {
+    if (!editor) return
+    const found = findTable(editor.state.selection.$anchor)
+    if (!found) return
+    const { node: table, pos: tablePos, start } = found
+    const tr = editor.state.tr
+    // setNodeMarkup never changes a node's size, so every position taken from
+    // the pre-transaction document stays valid across all of these writes.
+    if (table.attrs.width != null || table.attrs.fontScale != null) {
+      tr.setNodeMarkup(tablePos, undefined, { ...table.attrs, width: null, fontScale: null })
+    }
+    table.forEach((rowNode, rowOffset) => {
+      if (rowNode.attrs.height != null) {
+        tr.setNodeMarkup(start + rowOffset, undefined, { ...rowNode.attrs, height: null })
+      }
+      rowNode.forEach((cellNode, cellOffset) => {
+        if (cellNode.attrs.colwidth) {
+          tr.setNodeMarkup(start + rowOffset + 1 + cellOffset, undefined, { ...cellNode.attrs, colwidth: null })
+        }
+      })
+    })
+    // Animated back to full size (rather than snapping) so it reads as "this
+    // table was un-shrunk", not "something replaced my table". The class has to
+    // go on BEFORE the dispatch, because the dispatch is what puts the table's
+    // type back — see the sync plugin in tiptap-custom-table.ts.
+    const tableEl = activeTableElRef.current
+    tableEl?.classList.add("tbl-resizing")
+    if (tr.docChanged) editor.view.dispatch(tr)
+    if (tableEl) {
+      window.setTimeout(() => {
+        tableEl.classList.remove("tbl-resizing")
+        updateTableHandlePos(tableEl)
+        schedulePaginate()
+      }, 160)
+      updateTableHandlePos(tableEl)
+    }
+    schedulePaginate()
   }
 
   // Whole-table resize, Word-style. Three handles share this one handler:
@@ -810,6 +919,22 @@ function ReportEditorInner() {
     if (!tableEl) return
     const target = e.currentTarget as HTMLElement
     try { target.setPointerCapture(e.pointerId) } catch { }
+
+    // Table page breaks are spacer rows INSIDE the table (see
+    // tiptap-pagination-extension), so they have to be out of the way while the
+    // drag measures and rewrites row heights — otherwise `tableEl.style.height`
+    // below is being asked to cover a gap that is about to be recomputed, and
+    // the real rows shrink to make room for a stale page break.
+    //
+    // Hidden, not cleared: dispatching a transaction to drop the decorations
+    // makes ProseMirror redraw the table, which detaches the very element (and
+    // colgroup) this drag is holding — the drag then resizes a node that is no
+    // longer in the document and silently does nothing. They go back on release,
+    // and schedulePaginate() then recomputes them against the final size.
+    const spacerRows = Array.from(
+      tableEl.querySelectorAll<HTMLElement>(`[${PAGE_SPACER_ROW_ATTR}]`)
+    )
+    spacerRows.forEach((sp) => { sp.style.display = "none" })
 
     // Ensure the table has colgroup and col elements. Word-imported or mammoth-generated
     // tables do not contain colgroups initially, which prevents column-width drag scaling.
@@ -837,15 +962,17 @@ function ReportEditorInner() {
       }
     }
 
-    const rows = Array.from(tableEl.rows) as HTMLElement[]
+    // Page-break spacer rows are view-only decorations, not real rows — they
+    // must not be scaled, and counting them would shift every row's height
+    // onto the wrong row node (see tableBodyRows).
+    const rows = tableBodyRows(tableEl) as HTMLElement[]
     if (!cols.length && !rows.length) return
 
     const startWidths = cols.map((c) => c.getBoundingClientRect().width)
     const startHeights = rows.map((r) => r.getBoundingClientRect().height)
     const startTableWidth = tableEl.getBoundingClientRect().width
     const startTableHeight = tableEl.getBoundingClientRect().height
-    const minTableWidth = Math.max(120, cols.length * MIN_TABLE_COL_PX)
-    const minTableHeight = Math.max(MIN_TABLE_ROW_PX, rows.length * MIN_TABLE_ROW_PX)
+    const minTableWidth = Math.max(5, cols.length * MIN_TABLE_COL_PX)
     const startX = e.clientX
     const startY = e.clientY
 
@@ -860,6 +987,7 @@ function ReportEditorInner() {
       editorDom.setAttribute("contenteditable", "false")
     }
     tableEl.setAttribute("contenteditable", "false")
+    tableEl.classList.add("tbl-resizing")   // animates the type scale (globals.css)
 
     // Strip any pre-existing inline style width/height from the table rows and cells
     // (e.g. from a mammoth-imported Word template) so they do not lock the layout
@@ -873,6 +1001,24 @@ function ReportEditorInner() {
       })
     })
 
+    // ── The vertical floor, and how to get below it ──────────────────────────
+    // With every stored height cleared, this is how short the rows can be while
+    // still showing their text at the CURRENT type scale. Dragging above it is
+    // ordinary row-height stretching. Dragging below it can only happen by
+    // making the table's own type smaller (see fontScale in
+    // tiptap-custom-table.ts) — a row height is a minimum in CSS, so without
+    // that the table simply refused to get shorter, which is exactly what made
+    // the vertical and diagonal handles look broken while the horizontal one
+    // worked.
+    void tableEl.offsetHeight
+    const floorHeights = rows.map((r) => r.getBoundingClientRect().height)
+    const floorHeight = floorHeights.reduce((a, b) => a + b, 0)
+    const startScale = getTableFontScale(tableEl)
+    const minTableHeight = Math.max(5, Math.round(floorHeight * (TABLE_FONT_SCALE_MIN / startScale)))
+    // Put the stretched heights back for the rest of the drag so the pointer
+    // stays on the corner it grabbed.
+    rows.forEach((r, i) => { if (startHeights[i] > floorHeights[i] + 1) r.style.height = `${startHeights[i]}px` })
+
     const sizesForDelta = (rawDx: number, rawDy: number) => {
       const dx = doX ? rawDx : 0
       const dy = doY ? rawDy : 0
@@ -880,48 +1026,73 @@ function ReportEditorInner() {
       const targetHeight = Math.max(minTableHeight, startTableHeight + dy)
       const xScale = startTableWidth ? targetWidth / startTableWidth : 1
       const yScale = startTableHeight ? targetHeight / startTableHeight : 1
+
+      // Below the text floor the rows stop carrying heights at all and the type
+      // scale takes over: every vertical measurement inside a table cell (line
+      // height, cell padding) is proportional to its font size, so the whole
+      // table shrinks by the same ratio the drag asked for.
+      const shrinking = doY && targetHeight < floorHeight - 1
+      const scale = shrinking && floorHeight
+        ? Math.min(1, Math.max(TABLE_FONT_SCALE_MIN, (startScale * targetHeight) / floorHeight))
+        : startScale
+
       return {
         targetWidth,
         targetHeight,
+        scale,
         widths: startWidths.map((w) => Math.max(MIN_TABLE_COL_PX, Math.round(w * xScale))),
-        heights: startHeights.map((h) => Math.max(MIN_TABLE_ROW_PX, Math.round(h * yScale))),
+        // `null` = let the text decide, which is what shrinking means here.
+        heights: shrinking
+          ? rows.map(() => null)
+          : startHeights.map((h) => Math.max(MIN_TABLE_ROW_PX, Math.round(h * yScale))),
       }
     }
 
     const onMove = (ev: PointerEvent) => {
-      const { targetWidth, targetHeight, widths, heights } = sizesForDelta(ev.clientX - startX, ev.clientY - startY)
+      const { targetWidth, targetHeight, scale, widths, heights } = sizesForDelta(ev.clientX - startX, ev.clientY - startY)
       if (doX) {
         tableEl.style.width = `${targetWidth}px`
         cols.forEach((c, i) => { c.style.width = `${widths[i]}px` })
       }
       if (doY) {
-        // Apply height to table element itself to force browser redraw
-        tableEl.style.height = `${targetHeight}px`
-        rows.forEach((r, i) => {
-          const hStr = `${heights[i]}px`
-          r.style.height = hStr
-          // Also set the height on all direct td/th children of this row to force Chrome to layout the height change live
-          Array.from(r.children).forEach((cell) => {
-            (cell as HTMLElement).style.height = hStr
+        applyTableFontScale(tableEl, scale)
+        if (heights[0] == null) {
+          // Shrinking past the floor: no heights, the type scale does the work.
+          tableEl.style.height = ""
+          rows.forEach((r) => {
+            r.style.height = ""
+            Array.from(r.children).forEach((cell) => { (cell as HTMLElement).style.height = "" })
           })
-        })
+        } else {
+          // Apply height to table element itself to force browser redraw
+          tableEl.style.height = `${targetHeight}px`
+          rows.forEach((r, i) => {
+            const hStr = `${heights[i]}px`
+            r.style.height = hStr
+            // Also set the height on all direct td/th children of this row to force Chrome to layout the height change live
+            Array.from(r.children).forEach((cell) => {
+              (cell as HTMLElement).style.height = hStr
+            })
+          })
+        }
         // Force a layout reflow on the table to repaint heights live
         void tableEl.offsetHeight
       }
       updateTableHandlePos(tableEl)
-      setDraggingTableSize({ width: targetWidth, height: targetHeight })
+      setDraggingTableSize({ width: targetWidth, height: Math.round(tableEl.getBoundingClientRect().height) })
     }
     const onUp = (ev: PointerEvent) => {
       try { target.releasePointerCapture(ev.pointerId) } catch { }
       window.removeEventListener("pointermove", onMove)
       window.removeEventListener("pointerup", onUp)
-      const { widths, heights } = sizesForDelta(ev.clientX - startX, ev.clientY - startY)
+      const { targetWidth, widths, heights, scale } = sizesForDelta(ev.clientX - startX, ev.clientY - startY)
 
       // Restore contenteditable states and clean up temporary inline styles
       if (editorDom) {
         editorDom.setAttribute("contenteditable", "true")
       }
       tableEl.removeAttribute("contenteditable")
+      tableEl.classList.remove("tbl-resizing")
       tableEl.style.height = ""
       rows.forEach((r) => {
         r.style.height = ""
@@ -930,8 +1101,35 @@ function ReportEditorInner() {
         })
       })
 
-      if (doX && cols.length) commitTableColumnWidths(tableEl, widths)
-      if (doY && rows.length) commitTableRowHeights(tableEl, heights)
+      // With every inline height gone, this reads what each row needs for its
+      // own text at the width it just ended up at. A row is only given a height
+      // of its own where the drag asked for MORE than that; asking for less is
+      // stored as "no height" instead, because a row height is a floor in CSS —
+      // writing height:1px on a 27px row does nothing except lock a meaningless
+      // number into the saved report and make the next shrink look broken.
+      void tableEl.offsetHeight
+      const naturalHeights = rows.map((r) => r.getBoundingClientRect().height)
+
+      if (doX) {
+        commitTableWidth(tableEl, targetWidth)
+        if (cols.length) commitTableColumnWidths(tableEl, widths)
+      }
+      if (doY) {
+        // Order matters: the type scale is part of the table node's attributes,
+        // and committing it re-renders the table — so the row heights measured
+        // above go in as part of the same document change, not against a table
+        // that is about to be redrawn underneath them.
+        commitTableFontScale(tableEl, scale)
+        if (rows.length) {
+          commitTableRowHeights(
+            tableEl,
+            heights.map((h, i) => (h != null && h > naturalHeights[i] + 1 ? h : null)),
+          )
+        }
+      }
+      // Page breaks back on (schedulePaginate below re-measures them against
+      // the size this drag just settled on).
+      spacerRows.forEach((sp) => { sp.style.display = "" })
       updateTableHandlePos(tableEl)
       setDraggingTableSize(null)
       schedulePaginate()
@@ -2349,6 +2547,13 @@ function ReportEditorInner() {
               className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
             >
               -Col
+            </button>
+            <button
+              type="button" title="Reset this table's size — clears the dragged column widths and row heights so it goes back to full width with rows only as tall as their text (click inside a table first)"
+              onMouseDown={(e) => { e.preventDefault(); resetTableSize() }}
+              className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
+            >
+              Fit
             </button>
             <Sep />
             <button

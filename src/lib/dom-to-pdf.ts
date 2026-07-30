@@ -8,7 +8,7 @@
 // the exported PDF shows whichever font the browser actually used — at the
 // cost of the PDF text no longer being selectable/searchable.
 
-import { LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, DEFAULT_REPORT_FONT, applyReportBodySpacing, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
+import { LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, DEFAULT_REPORT_FONT, applyReportBodySpacing, REPORT_BODY_STYLE, REPORT_SIGS_STYLE, paginateDomBlocks } from "@/lib/report-layout"
 
 const A4_WIDTH_PX = 794       // 210mm @ 96dpi — matches report-layout's mm/px basis
 const CONTENT_SIDE_PX = 56    // left/right content margin (Tailwind px-14)
@@ -45,29 +45,21 @@ export async function buildPagedPdfBlob(opts: {
       child === bodyEl ? Array.from(bodyEl.children) as HTMLElement[] : [child as HTMLElement]
     )
 
-    // Push any item that would fall in a page's footer band down to the top
-    // of the next sheet — the same page-break logic the live editor/report
-    // viewer use for their on-screen pagination.
-    const hostTop = host.getBoundingClientRect().top
-    let page = 0
-    for (const it of items) {
-      const r      = it.getBoundingClientRect()
-      const top    = r.top - hostTop
-      const bottom = top + r.height
-      const footerLimit = page * A4_PAGE_PX + (A4_PAGE_PX - bottomPx)
-      const pageTop      = page * A4_PAGE_PX + topPx
-      if (bottom > footerLimit + 1 && top > pageTop + 2) {
-        page++
-        const target = page * A4_PAGE_PX + topPx
-        const delta  = target - top
-        if (delta > 0) {
-          const base = parseFloat(getComputedStyle(it).marginTop) || 0
-          it.style.marginTop = `${base + delta}px`
-        }
-      }
-    }
-
-    const numPages = page + 1
+    // Push any item that would fall in a page's footer band down to the top of
+    // the next sheet, and break a table too tall for one sheet between its rows
+    // — literally the same function the editor and the view modal paginate with
+    // (paginateDomBlocks), so the PDF the patient receives breaks its pages
+    // exactly where the doctor saw them break. `stride` is the page height with
+    // no gap here: these sheets are stacked edge to edge for slicing, not drawn
+    // with the on-screen grey gutter between them.
+    const numPages = paginateDomBlocks({
+      items,
+      wrapTop: host.getBoundingClientRect().top,
+      stride: A4_PAGE_PX,
+      pagePx: A4_PAGE_PX,
+      topPx,
+      bottomPx,
+    })
     host.style.height = `${numPages * A4_PAGE_PX}px`
 
     const html2canvas = (await import("html2canvas")).default

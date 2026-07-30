@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { X, Printer, Share2, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, MM_TO_PX, applyReportBodySpacing, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
+import { reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, MM_TO_PX, applyReportBodySpacing, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE, paginateDomBlocks, stripPageSpacerRows } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
 import { SignatureColumns } from "@/components/signature-columns"
 
@@ -70,7 +70,10 @@ export function ReportViewModal({
   const A4_GAP_PX = 28
   const A4_STRIDE = A4_PAGE_PX + A4_GAP_PX
 
-  // Body HTML without the transient pagination margins (for print / share PDF).
+  // Body HTML without the transient pagination margins or in-table page-break
+  // spacer rows (for print / share PDF). Both are this view's own layout, not
+  // the report: printing them would bake this window's page breaks into the
+  // paper copy, and a stray empty row into the shared PDF.
   const readCleanBody = useCallback(() => {
     const el = bodyRef.current
     if (!el) return ""
@@ -81,6 +84,7 @@ export function ReportViewModal({
       n.removeAttribute("data-pgb-base")
       if (!n.getAttribute("style")) n.removeAttribute("style")
     })
+    stripPageSpacerRows(clone)
     return clone.innerHTML
   }, [])
 
@@ -93,36 +97,17 @@ export function ReportViewModal({
     if (bodyRef.current) Array.from(bodyRef.current.children).forEach((c) => items.push(c as HTMLElement))
     if (sigsRef.current)   items.push(sigsRef.current)
 
-    items.forEach((it) => {
-      if (it.dataset.pgb) {
-        it.style.marginTop = it.getAttribute("data-pgb-base") || ""
-        delete it.dataset.pgb
-        it.removeAttribute("data-pgb-base")
-      }
-    })
-
-    const wrapTop = wrap.getBoundingClientRect().top
-    let page = 0
-    for (const it of items) {
-      const r      = it.getBoundingClientRect()
-      const top    = r.top - wrapTop
-      const bottom = top + r.height
-      const footerLimit = page * A4_STRIDE + (A4_PAGE_PX - footerPx)
-      const pageTop     = page * A4_STRIDE + headerPx
-      if (bottom > footerLimit + 1 && top > pageTop + 2) {
-        page++
-        const target = page * A4_STRIDE + headerPx
-        const delta  = target - top
-        if (delta > 0) {
-          const base = parseFloat(getComputedStyle(it).marginTop) || 0
-          it.setAttribute("data-pgb-base", it.style.marginTop || "")
-          it.dataset.pgb = "1"
-          it.style.marginTop = `${base + delta}px`
-        }
-      }
-    }
-
-    setNumPages(page + 1)
+    // Same measuring rules as the editor's own pagination — including breaking a
+    // long table between its rows — so a report laid out to fit N pages there is
+    // laid out to fit the same N pages here (see paginateDomBlocks).
+    setNumPages(paginateDomBlocks({
+      items,
+      wrapTop: wrap.getBoundingClientRect().top,
+      stride: A4_STRIDE,
+      pagePx: A4_PAGE_PX,
+      topPx: headerPx,
+      bottomPx: footerPx,
+    }))
   }, [A4_STRIDE, headerPx, footerPx])
 
   const schedulePaginate = useCallback(() => {

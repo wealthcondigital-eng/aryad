@@ -85,6 +85,166 @@ export interface ReportHeaderInfo {
   srNo?: string | number
 }
 
+// ── Page breaks, for the plain-HTML views of a report ────────────────────────
+// The editor lays out its A4 sheets through ProseMirror decorations (see
+// tiptap-pagination-extension.ts). The view modal and the shared-PDF builder
+// have no ProseMirror — they drop saved HTML into a div — but they must land on
+// the SAME page breaks, or a report that was fitted onto one page in the editor
+// comes out over two when it's viewed, printed or sent to the patient.
+//
+// So the measuring rules live here once and both of those call it: every block
+// that would be drawn over the letterhead footer band moves to the next sheet,
+// and a table too tall to fit on any sheet is broken between its rows rather
+// than being allowed to run through the band (a table is a single block — there
+// is nowhere to push it to).
+
+export const PAGE_SPACER_ROW_ATTR = "data-pgb-spacer"
+
+export function isPageSpacerRow(el: Element | null | undefined): boolean {
+  return !!el && el.nodeType === 1 && (el as HTMLElement).hasAttribute(PAGE_SPACER_ROW_ATTR)
+}
+
+/**
+ * A table's own rows, in document order, ignoring page-break spacers.
+ *
+ * `tableEl.rows` is wrong for both halves of that: it also collects the rows of
+ * any table nested inside a cell, and it includes the spacer rows pagination
+ * injects — either one desynchronises DOM row `i` from row `i` of the document,
+ * which every row-height read and write depends on.
+ */
+export function reportTableRows(tableEl: HTMLTableElement): HTMLTableRowElement[] {
+  const rows: HTMLTableRowElement[] = []
+  const take = (el: Element) => {
+    if (el.tagName === "TR" && !isPageSpacerRow(el)) rows.push(el as HTMLTableRowElement)
+  }
+  Array.from(tableEl.children).forEach((child) => {
+    if (child.tagName === "TBODY" || child.tagName === "THEAD" || child.tagName === "TFOOT") {
+      Array.from(child.children).forEach(take)
+    } else take(child)
+  })
+  return rows
+}
+
+export function buildPageSpacerRow(height: number, colspan: number): HTMLTableRowElement {
+  const tr = document.createElement("tr")
+  tr.setAttribute(PAGE_SPACER_ROW_ATTR, "1")
+  tr.setAttribute("aria-hidden", "true")
+  tr.style.height = `${height}px`
+  const td = document.createElement("td")
+  td.setAttribute("colspan", String(Math.max(1, colspan)))
+  // Inline, so it beats the table-cell border/padding rules — a bordered spacer
+  // would draw a box across the letterhead band it exists to keep empty.
+  td.style.cssText = "border:0;padding:0;background:transparent;"
+  tr.appendChild(td)
+  return tr
+}
+
+/** Drops every page-break spacer row from a subtree (or an HTML string). */
+export function stripPageSpacerRows<T extends HTMLElement | string>(target: T): T {
+  if (typeof target === "string") {
+    if (typeof DOMParser === "undefined") return target
+    const doc = new DOMParser().parseFromString(target, "text/html")
+    doc.querySelectorAll(`[${PAGE_SPACER_ROW_ATTR}]`).forEach((n) => n.remove())
+    return doc.body.innerHTML as T
+  }
+  target.querySelectorAll(`[${PAGE_SPACER_ROW_ATTR}]`).forEach((n) => n.remove())
+  return target
+}
+
+function tableWithin(el: HTMLElement): HTMLTableElement | null {
+  if (el.tagName === "TABLE") return el as HTMLTableElement
+  return el.querySelector("table")
+}
+
+export interface DomPageBreakOpts {
+  /** Top-level blocks, in flow order (patient box, title, each body block, signatures). */
+  items: HTMLElement[]
+  /** Viewport top of the element the offsets are measured against. */
+  wrapTop: number
+  /** Sheet-to-sheet distance. Equals pagePx where sheets are drawn with no gap. */
+  stride: number
+  pagePx: number
+  topPx: number
+  bottomPx: number
+}
+
+/**
+ * Applies the page breaks and returns the number of sheets used.
+ * Pushes are recorded in `data-pgb` / `data-pgb-base` so a re-run measures the
+ * natural layout again instead of stacking margin on margin.
+ */
+export function paginateDomBlocks(o: DomPageBreakOpts): number {
+  const { items, wrapTop, stride, pagePx, topPx, bottomPx } = o
+  const pageContentPx = pagePx - topPx - bottomPx
+
+  // Undo the previous run first — every measurement below has to be of the
+  // natural layout.
+  items.forEach((it) => {
+    if (it.dataset.pgb) {
+      it.style.marginTop = it.getAttribute("data-pgb-base") || ""
+      delete it.dataset.pgb
+      it.removeAttribute("data-pgb-base")
+    }
+    const table = tableWithin(it)
+    if (table) stripPageSpacerRows(table)
+  })
+
+  let page = 0
+  for (const it of items) {
+    const table = tableWithin(it)
+    const rowEls = table ? reportTableRows(table) : []
+    const rowHeights = rowEls.map((r) => r.getBoundingClientRect().height)
+    const rowsHeight = rowHeights.reduce((a, b) => a + b, 0)
+
+    const rect = (table ?? it).getBoundingClientRect()
+    const top = rect.top - wrapTop
+    const height = table ? rowsHeight : rect.height
+
+    const footerLimit = page * stride + (pagePx - bottomPx)
+    const pageTop = page * stride + topPx
+
+    // What has to clear the band for this block to stay put: the whole block,
+    // or — for a table too tall for any sheet — just its first row, since the
+    // rest is going to be split between rows below anyway.
+    const mustClear = !table ? height : rowsHeight <= pageContentPx ? rowsHeight : (rowHeights[0] ?? 0)
+
+    let pushed = 0
+    if (top + mustClear > footerLimit + 1 && top > pageTop + 2) {
+      page++
+      const delta = page * stride + topPx - top
+      if (delta > 0) {
+        const base = parseFloat(getComputedStyle(it).marginTop) || 0
+        it.setAttribute("data-pgb-base", it.style.marginTop || "")
+        it.dataset.pgb = "1"
+        it.style.marginTop = `${base + delta}px`
+        pushed = delta
+      }
+    }
+
+    if (!table || !rowEls.length) continue
+
+    // Split between rows. Never before the first row — a break there is just
+    // "move the whole table", which the push above has already decided.
+    const colspan = rowEls[0].cells.length || 1
+    let cursor = top + pushed
+    rowEls.forEach((row, i) => {
+      const rowFooter = page * stride + (pagePx - bottomPx)
+      const rowPageTop = page * stride + topPx
+      if (i > 0 && cursor + rowHeights[i] > rowFooter + 1 && cursor > rowPageTop + 2) {
+        page++
+        const spacer = Math.round(page * stride + topPx - cursor)
+        if (spacer > 0) {
+          row.parentNode?.insertBefore(buildPageSpacerRow(spacer, colspan), row)
+          cursor += spacer
+        }
+      }
+      cursor += rowHeights[i]
+    })
+  }
+
+  return page + 1
+}
+
 // ── Print-window page shell ──────────────────────────────────────────────────
 // Reports print on the clinic's pre-printed letterhead stationery, so the
 // printed page must keep the top (logo) and bottom (address) bands empty.
@@ -185,8 +345,15 @@ td.pg-content .doc-field > :last-child, td.pg-content .body > :last-child{margin
    Deliberately scoped under .doc-field: the page shell (table.pg) must keep its
    own borderless layout, and its single tbody row has to stay breakable across
    sheets for the letterhead spacers to work. */
-td.pg-content .doc-field table{border-collapse:collapse;table-layout:fixed;width:100%;margin:8px 0;}
-td.pg-content .doc-field table td, td.pg-content .doc-field table th{border:1px solid #9ca3af;padding:5px 8px;vertical-align:top;overflow-wrap:break-word;word-break:break-word;}
+td.pg-content .doc-field table{border-collapse:collapse;table-layout:fixed;width:100%;max-width:100%;margin:8px 0;}
+/* Cell padding in em (== the editor's rule in globals.css): a table the doctor
+   scaled down to fit one page carries its scale as a font-size on the table
+   element itself, so anything sized in px here would stay full size on paper and
+   the printed table would come out taller than the page it was fitted to.
+   (No backticks in this block — see the note further down: the whole stylesheet
+   is one template literal.) */
+td.pg-content .doc-field table td, td.pg-content .doc-field table th{border:1px solid #9ca3af;padding:0.1875em 0.375em;vertical-align:middle;overflow-wrap:break-word;word-break:break-word;}
+td.pg-content .doc-field table p, td.pg-content .doc-field table div{margin:0 !important;min-height:0 !important;line-height:1.25;}
 /* A body row split across two sheets prints its text sliced in half — keep each
    one whole. Scoped the same way for the same reason: the shell's own <tr> must
    stay breakable. */
