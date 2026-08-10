@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useRef, useState, useEffect, useCallback } from "react"
+import { Suspense, useRef, useState, useEffect, useCallback, useMemo } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
 import Link from "next/link"
 import {
@@ -531,6 +531,16 @@ function ReportEditorInner() {
     ? signatories
     : signatories.slice(0, templateSignatureCount)
   useEffect(() => { fetchSignatories().then(setSignatories) }, [])
+
+  // The signatures the clinic has actually uploaded on the Add Signature page.
+  // Signatories with no image are left out rather than shown as blanks — there
+  // is nothing to place for them.
+  const savedSignatures = useMemo(
+    () => signatories
+      .filter((s) => !!s.signatureImage)
+      .map((s) => ({ name: s.name, image: s.signatureImage })),
+    [signatories]
+  )
 
   const BUILTIN_CATS: TemplateCategory[] = ["usg", "doppler", "xray", "pathology", "obstetric"]
   const customCategoryKeys = Object.keys(customTemplates).filter((c) => !(BUILTIN_CATS as string[]).includes(c))
@@ -1504,6 +1514,11 @@ function ReportEditorInner() {
 
   const openSignaturePad = () => {
     setSigPadKey((k) => k + 1)
+    // Re-read the signatures on the way in. They are otherwise fetched once
+    // when the editor mounts, so a signature uploaded or replaced on the Add
+    // Signature page while this report was open would offer the old image —
+    // exactly when the doctor is trying to place the new one.
+    void fetchSignatories().then(setSignatories).catch(() => {})
     setSigPadOpen(true)
   }
 
@@ -3294,7 +3309,7 @@ function ReportEditorInner() {
                   <RibbonGroup label="Illustrations">
                     <button
                       type="button"
-                      title="Insert a signature (draw, type or upload). Once placed, click it for the same picture toolbar as an image — text wrapping (Behind Text / In Front of Text) and Glow Edges to remove a scanned signature's white background."
+                      title="Insert a signature — pick one already saved on the Add Signature page, or draw, type or upload a different one. Once placed, click it for the same picture toolbar as an image: text wrapping (Behind Text / In Front of Text) and Glow Edges to remove a scanned signature's white background."
                       onMouseDown={(e) => { e.preventDefault(); openSignaturePad() }}
                       className="h-7 px-2 flex items-center gap-1 rounded hover:bg-gray-200 text-gray-700 transition-colors text-[11px] font-medium"
                     >
@@ -4127,6 +4142,10 @@ function ReportEditorInner() {
         open={sigPadOpen}
         onClose={() => setSigPadOpen(false)}
         onInsert={insertSignature}
+        // Whatever the clinic has already uploaded on the Add Signature page,
+        // offered as one-click options — with a picker when more than one
+        // radiologist has a signature stored.
+        saved={savedSignatures}
       />
     </div>
   )

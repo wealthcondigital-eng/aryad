@@ -169,21 +169,63 @@ function TypePad({ onChange }: { onChange: (dataUrl: string | null) => void }) {
 // server's request-size limit and fail the save silently.
 const MAX_UPLOAD_DIM = 900
 
-// A doctor's already-uploaded master signature (from the Signatures admin
-// page) shown as a one-click option — filling out a report shouldn't force
-// redrawing or re-uploading the same signature every single time. Radix only
-// mounts the active tab's content, so this only fires (and only overwrites
-// `pending`) while the "Saved" tab is actually selected.
-function SavedPad({ image, label, onChange }: { image: string; label?: string; onChange: (dataUrl: string | null) => void }) {
-  useEffect(() => { onChange(image) }, [image, onChange])
+export interface SavedSignature {
+  name: string
+  image: string
+}
+
+/**
+ * The signatures already uploaded on the Add Signature page, offered as
+ * one-click options.
+ *
+ * Filling in a report shouldn't mean redrawing or re-uploading the same
+ * signature every time — and when the clinic has more than one signing
+ * radiologist, the doctor writing the report has to be able to say WHICH one
+ * goes on this report. So every saved signature is listed and one is picked,
+ * rather than a single image being assumed.
+ *
+ * Radix only mounts the active tab's content, so this only touches `pending`
+ * while the "Saved" tab is actually selected.
+ */
+function SavedPad({ saved, onChange }: { saved: SavedSignature[]; onChange: (dataUrl: string | null) => void }) {
+  const [selected, setSelected] = useState(0)
+  const current = saved[selected] ?? saved[0]
+
+  useEffect(() => { onChange(current?.image ?? null) }, [current, onChange])
+
   return (
     <div className="space-y-2">
       <div className="w-full h-40 rounded-lg border-2 border-dashed border-gray-300 bg-white flex items-center justify-center overflow-hidden">
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={image} alt={label ? `${label} signature` : "Saved signature"} className="max-h-36 max-w-full object-contain" />
+        {current && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={current.image} alt={`${current.name} signature`} className="max-h-36 max-w-full object-contain" />
+        )}
       </div>
+
+      {saved.length > 1 ? (
+        <div className="grid grid-cols-2 gap-2">
+          {saved.map((s, i) => (
+            <button
+              key={s.name + i}
+              type="button"
+              onClick={() => setSelected(i)}
+              className={`flex items-center gap-2 rounded-lg border px-2 py-1.5 text-left transition-colors ${
+                i === selected ? "border-blue-500 bg-blue-50" : "border-gray-200 hover:border-blue-300"
+              }`}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={s.image} alt="" className="h-7 w-14 shrink-0 object-contain" />
+              <span className="truncate text-[11px] font-medium text-gray-700">{s.name}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       <p className="text-xs text-gray-500 text-center">
-        {label ? `${label}'s saved signature` : "Previously saved signature"} — click Insert to use it as-is, or switch tabs to draw/type/upload a different one instead.
+        {saved.length > 1
+          ? "Pick whose signature to place, then click Insert"
+          : `${current?.name ?? "Saved"} — click Insert to use it as-is`}
+        , or switch tabs to draw, type or upload a different one.
       </p>
     </div>
   )
@@ -258,16 +300,15 @@ export interface SignatureInsertResult {
 }
 
 export function SignaturePadDialog({
-  open, onClose, onInsert, savedImage, savedLabel,
+  open, onClose, onInsert, saved = [],
 }: {
   open: boolean
   onClose: () => void
   onInsert: (result: SignatureInsertResult) => void
-  // The signatory's already-uploaded master signature (set once on the
-  // Signatures admin page) — when present, it's offered as a one-click
-  // default instead of forcing a fresh draw/type/upload every report.
-  savedImage?: string
-  savedLabel?: string
+  // Signatures already uploaded on the Add Signature page. When there are any,
+  // they open as the default tab: re-drawing a signature the clinic has
+  // already stored is work nobody should have to repeat per report.
+  saved?: SavedSignature[]
 }) {
   const [pending, setPending] = useState<string | null>(null)
   const [inserting, setInserting] = useState(false)
@@ -296,17 +337,19 @@ export function SignaturePadDialog({
           </DialogTitle>
         </DialogHeader>
 
-        <Tabs defaultValue={savedImage ? "saved" : "draw"}>
-          <TabsList className={savedImage ? "grid w-full grid-cols-4" : "grid w-full grid-cols-3"}>
-            {savedImage && (
-              <TabsTrigger value="saved" className="gap-1.5 text-xs"><CheckCircle2 className="h-3.5 w-3.5" />Saved</TabsTrigger>
+        <Tabs defaultValue={saved.length ? "saved" : "draw"}>
+          <TabsList className={saved.length ? "grid w-full grid-cols-4" : "grid w-full grid-cols-3"}>
+            {saved.length > 0 && (
+              <TabsTrigger value="saved" className="gap-1.5 text-xs">
+                <CheckCircle2 className="h-3.5 w-3.5" />Saved
+              </TabsTrigger>
             )}
             <TabsTrigger value="draw" className="gap-1.5 text-xs"><PenTool className="h-3.5 w-3.5" />Draw</TabsTrigger>
             <TabsTrigger value="type" className="gap-1.5 text-xs"><Type className="h-3.5 w-3.5" />Type</TabsTrigger>
             <TabsTrigger value="upload" className="gap-1.5 text-xs"><Upload className="h-3.5 w-3.5" />Upload</TabsTrigger>
           </TabsList>
-          {savedImage && (
-            <TabsContent value="saved"><SavedPad image={savedImage} label={savedLabel} onChange={setPending} /></TabsContent>
+          {saved.length > 0 && (
+            <TabsContent value="saved"><SavedPad saved={saved} onChange={setPending} /></TabsContent>
           )}
           <TabsContent value="draw"><DrawPad onChange={setPending} /></TabsContent>
           <TabsContent value="type"><TypePad onChange={setPending} /></TabsContent>

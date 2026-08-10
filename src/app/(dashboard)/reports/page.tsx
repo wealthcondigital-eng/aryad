@@ -25,7 +25,7 @@ import { parseHtml, makeImageRun } from "@/lib/report-docx"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { motion } from "motion/react"
 import { useConfirm, showAlert } from "@/components/confirm-dialog"
-import { reportShareUrl, resolveReportShareUrl } from "@/lib/share-links"
+import { shareReportOnWhatsApp } from "@/lib/share-whatsapp"
 
 interface StudyEntry {
   name: string
@@ -121,21 +121,16 @@ function builtInReportHref(r: ReportRow, mode: "fill" | "edit" = "fill") {
   return `/reports/new?${params}`
 }
 
-function pdfUrlFor(r: ReportRow) {
-  return reportShareUrl(window.location.origin, { slug: r.slug, patientId: r.p._id, sidx: r.sidx })
-}
-
 async function whatsAppShare(r: ReportRow) {
-  // Opened before the await, or a popup blocker eats the window.
-  const win = window.open("", "_blank")
-  const url = await resolveReportShareUrl(window.location.origin, {
-    slug: r.slug, patientId: r.p._id, sidx: r.sidx,
+  // Converts the saved report to a PDF and stores it before composing the
+  // message, so the link the patient taps always has a real PDF behind it.
+  const res = await shareReportOnWhatsApp({
+    patientId: r.p._id,
+    sidx: r.sidx,
+    patientName: r.p.name,
+    studyName: r.study,
   })
-  const msg = `Dear ${r.p.name},\n\nYour *${r.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${url}`
-  // WhatsApp Web on the logged-in account; the sender picks the recipient.
-  const wa = `https://wa.me/?text=${encodeURIComponent(msg)}`
-  if (win) win.location.href = wa
-  else window.open(wa, "_blank")
+  if (!res.ok) showAlert({ title: "Couldn't share the report", message: res.error ?? "" })
 }
 
 function StatusBadge({ status }: { status: string }) {

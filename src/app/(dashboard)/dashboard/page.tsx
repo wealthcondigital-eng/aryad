@@ -18,7 +18,8 @@ import { useRole } from "@/lib/role-context"
 import { motion } from "motion/react"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { BillDocViewer } from "@/components/bill-doc-viewer"
-import { resolveReportShareUrl } from "@/lib/share-links"
+import { shareReportOnWhatsApp } from "@/lib/share-whatsapp"
+import { showAlert } from "@/components/confirm-dialog"
 
 interface StudyEntry {
   name: string
@@ -61,20 +62,16 @@ function studiesOf(p: PatientDoc): StudyEntry[] {
 }
 
 async function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
-  const entry  = studiesOf(p)[sidx]
-  // Opened before the await, or a popup blocker eats the window (see the same
-  // pattern on the patients list).
-  const win = window.open("", "_blank")
-  const pdfUrl = await resolveReportShareUrl(window.location.origin, {
-    slug: entry?.reportSlug || (sidx === 0 ? p.reportSlug : undefined),
+  const entry = studiesOf(p)[sidx]
+  // Converts the saved report to a PDF and stores it before composing the
+  // message, so the link the patient taps always has a real PDF behind it.
+  const res = await shareReportOnWhatsApp({
     patientId: p._id,
     sidx,
+    patientName: p.name,
+    studyName: entry?.name ?? p.study,
   })
-  const msg = `Dear ${p.name},\n\nYour *${entry?.name ?? p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
-  // WhatsApp Web on the logged-in account; the sender picks the recipient.
-  const wa = `https://wa.me/?text=${encodeURIComponent(msg)}`
-  if (win) win.location.href = wa
-  else window.open(wa, "_blank")
+  if (!res.ok) showAlert({ title: "Couldn't share the report", message: res.error ?? "" })
 }
 
 function dateOf(d: string) {

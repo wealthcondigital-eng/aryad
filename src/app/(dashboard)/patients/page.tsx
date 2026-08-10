@@ -27,7 +27,8 @@ import { ReportViewModal } from "@/components/report-view-modal"
 import { motion } from "motion/react"
 import { BillDocViewer } from "@/components/bill-doc-viewer"
 import { ComboInput, StudyComboInput, INITIAL_DOCTORS, getSavedDoctors, saveDoctor } from "@/components/combo-input"
-import { resolveReportShareUrl } from "@/lib/share-links"
+import { shareReportOnWhatsApp } from "@/lib/share-whatsapp"
+import { showAlert } from "@/components/confirm-dialog"
 
 interface RegistrationEditEntry {
   editor: string
@@ -148,19 +149,15 @@ function billHrefFor(p: PatientDoc) {
 
 async function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
   const entry = studiesOf(p)[sidx]
-  // Opened up front, while this is still the click's own turn: a popup blocker
-  // discards a window.open issued after an await.
-  const win = window.open("", "_blank")
-  const url = await resolveReportShareUrl(window.location.origin, {
-    slug: entry?.reportSlug || (sidx === 0 ? p.reportSlug : undefined),
+  // Converts the saved report to a PDF and stores it before composing the
+  // message, so the link the patient taps always has a real PDF behind it.
+  const res = await shareReportOnWhatsApp({
     patientId: p._id,
     sidx,
+    patientName: p.name,
+    studyName: entry?.name ?? p.study,
   })
-  const msg = `Dear ${p.name},\n\nYour *${entry?.name ?? p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${url}`
-  // WhatsApp Web on the logged-in account; the sender picks the recipient.
-  const wa = `https://wa.me/?text=${encodeURIComponent(msg)}`
-  if (win) win.location.href = wa
-  else window.open(wa, "_blank")
+  if (!res.ok) showAlert({ title: "Couldn't share the report", message: res.error ?? "" })
 }
 
 // Shared column template so rows stay aligned across separate patient cards
