@@ -12,6 +12,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { useRole } from "@/lib/role-context"
+import { useConfirm } from "@/components/confirm-dialog"
 import { motion } from "motion/react"
 import { STUDY_CATEGORIES, autoCategory } from "@/lib/study-catalogue"
 import { categoryColor } from "@/components/combo-input"
@@ -31,6 +32,7 @@ interface Stats {
 }
 
 export default function StudiesPage() {
+  const { confirm } = useConfirm()
   const { user } = useRole()
   const isAdmin  = user?.role === "admin"
   // All staff (receptionist, doctor, admin) can add studies and fix categories
@@ -142,7 +144,12 @@ export default function StudiesPage() {
   }
 
   const handleDeleteStudy = async (s: StudyDoc) => {
-    if (!confirm(`Remove "${s.name}" from the studies list?`)) return
+    if (!(await confirm({
+      title: "Remove study?",
+      message: `"${s.name}" will be removed from the studies list.`,
+      confirmLabel: "Remove",
+      danger: true,
+    }))) return
     setDeletingId(s._id)
     try {
       const res = await fetch(`/api/studies/${s._id}`, { method: "DELETE" })

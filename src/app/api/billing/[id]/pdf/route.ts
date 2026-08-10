@@ -1,24 +1,18 @@
 import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import Bill from "@/models/Bill"
+import { pdfResponse, pdfFileName, pdfUnavailableResponse } from "@/lib/pdf-response"
 
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+// GET /api/billing/:id/pdf — public, same as the report links: a receipt sent
+// on WhatsApp is opened by the patient, not by a logged-in user.
+export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params
     await connectDB()
     const bill = await Bill.findById(id).select("billPdf patientName")
-    if (!bill || !bill.billPdf) {
-      return NextResponse.json({ error: "PDF not available" }, { status: 404 })
-    }
-    const buffer = Buffer.from(bill.billPdf, "base64")
-    const safeName = (bill.patientName || "Receipt").replace(/\s+/g, "_")
-    const fileName = `${safeName}_Receipt.pdf`
-    return new NextResponse(buffer, {
-      headers: {
-        "Content-Type": "application/pdf",
-        "Content-Disposition": `inline; filename="${fileName}"`,
-      },
-    })
+    if (!bill?.billPdf) return pdfUnavailableResponse("This receipt isn't ready yet.")
+
+    return pdfResponse(bill.billPdf, pdfFileName(bill.patientName, "Receipt"), req)
   } catch {
     return NextResponse.json({ error: "Server error" }, { status: 500 })
   }

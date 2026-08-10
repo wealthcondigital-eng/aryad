@@ -99,7 +99,7 @@ export function SignatureColumns({
   }
 
   const renderText = (index: 0 | 1, s?: Signatory, layout?: SignatureLayout | null) => {
-    if (!s) return <div />
+    if (!s || layout?.hiddenSignatory) return <div />
     return (
       <div>
         <p className="font-bold text-[13px] uppercase flex items-center gap-1.5">
@@ -112,19 +112,31 @@ export function SignatureColumns({
     )
   }
 
-  const hasAnyImg = (s0 && !l0?.hidden && l0?.overrideImage) || (s1 && !l1?.hidden && l1?.overrideImage)
+  const hasAnyImg = (s0 && !l0?.hidden && !l0?.hiddenSignatory && l0?.overrideImage) || (s1 && !l1?.hidden && !l1?.hiddenSignatory && l1?.overrideImage)
+
+  // Keep the two signatories locked to equal-width columns with inline layout
+  // geometry. This block is rendered while async report/signatory data is
+  // hydrating, and relying only on generated utility CSS allowed a refreshed
+  // editor to briefly (and sometimes permanently) resolve the grid tracks as
+  // max-content, placing both doctors immediately beside one another.
+  const columnsStyle: React.CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)",
+    columnGap: "32px",
+    width: "100%",
+  }
 
   return (
-    <div className="flex flex-col w-full">
+    <div className="flex flex-col w-full" style={{ width: "100%" }}>
       {/* Signature Images Row — only renders if an image actually exists */}
       {hasAnyImg && (
-        <div className="grid grid-cols-2 gap-8 items-end mb-1">
+        <div className="grid grid-cols-2 gap-8 items-end mb-1" style={columnsStyle}>
           {renderImg(0, s0, l0)}
           {renderImg(1, s1, l1)}
         </div>
       )}
       {/* Doctor Names/Credentials Row */}
-      <div className="grid grid-cols-2 gap-8">
+      <div className="grid grid-cols-2 gap-8" style={columnsStyle}>
         {renderText(0, s0, l0)}
         {renderText(1, s1, l1)}
       </div>

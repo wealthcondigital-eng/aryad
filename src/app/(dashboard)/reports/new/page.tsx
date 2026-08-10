@@ -8,16 +8,20 @@ import {
   Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
   List, Share2, Pencil, LayoutTemplate, Minus, Plus, ChevronDown, ChevronUp,
   ChevronLeft, ChevronRight,
-  Search, X, Upload, PenTool, Table2, Trash2, GripVertical, Move,
-  Image as ImageIcon,
+  Search, X, Upload, PenTool, Trash2, GripVertical, Move, Printer,
+  Image as ImageIcon, Strikethrough, Undo2, Redo2,
+  Superscript as SuperscriptIcon, Subscript as SubscriptIcon,
+  IndentIncrease, IndentDecrease, SeparatorHorizontal, Paintbrush,
+  Search as SearchIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { StudyComboInput } from "@/components/combo-input"
 import { useRole } from "@/lib/role-context"
+import { useConfirm } from "@/components/confirm-dialog"
 import { motion, AnimatePresence } from "framer-motion"
 import { REPORT_TEMPLATES, ReportTemplate, TemplateCategory } from "@/lib/report-templates"
 import {
-  reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle,
+  reportHeaderHtml, reportTitleHtml, printShellHtml,
   LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, MM_TO_PX,
   BAND_HEIGHT_MIN_PX, BAND_HEIGHT_MAX_PX, REPORT_BODY_STYLE, REPORT_SIGS_STYLE,
   DEFAULT_REPORT_FONT,
@@ -25,13 +29,26 @@ import {
 import { fetchSignatories, signatureColumnsHtml, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
 import { buildReportDocxBase64 } from "@/lib/report-docx"
 import { TemplateCard, categoryTabLabel } from "@/components/template-card"
+import { stripTrailingSignatureBlock, countSignatoriesIn } from "@/lib/doc-import"
 import { SignatureColumns } from "@/components/signature-columns"
+import { TableGridPicker } from "@/components/table-grid-picker"
+import { AddTemplateDialog } from "@/components/add-template-dialog"
+import { FontPicker } from "@/components/font-picker"
+import { EditorMenus } from "@/components/editor-menus"
+import { ColorPicker, SymbolPicker } from "@/components/editor-pickers"
+import { ParagraphMenu } from "@/components/paragraph-menu"
+import { FindReplacePanel } from "@/components/find-replace-panel"
+import { QuickPhrases } from "@/components/quick-phrases"
+import { RibbonTabBar, RibbonBar, RibbonGroup, type RibbonTab } from "@/components/ribbon"
+import { StyleGallery, type ReportStyle } from "@/components/style-gallery"
 import { SignaturePadDialog } from "@/components/signature-pad-dialog"
 import { useEditor, EditorContent } from "@tiptap/react"
 import type { Editor } from "@tiptap/core"
 import StarterKit from "@tiptap/starter-kit"
 import { TextStyleKit } from "@tiptap/extension-text-style"
 import TextAlign from "@tiptap/extension-text-align"
+import Superscript from "@tiptap/extension-superscript"
+import Subscript from "@tiptap/extension-subscript"
 import { CustomTable as Table, TABLE_FONT_SCALE_MIN, applyTableScaleToDom } from "@/lib/tiptap-custom-table"
 import { TableRowHeight } from "@/lib/tiptap-table-row-height"
 import TableCell from "@tiptap/extension-table-cell"
@@ -45,7 +62,17 @@ import { PaginationExtension, computeBodyPageDecorations, paginationPluginKey, t
 import { DecorationSet, type EditorView } from "@tiptap/pm/view"
 import type { Node as PMNode } from "@tiptap/pm/model"
 import { LineHeight } from "@/lib/tiptap-line-height-extension"
+import { ParagraphFormat } from "@/lib/tiptap-paragraph-format-extension"
+import { ListStyle, BULLET_STYLES, ORDERED_STYLES } from "@/lib/tiptap-list-style-extension"
+import { CellFormat } from "@/lib/tiptap-cell-format-extension"
+import { ReportSearch } from "@/lib/tiptap-search-extension"
+import {
+  TrackChanges, TrackInsertMark, TrackDeleteMark, acceptTrackedHtml,
+} from "@/lib/tiptap-track-changes-extension"
+import { CommentMark, stripComments } from "@/lib/tiptap-comment-extension"
 import { TableMap, findTable } from "@tiptap/pm/tables"
+import { DOMSerializer } from "@tiptap/pm/model"
+import { reportShareUrl } from "@/lib/share-links"
 
 // ── HTML ↔ DOCX formatting helpers ───────────────────────────────────────────
 
@@ -159,17 +186,23 @@ function buildPrintHtml(opts: {
   signatureLayouts?: (SignatureLayout | null | undefined)[]
   headerPx?: number
   footerPx?: number
+  /** Sheets the editor's own pagination settled on — printed as "Page N of M". */
+  pageCount?: number
+  /** Blank lines the doctor left above the patient box — Word prints these. */
+  topSpacerPx?: number
 }): string {
-  const { patient, study, body, age, gender, refBy, date, srNo, titleFont, patientBoxFont, signatories, signatureLayouts, headerPx, footerPx } = opts
+  const { patient, study, body, age, gender, refBy, date, srNo, titleFont, patientBoxFont, signatories, signatureLayouts, headerPx, footerPx, pageCount, topSpacerPx } = opts
   const displayDate = date || new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })
 
   return printShellHtml(`Report – ${patient}`, `
 ${reportHeaderHtml({ name: patient, refBy, date: displayDate, age, gender, srNo }, patientBoxFont)}
+${topSpacerPx ? `<div style="height:${topSpacerPx}px"></div>` : ""}
 ${reportTitleHtml(study, titleFont)}
 <div class="doc-field body" style="${REPORT_BODY_STYLE}">${body}</div>
 <div style="${REPORT_SIGS_STYLE}">${signatureColumnsHtml(signatories, signatureLayouts)}</div>`, "",
     headerPx !== undefined ? headerPx / MM_TO_PX : undefined,
-    footerPx !== undefined ? footerPx / MM_TO_PX : undefined)
+    footerPx !== undefined ? footerPx / MM_TO_PX : undefined,
+    pageCount)
 }
 
 // Floors for the whole-table corner drag: effectively none, matching the
@@ -180,15 +213,6 @@ ${reportTitleHtml(study, titleFont)}
 // only ever stopped a doctor from pulling an oversized grid back down to size.
 const MIN_TABLE_COL_PX = 1
 const MIN_TABLE_ROW_PX = 1
-
-const FONT_FAMILIES = [
-  "Arial", "Arial Black", "Arial Narrow", "Times New Roman", "Courier New",
-  "Georgia", "Verdana", "Calibri", "Cambria", "Candara", "Consolas", "Constantia",
-  "Corbel", "Tahoma", "Trebuchet MS", "Segoe UI", "Segoe Print", "Segoe Script",
-  "Garamond", "Book Antiqua", "Bookman Old Style", "Century Gothic",
-  "Franklin Gothic Medium", "Palatino Linotype", "Lucida Sans Unicode",
-  "Lucida Console", "Comic Sans MS", "Impact", "Rockwell", "Perpetua"
-]
 
 // ── Formatting toolbar button ─────────────────────────────────────────────────
 
@@ -320,6 +344,7 @@ function EditableInfoLine({
 
 function ReportEditorInner() {
   const { user } = useRole()
+  const { confirm, notify } = useConfirm()
   const sp = useSearchParams()
   const router = useRouter()
 
@@ -399,16 +424,91 @@ function ReportEditorInner() {
     return "usg"
   })
   const [templateSearch, setTemplateSearch] = useState("")
-  // Clinic-added templates (imported from Word via the Add Template page),
-  // merged in alongside the built-in bundled ones. This picker is browse/apply
-  // only — adding or removing templates happens on the Add Template page.
+  // Clinic-added templates (imported from Word here or on the Add Template
+  // page), merged in alongside the built-in bundled ones. Removing one still
+  // happens on that page; this panel adds and applies.
   // Keyed by category string rather than the narrow 4-value union, since the
   // clinic can create its own categories from that page.
   const [customTemplates, setCustomTemplates] = useState<Record<string, ReportTemplate[]>>({})
+  // Built-ins the clinic removed from the Add Template page — bundled in the app
+  // but no longer offered here.
+  const [hiddenBuiltIns, setHiddenBuiltIns] = useState<Set<string>>(new Set())
   const [templatesLoaded, setTemplatesLoaded] = useState(false)
+  const [addTemplateOpen, setAddTemplateOpen] = useState(false)
 
+  // The templates panel sticks below the toolbar and scrolls on its own, so how
+  // far down it starts is exactly where the stuck toolbar ends. Measured rather
+  // than hard-coded, since the toolbar wraps to two rows on narrow windows.
+  const stickyHeaderRef = useRef<HTMLDivElement | null>(null)
+  const [toolbarBottom, setToolbarBottom] = useState(90)
   useEffect(() => {
-    if (!showTemplates || templatesLoaded) return
+    const el = stickyHeaderRef.current
+    if (!el) return
+    const measure = () => {
+      // `top` is negative (it cancels the main scroller's padding), so the
+      // toolbar's resting edge once stuck is height + that offset.
+      const stuckTop = parseFloat(getComputedStyle(el).top) || 0
+      setToolbarBottom(Math.max(0, el.offsetHeight + stuckTop))
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [showTemplates])
+
+  // How tall the templates panel may be: exactly the distance from where it
+  // actually sits on screen down to the bottom of the window.
+  //
+  // It used to be a fixed `100dvh - 3.5rem - toolbar` height. Whenever that
+  // arithmetic came out even slightly tall — a wrapped toolbar, a browser
+  // chrome bar, any change to the app header — the panel's lower edge fell
+  // below the fold, and with it the last templates in the list: the content
+  // fit the (oversized) box, so nothing scrolled and they simply couldn't be
+  // reached. Measuring the panel's own position can't drift out of step.
+  const templatePanelRef = useRef<HTMLElement | null>(null)
+  const [panelMaxH, setPanelMaxH] = useState<number | null>(null)
+  useEffect(() => {
+    // Nothing to measure while the panel is closed; reopening re-measures.
+    if (!showTemplates) return
+    let frame = 0
+    const measure = () => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(() => {
+        const el = templatePanelRef.current
+        if (!el) return
+        const top = el.getBoundingClientRect().top
+        // 8px so the panel stops just clear of the window edge rather than
+        // bleeding into it. Capped at one viewport: on phones the panel isn't
+        // sticky, so once it has scrolled past the top this would otherwise
+        // keep growing and the panel would resize under the finger.
+        const next = Math.max(220, Math.min(
+          Math.round(window.innerHeight - top - 8),
+          Math.round(window.innerHeight)
+        ))
+        setPanelMaxH((prev) => (prev !== null && Math.abs(prev - next) < 2 ? prev : next))
+      })
+    }
+    measure()
+    // Capture phase: the page scrolls in a nested container, not the window.
+    window.addEventListener("scroll", measure, true)
+    window.addEventListener("resize", measure)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener("scroll", measure, true)
+      window.removeEventListener("resize", measure)
+    }
+  }, [showTemplates, toolbarBottom])
+
+  // Refetched every time the panel is opened, not once per session.
+  //
+  // A template re-imported meanwhile — from the Add Template page, another tab,
+  // or another machine in the clinic — otherwise stayed stale here for as long
+  // as the editor was open, and applying it silently used the OLD body. That is
+  // how a template whose sign-off had since been re-imported with both doctors
+  // kept coming out with one. `templatesLoaded` now only drives the first-load
+  // state, so the list already on screen stays visible while it refreshes.
+  useEffect(() => {
+    if (!showTemplates) return
     fetch("/api/templates")
       .then((r) => r.json())
       .then((d) => {
@@ -416,15 +516,20 @@ function ReportEditorInner() {
         for (const t of d.templates ?? []) {
           const cat = String(t.category)
           if (!grouped[cat]) grouped[cat] = []
-          grouped[cat].push({ id: t._id, _id: t._id, name: t.name, heading: t.heading, preview: t.preview, body: t.body })
+          grouped[cat].push({ id: t._id, _id: t._id, name: t.name, heading: t.heading, preview: t.preview, body: t.body, signatureCount: t.signatureCount, preserveSignature: t.preserveSignature })
         }
         setCustomTemplates(grouped)
+        setHiddenBuiltIns(new Set<string>((d.hiddenBuiltIns ?? []).map((h: { id: string }) => h.id)))
       })
       .catch(() => { })
       .finally(() => setTemplatesLoaded(true))
-  }, [showTemplates, templatesLoaded])
+  }, [showTemplates])
 
   const [signatories, setSignatories] = useState<Signatory[]>([])
+  const [templateSignatureCount, setTemplateSignatureCount] = useState<number | undefined>()
+  const reportSignatories = templateSignatureCount === undefined
+    ? signatories
+    : signatories.slice(0, templateSignatureCount)
   useEffect(() => { fetchSignatories().then(setSignatories) }, [])
 
   const BUILTIN_CATS: TemplateCategory[] = ["usg", "doppler", "xray", "pathology", "obstetric"]
@@ -433,7 +538,9 @@ function ReportEditorInner() {
   const allCategoryTabs: string[] = [...BUILTIN_CATS, ...customCategoryKeys]
 
   const allTemplates = (cat: string) => [
-    ...((BUILTIN_CATS as string[]).includes(cat) ? REPORT_TEMPLATES[cat as TemplateCategory] : []),
+    ...((BUILTIN_CATS as string[]).includes(cat)
+      ? REPORT_TEMPLATES[cat as TemplateCategory].filter((t) => !hiddenBuiltIns.has(t.id))
+      : []),
     ...(customTemplates[cat] ?? []),
   ]
 
@@ -452,6 +559,26 @@ function ReportEditorInner() {
   // Toolbar extras
   const [fontSize, setFontSize] = useState(12)
   const [fontFamily, setFontFamily] = useState("Cambria")
+  // Last colours used — they only tint the toolbar's own swatches, so the
+  // buttons show what they will apply, exactly like Word's.
+  const [textColor, setTextColor] = useState<string | null>(null)
+  const [highlightColor, setHighlightColor] = useState<string | null>(null)
+  // The document is drawn 1:1. Everything that MEASURES it (pagination, the
+  // band/table/image drags) still divides by this factor, because those
+  // measurements come from getBoundingClientRect — screen pixels, which only
+  // equal layout pixels while the zoom is 1. Kept as a constant rather than
+  // deleted so the maths stays correct if a zoom control comes back.
+  const zoom = 1
+  const zoomRef = useRef(1)
+  /** Find & replace panel: null = closed. */
+  const [findMode, setFindMode] = useState<"find" | "replace" | null>(null)
+  /** Which ribbon tab is showing (Word remembers Home between documents). */
+  const [ribbonTab, setRibbonTab] = useState<RibbonTab>("Home")
+  const [autoSaveState, setAutoSaveState] = useState<"idle" | "saving" | "saved">("idle")
+  // Status-bar counts. Recomputed from the editor on a debounce rather than on
+  // every keystroke: this component renders the whole document, and counting on
+  // each transaction made typing visibly heavier.
+  const [docStats, setDocStats] = useState({ words: 0, chars: 0 })
   // The heading is still plain text under the hood (getDocTitle() reads
   // .innerText, and print/DOCX generation always render it bold+underlined+
   // centered regardless of anything else typed into it) — but unlike the
@@ -479,6 +606,12 @@ function ReportEditorInner() {
   // font/spacing dropdowns route correctly even after that.
   const lastActiveRef = useRef<"heading" | "body" | "patientBox">("body")
 
+  // The editor's own keymap runs inside the useEditor config below, which is
+  // built before the editor (and before paginate) exists — these two refs are
+  // how that handler reaches both once they do.
+  const editorRef = useRef<Editor | null>(null)
+  const schedulePaginateRef = useRef<() => void>(() => { })
+
   // Heading-only selection capture — Tiptap keeps its own selection
   // internally even once DOM focus moves to a toolbar control, so unlike
   // execCommand, body-targeted commands need no equivalent save/restore.
@@ -489,16 +622,28 @@ function ReportEditorInner() {
     editable: !isReadOnly,
     extensions: [
       StarterKit.configure({
-        heading: false,
+        // Word's Heading 1-3, driven by the Styles gallery. Kept to three:
+        // a report has sections and sub-sections, not an outline.
+        heading: { levels: [1, 2, 3] },
         blockquote: false,
         codeBlock: false,
         horizontalRule: false,
         link: false,
         code: false,
-        strike: false,
       }),
       TextStyleKit.configure({ lineHeight: false }),
+      // cm², mm³, m/s² — every other line of a sonography report needs these.
+      Superscript,
+      Subscript,
       LineHeight.configure({ types: ["paragraph"] }),
+      ParagraphFormat.configure({ types: ["paragraph"] }),
+      ListStyle,
+      CellFormat,
+      ReportSearch,
+      TrackChanges,
+      TrackInsertMark,
+      TrackDeleteMark,
+      CommentMark,
       TextAlign.configure({ types: ["paragraph"] }),
       Table.configure({ resizable: true, handleWidth: 8, cellMinWidth: 1 }),
       TableRowHeight,
@@ -531,6 +676,25 @@ function ReportEditorInner() {
         return true
       },
       handleKeyDown: (view, event) => {
+        // Word's Tab: indent the paragraph, or move a list item a level in/out.
+        // Inside a table Tab still means "next cell", which prosemirror-tables
+        // owns — so that case is left alone deliberately.
+        if (event.key === "Tab" && !findTable(view.state.selection.$anchor)) {
+          const ed = editorRef.current
+          if (ed) {
+            event.preventDefault()
+            const inList = ed.isActive("listItem")
+            if (event.shiftKey) {
+              if (inList) ed.chain().focus().liftListItem("listItem").run()
+              else ed.chain().focus().changeParagraphIndent(-1).run()
+            } else {
+              if (inList) ed.chain().focus().sinkListItem("listItem").run()
+              else ed.chain().focus().changeParagraphIndent(1).run()
+            }
+            schedulePaginateRef.current()
+            return true
+          }
+        }
         if (event.key === "ArrowUp") {
           const { $from } = view.state.selection
           if ($from.pos <= 2 || view.endOfTextblock("up")) {
@@ -558,7 +722,27 @@ function ReportEditorInner() {
 
   useEffect(() => {
     editor?.setEditable(!isReadOnly)
+    editorRef.current = editor ?? null
   }, [editor, isReadOnly])
+
+  // Word/character count for the status line, refreshed a beat after typing
+  // stops. `editor.on("update")` rather than the useEditor option above so the
+  // debounce timer can be cleaned up with the subscription.
+  useEffect(() => {
+    if (!editor) return
+    let timer = 0
+    const recount = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => {
+        const text = editor.getText({ blockSeparator: " " })
+        const words = text.trim() ? text.trim().split(/\s+/).length : 0
+        setDocStats({ words, chars: text.length })
+      }, 400)
+    }
+    recount()
+    editor.on("update", recount)
+    return () => { window.clearTimeout(timer); editor.off("update", recount) }
+  }, [editor])
 
   // Saved per-report drag/resize override for the two doctor-signature images
   // (index 0/1 matches the columns; overrideImage holds custom drawn dataUrls)
@@ -606,6 +790,12 @@ function ReportEditorInner() {
   const [patientBoxOffsetY, setPatientBoxOffsetY] = useState(0)
   const [patientBoxWidthPx, setPatientBoxWidthPx] = useState<number | undefined>(undefined)
 
+  // Word puts an empty paragraph above the patient table, and that is where the
+  // caret sits when a report opens: pressing Enter there pushes the table, the
+  // heading and the whole report down the page. The boxes here are React
+  // elements rather than document nodes, so the equivalent is a run of blank
+  // lines above them — a count, with a real caret to add and remove them.
+  const [topSpacerLines, setTopSpacerLines] = useState(0)
   const [titleBoxOffsetX, setTitleBoxOffsetX] = useState(0)
   const [titleBoxOffsetY, setTitleBoxOffsetY] = useState(0)
   const [titleBoxWidthPx, setTitleBoxWidthPx] = useState<number | undefined>(undefined)
@@ -621,8 +811,8 @@ function ReportEditorInner() {
     const baseOffsetY = patientBoxOffsetY
     const onMove = (ev: PointerEvent) => {
       ev.preventDefault()
-      const dx = ev.clientX - startX
-      const dy = ev.clientY - startY
+      const dx = (ev.clientX - startX) / zoomRef.current
+      const dy = (ev.clientY - startY) / zoomRef.current
       setPatientBoxOffsetX(baseOffsetX + dx)
       setPatientBoxOffsetY(baseOffsetY + dy)
     }
@@ -644,7 +834,7 @@ function ReportEditorInner() {
     const startX = e.clientX
     const baseW = patientBoxRef.current?.getBoundingClientRect().width || 680
     const onMove = (ev: PointerEvent) => {
-      const dw = (ev.clientX - startX) * 2
+      const dw = ((ev.clientX - startX) / zoomRef.current) * 2
       setPatientBoxWidthPx(Math.max(300, Math.min(800, Math.round(baseW + dw))))
     }
     const onUp = (ev: PointerEvent) => {
@@ -668,8 +858,8 @@ function ReportEditorInner() {
     const baseOffsetY = titleBoxOffsetY
     const onMove = (ev: PointerEvent) => {
       ev.preventDefault()
-      const dx = ev.clientX - startX
-      const dy = ev.clientY - startY
+      const dx = (ev.clientX - startX) / zoomRef.current
+      const dy = (ev.clientY - startY) / zoomRef.current
       setTitleBoxOffsetX(baseOffsetX + dx)
       setTitleBoxOffsetY(baseOffsetY + dy)
     }
@@ -691,7 +881,7 @@ function ReportEditorInner() {
     const startX = e.clientX
     const baseW = titleRef.current?.getBoundingClientRect().width || 280
     const onMove = (ev: PointerEvent) => {
-      const dw = (ev.clientX - startX) * 2
+      const dw = ((ev.clientX - startX) / zoomRef.current) * 2
       setTitleBoxWidthPx(Math.max(160, Math.min(650, Math.round(baseW + dw))))
     }
     const onUp = (ev: PointerEvent) => {
@@ -1049,7 +1239,7 @@ function ReportEditorInner() {
     }
 
     const onMove = (ev: PointerEvent) => {
-      const { targetWidth, targetHeight, scale, widths, heights } = sizesForDelta(ev.clientX - startX, ev.clientY - startY)
+      const { targetWidth, targetHeight, scale, widths, heights } = sizesForDelta((ev.clientX - startX) / zoomRef.current, (ev.clientY - startY) / zoomRef.current)
       if (doX) {
         tableEl.style.width = `${targetWidth}px`
         cols.forEach((c, i) => { c.style.width = `${widths[i]}px` })
@@ -1085,7 +1275,7 @@ function ReportEditorInner() {
       try { target.releasePointerCapture(ev.pointerId) } catch { }
       window.removeEventListener("pointermove", onMove)
       window.removeEventListener("pointerup", onUp)
-      const { targetWidth, widths, heights, scale } = sizesForDelta(ev.clientX - startX, ev.clientY - startY)
+      const { targetWidth, widths, heights, scale } = sizesForDelta((ev.clientX - startX) / zoomRef.current, (ev.clientY - startY) / zoomRef.current)
 
       // Restore contenteditable states and clean up temporary inline styles
       if (editorDom) {
@@ -1155,9 +1345,16 @@ function ReportEditorInner() {
   // Pagination margins for the body are ProseMirror decorations now (see
   // tiptap-pagination-extension.ts) — they were never part of the document,
   // so editor.getHTML() already excludes them without any stripping step.
+  // What leaves the editor: the accepted document, without revision marks or
+  // comment markup. Everything downstream — print, PDF, DOCX, autosave, submit —
+  // goes through here, so a reader never sees another editor's working notes.
   const readCleanBody = useCallback(() => {
-    return editor?.getHTML() ?? ""
+    const html = editor?.getHTML() ?? ""
+    return stripComments(acceptTrackedHtml(html))
   }, [editor])
+
+  /** The document exactly as it stands, revision marks and all — for drafts. */
+  const readRawBody = useCallback(() => editor?.getHTML() ?? "", [editor])
 
   // Push a single non-ProseMirror-owned block (patient box / heading /
   // signature block) to the next page if it overflows the current page's
@@ -1171,8 +1368,9 @@ function ReportEditorInner() {
       it.removeAttribute("data-pgb-base")
     }
     const r = it.getBoundingClientRect()
-    const top = r.top - wrapTop
-    const bottom = top + r.height
+    const z = zoomRef.current || 1
+    const top = (r.top - wrapTop) / z
+    const bottom = top + r.height / z
     const footerLimit = page * A4_STRIDE + (A4_PAGE_PX - footerPx)
     const pageTop = page * A4_STRIDE + headerPx
     if (bottom > footerLimit + 1 && top > pageTop + 2) {
@@ -1230,11 +1428,12 @@ function ReportEditorInner() {
       if (patientBoxRef.current) page = pushIfOverflowing(patientBoxRef.current, wrapTop, page)
       if (titleWrapRef.current) page = pushIfOverflowing(titleWrapRef.current, wrapTop, page)
 
-      const bodyEntryTop = view.dom.getBoundingClientRect().top - wrapTop
+      const bodyEntryTop = (view.dom.getBoundingClientRect().top - wrapTop) / (zoomRef.current || 1)
       const { decorationSet, exitPage, signature } = computeBodyPageDecorations(view, {
         wrapTop, entryPage: page, entryTopPx: bodyEntryTop,
         stride: A4_STRIDE, a4PagePx: A4_PAGE_PX,
         letterheadTopPx: headerPx, letterheadBottomPx: footerPx,
+        zoom: zoomRef.current || 1,
       })
       // setMeta only — the doc is untouched, so this neither dirties the report
       // nor re-triggers onUpdate (which would recurse straight back into here).
@@ -1267,6 +1466,31 @@ function ReportEditorInner() {
   }, [editor])
 
   useEffect(() => { paginateRef.current = paginate }, [paginate])
+  useEffect(() => { schedulePaginateRef.current = schedulePaginate }, [schedulePaginate])
+
+  // Word's document-level shortcuts. On the window rather than in the editor's
+  // keymap so they work from the heading and the patient box too — and so
+  // Ctrl+F isn't swallowed by whichever field happens to have focus.
+  useEffect(() => {
+    if (isReadOnly) return
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      const key = e.key.toLowerCase()
+      if (key === "f" || key === "h") {
+        e.preventDefault()
+        setFindMode(key === "h" ? "replace" : "find")
+      } else if (e.key === "Enter") {
+        // Not while typing in one of the page's own fields (the patient box,
+        // the find box) — there Ctrl+Enter belongs to that input, not the body.
+        const t = e.target as HTMLElement | null
+        if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return
+        e.preventDefault()
+        insertPageBreak()
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  })
 
   // ── Insert Signature ─────────────────────────────────────────────────────────
   // Tiptap/ProseMirror keeps its own selection internally even once DOM focus
@@ -1502,8 +1726,8 @@ function ReportEditorInner() {
     const isDoctor = img.dataset.sigKind === "doctor"
 
     const onMove = (ev: PointerEvent) => {
-      let newLeft = baseLeft + (ev.clientX - startX)
-      let newTop = baseTop + (ev.clientY - startY)
+      let newLeft = baseLeft + (ev.clientX - startX) / zoomRef.current
+      let newTop = baseTop + (ev.clientY - startY) / zoomRef.current
       if (isDoctor) {
         newLeft = Math.max(-150, Math.min(150, newLeft))
         newTop = Math.max(-60, Math.min(0, newTop))
@@ -1547,7 +1771,7 @@ function ReportEditorInner() {
     const isDoctor = img.dataset.sigKind === "doctor"
 
     const onMove = (ev: PointerEvent) => {
-      let newW = Math.max(24, startW + (ev.clientX - startX))
+      let newW = Math.max(24, startW + (ev.clientX - startX) / zoomRef.current)
       if (isDoctor) {
         newW = Math.min(220, newW)
       } else {
@@ -1605,7 +1829,7 @@ function ReportEditorInner() {
     const startPx = which === "header" ? headerPx : footerPx
     const sign = which === "header" ? 1 : -1
     const onMove = (ev: PointerEvent) => {
-      const next = Math.max(BAND_HEIGHT_MIN_PX, Math.min(BAND_HEIGHT_MAX_PX, startPx + sign * (ev.clientY - startY)))
+      const next = Math.max(BAND_HEIGHT_MIN_PX, Math.min(BAND_HEIGHT_MAX_PX, startPx + sign * ((ev.clientY - startY) / zoomRef.current)))
       if (which === "header") setHeaderPx(next); else setFooterPx(next)
       // Re-flow immediately (not throttled to rAF) so the body visibly shifts
       // up/down as the line is dragged, not just once the drag ends.
@@ -1697,7 +1921,9 @@ function ReportEditorInner() {
   }
 
   // Current heading text (falls back to the study name)
-  const getDocTitle = () => (titleRef.current?.innerText ?? "").trim() || getDisplayTitle(study).toUpperCase()
+  // Exactly what is in the heading box — no study-name fallback, so a report
+  // with no template applied saves, prints and exports with no heading.
+  const getDocTitle = () => (titleRef.current?.innerText ?? "").trim()
   const [docxLoading, setDocxLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
@@ -1712,6 +1938,38 @@ function ReportEditorInner() {
 
   // Storage key for this patient's report (per study — a patient can have several)
   const storageKey = `aarya_report_${srNo || patient.replace(/\s+/g, "_")}${paramSidx > 0 ? `_s${paramSidx}` : ""}`
+
+  // Six different places save the draft (unmount, hard refresh, submit, template
+  // swap, autosave, layout changes) and each one used to spell out the whole
+  // payload — so whichever one ran last decided which settings survived, and any
+  // field it forgot was silently dropped. They all go through here now: the
+  // stored draft is merged with the page's current layout, so a save can only
+  // ever add to what is already on disk.
+  const draftStateRef = useRef({
+    storageKey, headingFont, patientBoxFont, headerPx, footerPx,
+    patientBoxOffsetX, patientBoxOffsetY, titleBoxOffsetX, titleBoxOffsetY,
+    patientBoxWidthPx, titleBoxWidthPx, topSpacerLines,
+    patient, study, date, age, gender, contact, srNo, refBy,
+  })
+  draftStateRef.current = {
+    storageKey, headingFont, patientBoxFont, headerPx, footerPx,
+    patientBoxOffsetX, patientBoxOffsetY, titleBoxOffsetX, titleBoxOffsetY,
+    patientBoxWidthPx, titleBoxWidthPx, topSpacerLines,
+    patient, study, date, age, gender, contact, srNo, refBy,
+  }
+
+  const writeDraft = (extra: Record<string, unknown> = {}) => {
+    const live = draftStateRef.current
+    try {
+      let stored: Record<string, unknown> = {}
+      try { stored = JSON.parse(localStorage.getItem(live.storageKey) || "{}") ?? {} } catch { }
+      localStorage.setItem(live.storageKey, JSON.stringify({
+        ...stored, ...live, storageKey: undefined,
+        ...extra,
+        savedAt: new Date().toISOString(),
+      }))
+    } catch { }
+  }
 
   // ── Set in_progress when the form is opened (not view/edit mode) ─────────
   useEffect(() => {
@@ -1729,21 +1987,28 @@ function ReportEditorInner() {
   useEffect(() => {
     return () => {
       if (!submittedRef.current && editor && !editor.isEmpty) {
-        try {
-          localStorage.setItem(storageKey, JSON.stringify({
-            body: readCleanBody(),
-            docTitle: titleRef.current?.innerText?.trim() || undefined,
-            headingFont, patientBoxFont,
-            headerPx, footerPx,
-            patientBoxOffsetY, titleBoxOffsetY, patientBoxWidthPx, titleBoxWidthPx,
-            patient, study, date, age, gender, contact, srNo, refBy,
-            savedAt: new Date().toISOString(),
-          }))
-        } catch { }
+        writeDraft({
+          body: readCleanBody(),
+          docTitle: titleRef.current?.innerText?.trim() || undefined,
+        })
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageKey, patient, study, date, age, gender, contact, srNo, refBy, editor, headingFont, headerPx, footerPx])
+
+  // The unmount save above only runs on a clean navigation. These layout
+  // settings are a few numbers, so they are also written as they change — a
+  // hard refresh or a crashed tab then comes back with the page laid out the
+  // way the doctor left it, not just with the text.
+  useEffect(() => {
+    if (!showDoc || !editor || submittedRef.current) return
+    const timer = window.setTimeout(() => {
+      if (editor.isEmpty) { writeDraft(); return }
+      writeDraft({ body: readCleanBody() })
+    }, 500)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topSpacerLines, patientBoxOffsetY, titleBoxOffsetY, patientBoxWidthPx, titleBoxWidthPx, headerPx, footerPx, showDoc, editor])
 
   // ── Load report body: localStorage draft first, then the submitted body from DB ──
   useEffect(() => {
@@ -1759,19 +2024,58 @@ function ReportEditorInner() {
       schedulePaginate()
     }
 
-    let draft: { body?: string; docTitle?: string; headingFont?: string; patientBoxFont?: string; headerPx?: number; footerPx?: number; patientBoxOffsetY?: number; titleBoxOffsetY?: number; patientBoxWidthPx?: number; titleBoxWidthPx?: number; study?: string } | null = null
+    let draft: { body?: string; docTitle?: string; headingFont?: string; patientBoxFont?: string; headerPx?: number; footerPx?: number; patientBoxOffsetY?: number; titleBoxOffsetY?: number; topSpacerLines?: number; patientBoxWidthPx?: number; titleBoxWidthPx?: number; study?: string; templateSignatureCount?: number; signatureLayout?: (SignatureLayout | null)[] } | null = null
     try { draft = JSON.parse(localStorage.getItem(storageKey) || "null") } catch { }
 
     if (draft?.body) {
       const d = draft
       setTimeout(() => {
-        setBody(d.body!, d.docTitle, d.headingFont, d.patientBoxFont)
+        // Older template drafts could contain the imported Word sign-off even
+        // though the live editor had shown the app's own stable two-column
+        // block. On refresh that embedded sign-off was parsed as ordinary
+        // inline paragraphs, collapsing both doctors together. Repair those
+        // drafts as they load and keep only the canonical signature columns.
+        const strippedDraftBody = stripTrailingSignatureBlock(d.body!)
+        const embeddedDoctors = strippedDraftBody === d.body
+          ? 0
+          : countSignatoriesIn(d.body!.slice(strippedDraftBody.length))
+        const repairedSignatureCount = embeddedDoctors > 0
+          ? (typeof d.templateSignatureCount === "number" && d.templateSignatureCount > 0
+              ? d.templateSignatureCount
+              : embeddedDoctors)
+          : d.templateSignatureCount
+        const restoredBody = embeddedDoctors > 0 ? strippedDraftBody : d.body!
+
+        setBody(restoredBody, d.docTitle, d.headingFont, d.patientBoxFont)
         if (d.study) setCurrentStudy(d.study)
         if (d.patientBoxOffsetY !== undefined) setPatientBoxOffsetY(d.patientBoxOffsetY)
         if (d.titleBoxOffsetY !== undefined) setTitleBoxOffsetY(d.titleBoxOffsetY)
+        if (d.topSpacerLines !== undefined) setTopSpacerLines(d.topSpacerLines)
         if (d.patientBoxWidthPx !== undefined) setPatientBoxWidthPx(d.patientBoxWidthPx)
         if (d.titleBoxWidthPx !== undefined) setTitleBoxWidthPx(d.titleBoxWidthPx)
+        if (repairedSignatureCount !== undefined) setTemplateSignatureCount(repairedSignatureCount)
+        if (d.signatureLayout?.length || embeddedDoctors > 0) {
+          setLoadedSigLayout([0, 1].map((index) => ({
+            ...(d.signatureLayout?.[index] ?? {}),
+            hiddenSignatory: repairedSignatureCount !== undefined && index >= repairedSignatureCount,
+          })))
+        }
+        if (embeddedDoctors > 0) {
+          writeDraft({
+            body: restoredBody,
+            templateSignatureCount: repairedSignatureCount,
+            signatureLayout: [0, 1].map((index) => ({
+              ...(d.signatureLayout?.[index] ?? {}),
+              hiddenSignatory: repairedSignatureCount !== undefined && index >= repairedSignatureCount,
+            })),
+          })
+        }
       }, 80)
+    }
+    if (draft && !draft.body && draft.topSpacerLines !== undefined) {
+      // A layout-only draft (spacing changed but nothing typed yet).
+      const d = draft
+      setTimeout(() => { setTopSpacerLines(d.topSpacerLines!) }, 80)
     }
     if (draft?.headerPx || draft?.footerPx) {
       const d = draft
@@ -1804,6 +2108,7 @@ function ReportEditorInner() {
             const savedFooterPx: number | undefined = entry?.footerHeightPx ?? p.footerHeightPx
             if (savedFooterPx) setFooterPx(savedFooterPx)
           }
+          if (typeof entry?.topSpacerLines === "number") setTopSpacerLines(entry.topSpacerLines)
           const savedReportDate: string | undefined = entry?.reportDate || p.reportDate
           if (savedReportDate) setLocalReportDate(savedReportDate)
           if (p.name) setLocalPatientName(p.name)
@@ -1811,11 +2116,17 @@ function ReportEditorInner() {
           if (p.age) setLocalAge(String(p.age))
           if (p.gender) setLocalGender(p.gender)
           if (entry?.name) setCurrentStudy(entry.name)
-          const savedLayouts = entry?.signatureLayout
-          if (savedLayouts && savedLayouts.length > 0) {
-            setLoadedSigLayout(savedLayouts)
-          } else {
-            setLoadedSigLayout([{ hidden: true }, { hidden: true }])
+          if (!draft?.signatureLayout?.length) {
+            const savedLayouts = entry?.signatureLayout
+            if (savedLayouts && savedLayouts.length > 0) {
+              setLoadedSigLayout(savedLayouts)
+              const visibleCount = savedLayouts.filter((layout: SignatureLayout | null) => !layout?.hiddenSignatory).length
+              if (savedLayouts.some((layout: SignatureLayout | null) => layout?.hiddenSignatory)) {
+                setTemplateSignatureCount(visibleCount)
+              }
+            } else {
+              setLoadedSigLayout([{ hidden: true }, { hidden: true }])
+            }
           }
         })
         .catch(() => { })
@@ -1823,34 +2134,26 @@ function ReportEditorInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showDoc, editor])
 
-  // ── Seed the editable heading with the study name (drafts/templates override it) ──
-  useEffect(() => {
-    if (!showDoc || !study) return
-    if (titleRef.current && !titleRef.current.innerText.trim()) {
-      titleRef.current.innerText = getDisplayTitle(study).toUpperCase()
-    }
-  }, [showDoc, study])
+  // The heading is NOT seeded from the study. A new report opens as a blank
+  // page: applying a template fills in that template's own heading (see
+  // applyTemplate), and until then the heading box stays empty. The study name
+  // is the referral/billing line on the patient box, not the document's title.
 
   // ── Save draft on browser close / hard refresh (belt-and-suspenders) ─────────
   useEffect(() => {
     const save = () => {
       if (submittedRef.current || !editor || editor.isEmpty) return
-      const html = readCleanBody()
-      try {
-        localStorage.setItem(storageKey, JSON.stringify({
-          body: html,
-          docTitle: titleRef.current?.innerText?.trim() || undefined,
-          headingFont, patientBoxFont,
-          headerPx, footerPx,
-          patient, study, date, age, gender, contact, srNo, refBy,
-          savedAt: new Date().toISOString(),
-        }))
-      } catch { }
+      writeDraft({
+        body: readCleanBody(),
+        docTitle: titleRef.current?.innerText?.trim() || undefined,
+        templateSignatureCount,
+        signatureLayout: readSignatureLayout(),
+      })
     }
     window.addEventListener("beforeunload", save)
     return () => window.removeEventListener("beforeunload", save)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storageKey, patient, study, date, age, gender, contact, srNo, refBy, editor, headingFont, headerPx, footerPx])
+  }, [storageKey, patient, study, date, age, gender, contact, srNo, refBy, editor, headingFont, headerPx, footerPx, templateSignatureCount])
 
   // ── Build DOCX blob from current report body ─────────────────────────────────
   // Layout lives in @/lib/report-docx, shared with the DOCX-building logic
@@ -1866,7 +2169,7 @@ function ReportEditorInner() {
       docTitle: getDocTitle(),
       headingFont, patientBoxFont,
       bodyHtml,
-      signatories,
+      signatories: reportSignatories,
       signatureLayouts: readSignatureLayout(),
     })
 
@@ -1895,16 +2198,13 @@ function ReportEditorInner() {
     setSubmittedHeadingFont(headingFont)
 
     // Save to localStorage
-    try {
-      localStorage.setItem(storageKey, JSON.stringify({
-        body: finalBody,
-        docTitle: titleRef.current?.innerText?.trim() || undefined,
-        headingFont, patientBoxFont,
-        headerPx, footerPx,
-        patient, study, date, age, gender, contact, srNo, refBy,
-        savedAt: now.toISOString(),
-      }))
-    } catch { }
+    writeDraft({
+      body: finalBody,
+      docTitle: titleRef.current?.innerText?.trim() || undefined,
+      templateSignatureCount,
+      signatureLayout: readSignatureLayout(),
+      savedAt: now.toISOString(),
+    })
 
     // Generate DOCX and save everything to MongoDB
     if (paramId) {
@@ -1937,7 +2237,7 @@ function ReportEditorInner() {
             patientBoxFont: patientBoxFont || "",
             headerHeightPx: headerPx,
             footerHeightPx: footerPx,
-            patientBoxOffsetX, patientBoxOffsetY, titleBoxOffsetX, titleBoxOffsetY,
+            patientBoxOffsetX, patientBoxOffsetY, titleBoxOffsetX, titleBoxOffsetY, topSpacerLines,
             patientBoxWidthPx, titleBoxWidthPx,
             signatureLayout: readSignatureLayout(),
             ...(localSrNo ? { srNo: Number(localSrNo) } : {}),
@@ -1949,16 +2249,20 @@ function ReportEditorInner() {
           }),
         })
         if (!res.ok) {
-          alert(
-            res.status === 413
-              ? "Save failed: the report is too large for the server to accept — usually the images in it (inserted pictures or a signature stamp). Remove or shrink the largest image, or insert fewer of them, then save again."
-              : `Save failed (server returned ${res.status}). Please try again.`
-          )
+          await notify({
+            title: "Save failed",
+            message: res.status === 413
+              ? "The report is too large for the server to accept — usually the images in it (inserted pictures or a signature stamp). Remove or shrink the largest image, or insert fewer of them, then save again."
+              : `The server returned ${res.status}. Please try again.`,
+          })
           setSubmitting(false)
           return
         }
       } catch {
-        alert("Save failed: could not reach the server. Check your connection and try again.")
+        await notify({
+          title: "Save failed",
+          message: "Could not reach the server. Check your connection and try again.",
+        })
         setSubmitting(false)
         return
       }
@@ -1970,36 +2274,74 @@ function ReportEditorInner() {
   }
 
   // ── Template apply ───────────────────────────────────────────────────────────
-  const applyTemplate = (tpl: ReportTemplate) => {
+  const applyTemplate = async (tpl: ReportTemplate) => {
     if (!editor) return
     const hasContent = !editor.isEmpty
-    if (hasContent && !confirm(`Replace current report content with "${tpl.name}"?`)) return
-    editor.commands.setContent(normalizeLegacyHtml(tpl.body))
+    if (hasContent && !(await confirm({
+      title: "Replace the report?",
+      message: `Everything currently in this report will be replaced with the "${tpl.name}" template.`,
+      confirmLabel: "Replace",
+      danger: true,
+    }))) return
+    // Imported Word sign-offs often use layout-only spans/positioning that
+    // Tiptap cannot serialize losslessly. They can look correct immediately
+    // after applying a template, then collapse into one line after refresh.
+    // Strip that block from the editable body and always render the doctors in
+    // the app's canonical two-column component, whose layout survives reloads.
+    const strippedBody = stripTrailingSignatureBlock(tpl.body)
+    // How many doctors the removed sign-off actually named. A
+    // two-column Word sign-off holds both on one line, so this is counted from
+    // the block rather than assumed.
+    const doctorsInSignOff = countSignatoriesIn(tpl.body.slice(strippedBody.length))
+    editor.commands.setContent(normalizeLegacyHtml(strippedBody))
     clearPaginationDecorations()
-    // Update local study state
-    setCurrentStudy(tpl.name)
-    // ALWAYS update the study heading text to match the selected template
+    // The study is NOT touched here. It is what the patient was referred for
+    // and what the bill and the register are keyed on; picking the template to
+    // write the report in doesn't change what was requested. (This used to set
+    // the study to the template's name, which then went back to the patient
+    // record on submit and renamed the referral.)
+    //
+    // The heading, on the other hand, always follows the template — that is
+    // where a report's title comes from.
     const newHeading = tpl.heading || tpl.name.toUpperCase()
     if (titleRef.current) {
       titleRef.current.textContent = newHeading
     }
     setHeadingFont(undefined)
+    // Use the detected/stored doctor count when the template had a sign-off;
+    // otherwise `undefined` means the clinic's usual signatories.
+    const importedSignatureCount = strippedBody !== tpl.body
+      ? (tpl.signatureCount && tpl.signatureCount > 0
+          ? tpl.signatureCount
+          : doctorsInSignOff || undefined)
+      : undefined
+    setTemplateSignatureCount(importedSignatureCount)
+    if (importedSignatureCount !== undefined) {
+      setLoadedSigLayout((previous) => [0, 1].map((index) => ({
+        ...(previous[index] ?? {}),
+        hiddenSignatory: index >= importedSignatureCount,
+      })))
+    } else {
+      setLoadedSigLayout((previous) => [0, 1].map((index) => ({
+        ...(previous[index] ?? {}),
+        hiddenSignatory: false,
+      })))
+    }
     // Persist immediately so a stale draft can't bring old body back while keeping dragged offsets
-    try {
-      localStorage.setItem(storageKey, JSON.stringify({
-        body: tpl.body,
-        docTitle: newHeading,
-        headingFont: undefined,
-        // Not reset by a template swap — the box font is the doctor's choice
-        // for this patient's page, not part of the template's content.
-        patientBoxFont,
-        headerPx, footerPx,
-        patientBoxOffsetX, patientBoxOffsetY, titleBoxOffsetX, titleBoxOffsetY,
-        patientBoxWidthPx, titleBoxWidthPx,
-        patient, study: tpl.name, date, age, gender, contact, srNo, refBy,
-        savedAt: new Date().toISOString(),
-      }))
-    } catch { }
+    writeDraft({
+      body: strippedBody,
+      docTitle: newHeading,
+      // The heading font comes with the template; the box font does not — it is
+      // the doctor's choice for this patient's page, so writeDraft's live value
+      // carries it through the swap untouched.
+      headingFont: undefined,
+      templateSignatureCount: importedSignatureCount,
+      signatureLayout: [0, 1].map((index) => ({
+        ...(loadedSigLayout[index] ?? {}),
+        hiddenSignatory: importedSignatureCount !== undefined && index >= importedSignatureCount,
+      })),
+      study: tpl.name,
+    })
     setShowTemplates(false)
     editor.commands.focus()
     schedulePaginate()
@@ -2073,6 +2415,48 @@ function ReportEditorInner() {
     schedulePaginate()
   }
 
+  // ── Text colour / highlight ───────────────────────────────────────────────────
+  // Same three-region routing as every other formatting control: Tiptap marks in
+  // the body, execCommand in the heading, and nothing in the patient box, whose
+  // lines are React-rendered values with no per-character target (see
+  // changeFontSize for why bailing out beats falling through to the heading).
+  const applyTextColor = (color: string | null) => {
+    setTextColor(color)
+    if (lastActiveRef.current === "body") {
+      const chain = editor?.chain().focus()
+      if (color) chain?.setColor(color).run(); else chain?.unsetColor().run()
+      return
+    }
+    if (lastActiveRef.current === "patientBox") return
+    restoreEditableSelection()
+    document.execCommand("foreColor", false, color ?? "#000000")
+  }
+
+  const applyHighlight = (color: string | null) => {
+    setHighlightColor(color)
+    if (lastActiveRef.current === "body") {
+      const chain = editor?.chain().focus()
+      if (color) chain?.setBackgroundColor(color).run(); else chain?.unsetBackgroundColor().run()
+      return
+    }
+    if (lastActiveRef.current === "patientBox") return
+    restoreEditableSelection()
+    // "transparent" is how execCommand clears a highlight; there is no unset.
+    document.execCommand("hiliteColor", false, color ?? "transparent")
+  }
+
+  // ── Insert a symbol at the caret ──────────────────────────────────────────────
+  const insertSymbol = (symbol: string) => {
+    if (lastActiveRef.current === "body") {
+      editor?.chain().focus().insertContent(symbol).run()
+      schedulePaginate()
+      return
+    }
+    restoreEditableSelection()
+    document.execCommand("insertText", false, symbol)
+    schedulePaginate()
+  }
+
   // ── Line spacing apply ────────────────────────────────────────────────────────
   // Word-style per-paragraph spacing: sets line-height only on the block(s) the
   // selection actually touches, so different paragraphs can carry different
@@ -2124,11 +2508,171 @@ function ReportEditorInner() {
     schedulePaginate()
   }
 
+  // ── Paragraph layout: indent, first line, space before/after, page break ─────
+  // Body only. The heading is one centered line and the patient box is a fixed
+  // grid — neither has paragraphs to lay out, so these quietly do nothing there
+  // rather than pretending to work.
+  const changeIndent = (delta: number) => {
+    if (lastActiveRef.current !== "body") return
+    editor?.chain().focus().changeParagraphIndent(delta).run()
+    schedulePaginate()
+  }
+
+  const setParagraphSpacing = (attrs: Record<string, unknown>) => {
+    if (lastActiveRef.current !== "body") return
+    editor?.chain().focus().setParagraphFormat(attrs).run()
+    schedulePaginate()
+  }
+
+  // Word's Ctrl+Enter: split here, and mark the half that follows as starting a
+  // new sheet. The pagination pass turns that attribute into the push.
+  const insertPageBreak = () => {
+    if (!editor) return
+    editor.chain().focus().splitBlock().setParagraphFormat({ pageBreakBefore: true }).run()
+    schedulePaginate()
+  }
+
+  // ── Format painter ────────────────────────────────────────────────────────────
+  // Word's brush: pick up the formatting at the caret, then paint it onto the
+  // next selection. Held as marks rather than as a class so it survives being
+  // applied across paragraphs, tables and list items alike.
+  const [painterMarks, setPainterMarks] = useState<Record<string, Record<string, unknown>> | null>(null)
+
+  const toggleFormatPainter = () => {
+    if (painterMarks) { setPainterMarks(null); return }
+    if (!editor) return
+    const picked: Record<string, Record<string, unknown>> = {}
+    for (const name of ["bold", "italic", "underline", "strike", "superscript", "subscript", "textStyle"]) {
+      if (editor.isActive(name)) picked[name] = editor.getAttributes(name)
+    }
+    setPainterMarks(picked)
+  }
+
+  // Painting happens on the next completed selection, which is why this listens
+  // for mouseup rather than for a selection change: mid-drag the selection is
+  // still growing, and repainting on every step would fight the drag.
+  useEffect(() => {
+    if (!painterMarks || !editor) return
+    const onUp = () => {
+      window.setTimeout(() => {
+        const { from, to } = editor.state.selection
+        if (from === to) return
+        const chain = editor.chain().focus()
+        chain.unsetAllMarks()
+        for (const [name, attrs] of Object.entries(painterMarks)) {
+          if (name === "textStyle") chain.setMark("textStyle", attrs)
+          else chain.setMark(name, attrs)
+        }
+        chain.run()
+        setPainterMarks(null)
+        schedulePaginate()
+      }, 0)
+    }
+    document.addEventListener("mouseup", onUp)
+    return () => document.removeEventListener("mouseup", onUp)
+  }, [painterMarks, editor, schedulePaginate])
+
+  // ── Autosave + version history ───────────────────────────────────────────────
+  // The draft used to live only in localStorage: a wiped browser, a different
+  // machine or a crashed tab lost the report. It now also goes to the server a
+  // few seconds after typing stops, and every few minutes that save also leaves
+  // a version behind (the study's existing editHistory array, which the submit
+  // flow already writes to and the Versions pane reads back).
+  const lastSavedBodyRef = useRef<string>("")
+  const lastVersionAtRef = useRef<number>(0)
+  // One save at a time: a second PATCH that starts before the first finishes
+  // reads the same document version, and Mongoose rejects the loser rather than
+  // letting it overwrite (VersionError). Typing simply schedules another pass.
+  const savingRef = useRef(false)
+  const VERSION_EVERY_MS = 3 * 60 * 1000
+
+  useEffect(() => {
+    if (!editor || isReadOnly || !paramId || !showDoc) return
+    let timer = 0
+
+    const save = async () => {
+      if (savingRef.current) { schedule(); return }
+      const body = readCleanBody()
+      if (!body || body === lastSavedBodyRef.current) return
+      savingRef.current = true
+      const snapshot = Date.now() - lastVersionAtRef.current > VERSION_EVERY_MS
+      setAutoSaveState("saving")
+      try {
+        const res = await fetch(`/api/patients/${paramId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            studyIndex: paramSidx,
+            reportBody: body,
+            reportStatus: "in_progress",
+            ...(snapshot
+              ? { editHistoryEntry: { editor: user?.name || "Unknown", editedAt: new Date().toISOString(), body } }
+              : {}),
+          }),
+        })
+        if (!res.ok) throw new Error(String(res.status))
+        lastSavedBodyRef.current = body
+        if (snapshot) lastVersionAtRef.current = Date.now()
+        setAutoSaveState("saved")
+      } catch {
+        // Offline, or the server rejected this pass — the localStorage draft is
+        // still there, so stay quiet and try again shortly rather than leaving a
+        // "Saved" that isn't true.
+        setAutoSaveState("idle")
+        schedule()
+      } finally {
+        savingRef.current = false
+      }
+    }
+
+    const schedule = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => { void save() }, 4000)
+    }
+    editor.on("update", schedule)
+    return () => { window.clearTimeout(timer); editor.off("update", schedule) }
+  }, [editor, isReadOnly, paramId, paramSidx, showDoc, readCleanBody, user])
+
+  // ── Styles ────────────────────────────────────────────────────────────────────
+  // Word's Normal / Heading 1–3, as real heading nodes so the structure (not
+  // just the look) survives into DOCX.
+  const currentStyle: ReportStyle = editor?.isActive("heading", { level: 1 })
+    ? "h1"
+    : editor?.isActive("heading", { level: 2 })
+      ? "h2"
+      : editor?.isActive("heading", { level: 3 })
+        ? "h3"
+        : "normal"
+
+  const applyStyle = (style: ReportStyle) => {
+    if (!editor) return
+    if (style === "normal") editor.chain().focus().setParagraph().run()
+    else editor.chain().focus().setHeading({ level: Number(style.slice(1)) as 1 | 2 | 3 }).run()
+    schedulePaginate()
+  }
+
+  // ── Quick phrases ─────────────────────────────────────────────────────────────
+  const insertPhrase = (html: string) => {
+    editor?.chain().focus().insertContent(html).run()
+    schedulePaginate()
+  }
+
+  /** The current body selection as HTML + plain text, for "save as phrase". */
+  const readSelectionForPhrase = () => {
+    if (!editor) return { html: "", text: "" }
+    const { from, to } = editor.state.selection
+    if (from === to) return { html: "", text: "" }
+    const slice = editor.state.doc.slice(from, to)
+    const div = document.createElement("div")
+    div.appendChild(DOMSerializer.fromSchema(editor.schema).serializeFragment(slice.content))
+    return { html: div.innerHTML, text: editor.state.doc.textBetween(from, to, " ") }
+  }
+
   // ── Table insert / delete ─────────────────────────────────────────────────────
   // Tables only ever make sense in the report body, so these always target
   // the editor regardless of which region last had focus.
-  const insertTable = () => {
-    editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: false }).run()
+  const insertTable = (rows: number, cols: number) => {
+    editor?.chain().focus().insertTable({ rows, cols, withHeaderRow: false }).run()
     schedulePaginate()
   }
 
@@ -2137,12 +2681,93 @@ function ReportEditorInner() {
     schedulePaginate()
   }
 
+  // ── Keep a table inside the page when a column is added ─────────────────────
+  // Word never lets an inserted column push a table past the margins: the new
+  // column's space is taken out of the existing ones, so the table stays exactly
+  // as wide as it was. Without this, columns that carry an explicit width (every
+  // imported template table does) simply add up past the paper and the editor
+  // shows a horizontal scrollbar for something that can never print that way.
+  const refitTableColumns = () => {
+    if (!editor) return
+    const found = findTable(editor.state.selection.$anchor)
+    if (!found) return
+    const { node: table, pos } = found
+    const wrapperDom = editor.view.nodeDOM(pos) as HTMLElement | null
+    const tableEl = wrapperDom?.querySelector("table") as HTMLTableElement | null
+    if (!tableEl) return
+
+    // One colspan-1 cell per column carries that column's stored width.
+    const map = TableMap.get(table)
+    const stored: (number | null)[] = new Array(map.width).fill(null)
+    for (let col = 0; col < map.width; col++) {
+      for (let row = 0; row < map.height; row++) {
+        const cell = table.nodeAt(map.map[row * map.width + col])
+        if (!cell || cell.attrs.colspan !== 1) continue
+        const w = cell.attrs.colwidth?.[0]
+        if (w) { stored[col] = w; break }
+      }
+    }
+    // Nothing was ever sized: the table is a plain 100%-wide one, which already
+    // re-divides itself evenly across the new column count. Leave it alone.
+    const known = stored.filter((w): w is number => w != null)
+    if (known.length === 0) return
+
+    // A column with no width of its own is the one just inserted — give it the
+    // average of its siblings before everything is scaled back down to fit.
+    const avg = known.reduce((a, b) => a + b, 0) / known.length
+    const widths = stored.map((w) => w ?? avg)
+
+    // A table dragged to a fixed width keeps that width; everything else is
+    // measured against the text column it sits in.
+    const pinned = parseFloat(String(table.attrs.width ?? ""))
+    const wrapperWidth = wrapperDom?.clientWidth || tableEl.clientWidth
+    const available = Number.isFinite(pinned) && pinned > 0 ? Math.min(pinned, wrapperWidth) : wrapperWidth
+    if (!available) return
+
+    const MIN_COL_PX = 24
+    const total = widths.reduce((a, b) => a + b, 0)
+    const factor = total > available ? available / total : 1
+    const scaled = widths.map((w) => Math.max(MIN_COL_PX, Math.round(w * factor)))
+    // Rounding can leave the row a pixel or two over the target; the widest
+    // column absorbs the difference invisibly.
+    const drift = scaled.reduce((a, b) => a + b, 0) - Math.round(total * factor)
+    if (drift !== 0) {
+      let widest = 0
+      scaled.forEach((w, i) => { if (w > scaled[widest]) widest = i })
+      scaled[widest] = Math.max(MIN_COL_PX, scaled[widest] - drift)
+    }
+    commitTableColumnWidths(tableEl, scaled)
+  }
+
   // Row/column editing — no-ops when the cursor isn't inside a table cell
   // (Tiptap's own commands already handle that; nothing to guard here).
   const addTableRow = () => { editor?.chain().focus().addRowAfter().run(); schedulePaginate() }
   const deleteTableRow = () => { editor?.chain().focus().deleteRow().run(); schedulePaginate() }
-  const addTableColumn = () => { editor?.chain().focus().addColumnAfter().run(); schedulePaginate() }
+  const addTableColumn = () => {
+    editor?.chain().focus().addColumnAfter().run()
+    refitTableColumns()
+    schedulePaginate()
+  }
   const deleteTableColumn = () => { editor?.chain().focus().deleteColumn().run(); schedulePaginate() }
+
+  // The right-click menu's table half — the toolbar's own buttons only ever
+  // insert after/below, so the before/left variants live here.
+  const tableMenuActions = {
+    insertRowAbove: () => { editor?.chain().focus().addRowBefore().run(); schedulePaginate() },
+    insertRowBelow: addTableRow,
+    insertColumnLeft: () => {
+      editor?.chain().focus().addColumnBefore().run()
+      refitTableColumns()
+      schedulePaginate()
+    },
+    insertColumnRight: addTableColumn,
+    deleteRow: deleteTableRow,
+    deleteColumn: deleteTableColumn,
+    deleteTable,
+    fitTable: resetTableSize,
+    mergeCells: () => { editor?.chain().focus().mergeCells().run(); schedulePaginate() },
+    splitCell: () => { editor?.chain().focus().splitCell().run(); schedulePaginate() },
+  }
 
   // ── Shared toolbar-button dispatch (Bold/Italic/Underline/Align/List/Clear) ──
   // Routes to the heading's execCommand (unchanged) or the body's Tiptap
@@ -2197,21 +2822,18 @@ function ReportEditorInner() {
 
   // ── Save draft to localStorage ───────────────────────────────────────────────
   const saveReport = () => {
-    let bodyHtml = readCleanBody()
+    // The local draft keeps the RAW document — a reload in the middle of a
+    // tracked revision must come back with the revision, not with it silently
+    // accepted.
+    let bodyHtml = readRawBody()
     // If editing an existing report, mark changed blocks with underline
     if (paramLoad && originalBodyRef.current) {
       bodyHtml = markChanges(originalBodyRef.current, bodyHtml)
     }
-    try {
-      localStorage.setItem(storageKey, JSON.stringify({
-        body: bodyHtml,
-        docTitle: titleRef.current?.innerText?.trim() || undefined,
-        headingFont, patientBoxFont,
-        headerPx, footerPx,
-        patient, study, date, age, gender, contact, srNo, refBy,
-        savedAt: new Date().toISOString(),
-      }))
-    } catch { }
+    writeDraft({
+      body: bodyHtml,
+      docTitle: titleRef.current?.innerText?.trim() || undefined,
+    })
   }
 
   // ── Print / PDF ──────────────────────────────────────────────────────────────
@@ -2228,13 +2850,18 @@ function ReportEditorInner() {
       srNo: localSrNo || srNo,
       titleFont: headingFont,
       patientBoxFont,
-      signatories,
+      signatories: reportSignatories,
       signatureLayouts: readSignatureLayout(),
       headerPx,
       footerPx,
+      pageCount: numPages,
+      topSpacerPx: topSpacerLines * 24,
     })
     const win = window.open("", "_blank", "width=820,height=1000")
-    if (!win) { alert("Please allow pop-ups."); return }
+    if (!win) {
+      void notify({ title: "Pop-up blocked", message: "Allow pop-ups for this site to print the report." })
+      return
+    }
     win.document.write(html)
     win.document.close()
     win.focus()
@@ -2252,13 +2879,16 @@ function ReportEditorInner() {
     // can only fall back to the generic study name — submittedDocTitle (captured
     // live, right before submission) is what still has the doctor's edited heading.
     return buildPagedPdfBlob({
+      // The blank lines above the patient box are content in Word, so they are
+      // part of the PDF too — not just something the on-screen page shows.
+      topSpacerHtml: topSpacerLines ? `<div style="height:${topSpacerLines * 24}px"></div>` : "",
       headerHtml: reportHeaderHtml({
         name: localPatientName || patient, refBy: localRefBy || refBy, date: localReportDate || date,
         age: localAge || age, gender: localGender || gender, srNo: localSrNo || srNo,
       }, patientBoxFont),
       titleHtml: reportTitleHtml(submittedDocTitle || getDocTitle(), submittedHeadingFont ?? headingFont),
       bodyHtml,
-      signaturesHtml: signatureColumnsHtml(signatories, readSignatureLayout()),
+      signaturesHtml: signatureColumnsHtml(reportSignatories, readSignatureLayout()),
       headerTopPx: headerPx,
       footerBottomPx: footerPx,
     })
@@ -2286,9 +2916,7 @@ function ReportEditorInner() {
       })
       const data = await res.json()
       const slug = data?.patient?.studies?.[paramSidx]?.reportSlug || data?.patient?.reportSlug
-      const pdfUrl = slug
-        ? `${window.location.origin}/${slug}/pdf`
-        : `${window.location.origin}/api/patients/${paramId}/pdf?sidx=${paramSidx}`
+      const pdfUrl = reportShareUrl(window.location.origin, { slug, patientId: paramId, sidx: paramSidx })
 
       const shareName = localPatientName || patient
       const msg = to === "patient"
@@ -2388,7 +3016,7 @@ function ReportEditorInner() {
     <div className="-mx-4 lg:-mx-6 -mt-4 lg:-mt-6 flex flex-col">
 
       {/* ── Sticky header: title bar + formatting toolbar ── */}
-      <div className="sticky -top-4 lg:-top-6 z-20 bg-white border-b shadow-sm">
+      <div ref={stickyHeaderRef} className="sticky -top-4 lg:-top-6 z-20 bg-white border-b shadow-sm">
 
         {/* Title / action row */}
         <div className="flex items-center gap-3 px-4 lg:px-6 py-2.5 border-b border-gray-100">
@@ -2420,6 +3048,20 @@ function ReportEditorInner() {
                 </motion.span>
               </motion.button>
             )}
+            {/* Print the report as it stands, without having to submit first */}
+            {showDoc && (
+              <motion.button
+                type="button"
+                onClick={handlePrint}
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.97 }}
+                title="Print report"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-300 bg-white text-gray-700 hover:border-blue-400 hover:text-blue-600 transition-colors shadow-sm"
+              >
+                <Printer className="h-3.5 w-3.5" />
+                Print
+              </motion.button>
+            )}
             {!isReadOnly && (
               <Button size="sm" onClick={handleSubmit} disabled={!showDoc || !study || !patient || submitting} className="bg-green-600 hover:bg-green-700 gap-1.5">
                 {submitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
@@ -2429,163 +3071,283 @@ function ReportEditorInner() {
           </div>
         </div>
 
-        {/* Formatting toolbar — hidden in view mode */}
+        {/* ── Ribbon: Word's tabbed toolbar ── */}
         {!isReadOnly && (
-          <div className="flex items-center gap-0.5 px-4 lg:px-6 py-1.5 overflow-x-auto">
-            {/* Font family */}
-            <select
-              value={fontFamily}
-              onChange={(e) => applyFontFamily(e.target.value)}
-              className="h-7 text-[11px] border border-gray-200 rounded px-1.5 mr-1 bg-white text-gray-700 cursor-pointer focus:outline-none focus:border-blue-400"
-              title="Font family"
-            >
-              {FONT_FAMILIES.map((f) => (
-                <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
-              ))}
-            </select>
-
-            {/* Font size */}
-            <div className="flex items-center border border-gray-200 rounded overflow-hidden mr-1 bg-white">
-              <button
-                type="button" title="Decrease font size"
-                onMouseDown={(e) => { e.preventDefault(); changeFontSize(-2) }}
-                className="h-7 px-2 flex items-center justify-center hover:bg-gray-100 text-gray-600 gap-0.5 border-r border-gray-200"
-              >
-                <span className="text-[10px] font-bold">A</span>
-                <ChevronDown className="h-2.5 w-2.5 text-blue-500" />
-              </button>
-              <span className="w-8 text-center text-[11px] font-medium text-gray-700 select-none">
-                {fontSize}
-              </span>
-              <button
-                type="button" title="Increase font size"
-                onMouseDown={(e) => { e.preventDefault(); changeFontSize(2) }}
-                className="h-7 px-2 flex items-center justify-center hover:bg-gray-100 text-gray-600 gap-0.5 border-l border-gray-200"
-              >
-                <span className="text-xs font-bold text-gray-700">A</span>
-                <ChevronUp className="h-2.5 w-2.5 text-blue-500" />
-              </button>
-            </div>
-
-            {/* Line spacing — applies to the paragraph(s) touched by the selection */}
-            <select
-              defaultValue=""
-              onChange={(e) => {
-                if (e.target.value) applyLineSpacing(e.target.value)
-                e.target.value = ""
-              }}
-              className="h-7 text-[11px] border border-gray-200 rounded px-1.5 mr-1 bg-white text-gray-700 cursor-pointer focus:outline-none focus:border-blue-400"
-              title="Line spacing"
-            >
-              <option value="" disabled>Spacing</option>
-              {["1", "1.15", "1.5", "2", "2.5"].map((v) => (
-                <option key={v} value={v}>{v}</option>
-              ))}
-            </select>
-
-            <Sep />
-            <FmtBtn onRun={() => runFormat("bold", (e) => { e.chain().focus().toggleBold().run() })}
-              label={<Bold className="h-3.5 w-3.5 stroke-[2.5]" />} title="Bold (Ctrl+B)" />
-            <FmtBtn onRun={() => runFormat("italic", (e) => { e.chain().focus().toggleItalic().run() })}
-              label={<Italic className="h-3.5 w-3.5" />} title="Italic (Ctrl+I)" />
-            <FmtBtn onRun={() => runFormat("underline", (e) => { e.chain().focus().toggleUnderline().run() })}
-              label={<Underline className="h-3.5 w-3.5" />} title="Underline (Ctrl+U)" />
-            <Sep />
-            <FmtBtn onRun={() => runFormat("justifyLeft", (e) => { e.chain().focus().setTextAlign("left").run() })}
-              label={<AlignLeft className="h-3.5 w-3.5" />} title="Align left" />
-            <FmtBtn onRun={() => runFormat("justifyCenter", (e) => { e.chain().focus().setTextAlign("center").run() })}
-              label={<AlignCenter className="h-3.5 w-3.5" />} title="Center" />
-            <FmtBtn onRun={() => runFormat("justifyRight", (e) => { e.chain().focus().setTextAlign("right").run() })}
-              label={<AlignRight className="h-3.5 w-3.5" />} title="Align right" />
-            <Sep />
-            <FmtBtn onRun={() => runFormat("insertUnorderedList", (e) => { e.chain().focus().toggleBulletList().run() })}
-              label={<List className="h-3.5 w-3.5" />} title="Bullet list" />
-            <FmtBtn onRun={() => runFormat("insertOrderedList", (e) => { e.chain().focus().toggleOrderedList().run() })}
-              label={<span className="text-[11px] font-semibold">1.</span>} title="Numbered list" />
-            <Sep />
-            <FmtBtn onRun={() => runFormat("removeFormat", (e) => { e.chain().focus().unsetAllMarks().clearNodes().run() })}
-              label={<span className="text-[11px] text-gray-400 font-medium">Clear</span>} title="Clear formatting" />
-            <Sep />
-            <button
-              type="button" title="Insert table"
-              onMouseDown={(e) => { e.preventDefault(); insertTable() }}
-              className="h-7 w-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors"
-            >
-              <Table2 className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button" title="Delete table (click inside a table first)"
-              onMouseDown={(e) => { e.preventDefault(); deleteTable() }}
-              className="h-7 w-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button" title="Add row below (click inside a table row first)"
-              onMouseDown={(e) => { e.preventDefault(); addTableRow() }}
-              className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
-            >
-              +Row
-            </button>
-            <button
-              type="button" title="Delete current row (click inside a table row first)"
-              onMouseDown={(e) => { e.preventDefault(); deleteTableRow() }}
-              className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
-            >
-              -Row
-            </button>
-            <button
-              type="button" title="Add column after (click inside a table column first)"
-              onMouseDown={(e) => { e.preventDefault(); addTableColumn() }}
-              className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
-            >
-              +Col
-            </button>
-            <button
-              type="button" title="Delete current column (click inside a table column first)"
-              onMouseDown={(e) => { e.preventDefault(); deleteTableColumn() }}
-              className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
-            >
-              -Col
-            </button>
-            <button
-              type="button" title="Reset this table's size — clears the dragged column widths and row heights so it goes back to full width with rows only as tall as their text (click inside a table first)"
-              onMouseDown={(e) => { e.preventDefault(); resetTableSize() }}
-              className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
-            >
-              Fit
-            </button>
-            <Sep />
-            <button
-              type="button"
-              title="Insert a signature (draw, type or upload). Once placed, click it for the same picture toolbar as an image — text wrapping (Behind Text / In Front of Text) and Glow Edges to remove a scanned signature's white background."
-              onMouseDown={(e) => { e.preventDefault(); openSignaturePad() }}
-              className="h-7 px-2 flex items-center gap-1 rounded hover:bg-gray-200 text-gray-700 transition-colors text-[11px] font-medium"
-            >
-              <PenTool className="h-3.5 w-3.5" />Signature
-            </button>
-            <button
-              type="button"
-              title="Insert an image (or just paste / drag one into the report). Click an inserted image for Word-style text wrapping — including Behind Text — and the Glow Edges effect that removes its background."
-              onMouseDown={(e) => { e.preventDefault(); imageInputRef.current?.click() }}
-              className="h-7 px-2 flex items-center gap-1 rounded hover:bg-gray-200 text-gray-700 transition-colors text-[11px] font-medium"
-            >
-              <ImageIcon className="h-3.5 w-3.5" />Image
-            </button>
-            <input
-              ref={imageInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              hidden
-              onChange={(e) => {
-                void onImageFilesPicked(e.target.files)
-                // Cleared so picking the same file twice in a row still fires
-                // a change event (the browser suppresses it otherwise).
-                e.target.value = ""
-              }}
+          <>
+            <RibbonTabBar
+              tab={ribbonTab}
+              onTab={setRibbonTab}
+              right={
+                <span className="whitespace-nowrap text-[11px] text-gray-400">
+                  {autoSaveState === "saving" ? "Saving…" : autoSaveState === "saved" ? "Saved" : ""}
+                  {autoSaveState !== "idle" ? " · " : ""}
+                  {numPages} page{numPages === 1 ? "" : "s"} · {docStats.words} words · {docStats.chars} characters
+                </span>
+              }
             />
-          </div>
+
+            <RibbonBar>
+              {ribbonTab === "Home" && (
+                <>
+                  <RibbonGroup label="Undo">
+                    <FmtBtn onRun={() => runFormat("undo", (e) => { e.chain().focus().undo().run() })}
+                      label={<Undo2 className="h-3.5 w-3.5" />} title="Undo (Ctrl+Z)" />
+                    <FmtBtn onRun={() => runFormat("redo", (e) => { e.chain().focus().redo().run() })}
+                      label={<Redo2 className="h-3.5 w-3.5" />} title="Redo (Ctrl+Y)" />
+                    <button
+                      type="button"
+                      title="Format painter — pick up this text's formatting, then select the text to paint it onto"
+                      onMouseDown={(e) => { e.preventDefault(); toggleFormatPainter() }}
+                      className={`h-7 w-7 flex items-center justify-center rounded transition-colors ${painterMarks ? "bg-blue-100 text-blue-700" : "hover:bg-gray-200 text-gray-700"
+                        }`}
+                    >
+                      <Paintbrush className="h-3.5 w-3.5" />
+                    </button>
+                  </RibbonGroup>
+
+                  <RibbonGroup label="Font">
+                    <FontPicker value={fontFamily} onPick={applyFontFamily} />
+                    <div className="flex items-center border border-gray-200 rounded overflow-hidden mr-1 bg-white">
+                      <button
+                        type="button" title="Decrease font size"
+                        onMouseDown={(e) => { e.preventDefault(); changeFontSize(-2) }}
+                        className="h-7 px-2 flex items-center justify-center hover:bg-gray-100 text-gray-600 gap-0.5 border-r border-gray-200"
+                      >
+                        <span className="text-[10px] font-bold">A</span>
+                        <ChevronDown className="h-2.5 w-2.5 text-blue-500" />
+                      </button>
+                      <span className="w-8 text-center text-[11px] font-medium text-gray-700 select-none">
+                        {fontSize}
+                      </span>
+                      <button
+                        type="button" title="Increase font size"
+                        onMouseDown={(e) => { e.preventDefault(); changeFontSize(2) }}
+                        className="h-7 px-2 flex items-center justify-center hover:bg-gray-100 text-gray-600 gap-0.5 border-l border-gray-200"
+                      >
+                        <span className="text-xs font-bold text-gray-700">A</span>
+                        <ChevronUp className="h-2.5 w-2.5 text-blue-500" />
+                      </button>
+                    </div>
+                    <FmtBtn onRun={() => runFormat("bold", (e) => { e.chain().focus().toggleBold().run() })}
+                      label={<Bold className="h-3.5 w-3.5 stroke-[2.5]" />} title="Bold (Ctrl+B)" />
+                    <FmtBtn onRun={() => runFormat("italic", (e) => { e.chain().focus().toggleItalic().run() })}
+                      label={<Italic className="h-3.5 w-3.5" />} title="Italic (Ctrl+I)" />
+                    <FmtBtn onRun={() => runFormat("underline", (e) => { e.chain().focus().toggleUnderline().run() })}
+                      label={<Underline className="h-3.5 w-3.5" />} title="Underline (Ctrl+U)" />
+                    <FmtBtn onRun={() => runFormat("strikeThrough", (e) => { e.chain().focus().toggleStrike().run() })}
+                      label={<Strikethrough className="h-3.5 w-3.5" />} title="Strikethrough" />
+                    <FmtBtn onRun={() => runFormat("superscript", (e) => { e.chain().focus().toggleSuperscript().run() })}
+                      label={<SuperscriptIcon className="h-3.5 w-3.5" />} title="Superscript — cm², mm³" />
+                    <FmtBtn onRun={() => runFormat("subscript", (e) => { e.chain().focus().toggleSubscript().run() })}
+                      label={<SubscriptIcon className="h-3.5 w-3.5" />} title="Subscript" />
+                    <ColorPicker
+                      kind="text"
+                      value={textColor ?? undefined}
+                      onPick={applyTextColor}
+                      onClear={() => applyTextColor(null)}
+                    />
+                    <ColorPicker
+                      kind="highlight"
+                      value={highlightColor ?? undefined}
+                      onPick={applyHighlight}
+                      onClear={() => applyHighlight(null)}
+                    />
+                    <FmtBtn onRun={() => runFormat("removeFormat", (e) => { e.chain().focus().unsetAllMarks().clearNodes().run() })}
+                      label={<span className="text-[11px] text-gray-400 font-medium">Clear</span>} title="Clear formatting" />
+                  </RibbonGroup>
+
+                  <RibbonGroup label="Paragraph">
+                    <FmtBtn onRun={() => runFormat("justifyLeft", (e) => { e.chain().focus().setTextAlign("left").run() })}
+                      label={<AlignLeft className="h-3.5 w-3.5" />} title="Align left" />
+                    <FmtBtn onRun={() => runFormat("justifyCenter", (e) => { e.chain().focus().setTextAlign("center").run() })}
+                      label={<AlignCenter className="h-3.5 w-3.5" />} title="Center" />
+                    <FmtBtn onRun={() => runFormat("justifyRight", (e) => { e.chain().focus().setTextAlign("right").run() })}
+                      label={<AlignRight className="h-3.5 w-3.5" />} title="Align right" />
+                    <FmtBtn onRun={() => runFormat("insertUnorderedList", (e) => { e.chain().focus().toggleBulletList().run() })}
+                      label={<List className="h-3.5 w-3.5" />} title="Bullet list" />
+                    <FmtBtn onRun={() => runFormat("insertOrderedList", (e) => { e.chain().focus().toggleOrderedList().run() })}
+                      label={<span className="text-[11px] font-semibold">1.</span>} title="Numbered list" />
+                    <select
+                      defaultValue=""
+                      onChange={(e) => {
+                        const v = e.target.value
+                        e.target.value = ""
+                        if (!v) return
+                        if (v.startsWith("start:")) editor?.chain().focus().setListStart(Number(v.slice(6))).run()
+                        else editor?.chain().focus().setListStyle(v).run()
+                        schedulePaginate()
+                      }}
+                      className="h-7 mr-1 rounded border border-gray-200 bg-white px-1 text-[11px] text-gray-700 focus:border-blue-400 focus:outline-none"
+                      title="List style (click inside a list first)"
+                    >
+                      <option value="" disabled>List</option>
+                      {BULLET_STYLES.map((s) => <option key={s} value={s}>• {s}</option>)}
+                      {ORDERED_STYLES.map((s) => <option key={s} value={s}>1. {s}</option>)}
+                      <option value="start:1">Restart at 1</option>
+                    </select>
+                    <FmtBtn onRun={() => changeIndent(-1)}
+                      label={<IndentDecrease className="h-3.5 w-3.5" />} title="Decrease indent (Shift+Tab)" />
+                    <FmtBtn onRun={() => changeIndent(1)}
+                      label={<IndentIncrease className="h-3.5 w-3.5" />} title="Increase indent (Tab)" />
+                    <ParagraphMenu
+                      onIndent={changeIndent}
+                      onFormat={setParagraphSpacing}
+                      onLineSpacing={applyLineSpacing}
+                    />
+                  </RibbonGroup>
+
+                  <RibbonGroup label="Styles">
+                    <StyleGallery value={currentStyle} onPick={applyStyle} />
+                  </RibbonGroup>
+
+                  <RibbonGroup label="Editing">
+                    <button
+                      type="button"
+                      title="Find and replace (Ctrl+H)"
+                      onMouseDown={(e) => { e.preventDefault(); setFindMode("replace") }}
+                      className="h-7 px-2 flex items-center gap-1 rounded hover:bg-gray-200 text-gray-700 transition-colors text-[11px] font-medium"
+                    >
+                      <SearchIcon className="h-3.5 w-3.5" />Find
+                    </button>
+                  </RibbonGroup>
+                </>
+              )}
+
+              {ribbonTab === "Insert" && (
+                <>
+                  <RibbonGroup label="Table">
+                    <TableGridPicker onPick={insertTable} />
+                    <button
+                      type="button" title="Delete table (click inside a table first)"
+                      onMouseDown={(e) => { e.preventDefault(); deleteTable() }}
+                      className="h-7 w-7 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button" title="Add row below (click inside a table row first)"
+                      onMouseDown={(e) => { e.preventDefault(); addTableRow() }}
+                      className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
+                    >
+                      +Row
+                    </button>
+                    <button
+                      type="button" title="Delete current row (click inside a table row first)"
+                      onMouseDown={(e) => { e.preventDefault(); deleteTableRow() }}
+                      className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
+                    >
+                      -Row
+                    </button>
+                    <button
+                      type="button" title="Add column after (click inside a table column first)"
+                      onMouseDown={(e) => { e.preventDefault(); addTableColumn() }}
+                      className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
+                    >
+                      +Col
+                    </button>
+                    <button
+                      type="button" title="Delete current column (click inside a table column first)"
+                      onMouseDown={(e) => { e.preventDefault(); deleteTableColumn() }}
+                      className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
+                    >
+                      -Col
+                    </button>
+                    <button
+                      type="button" title="Reset this table's size — clears the dragged column widths and row heights so it goes back to full width with rows only as tall as their text (click inside a table first)"
+                      onMouseDown={(e) => { e.preventDefault(); resetTableSize() }}
+                      className="h-7 px-1.5 flex items-center justify-center rounded hover:bg-gray-200 text-gray-700 transition-colors text-[10px] font-semibold"
+                    >
+                      Fit
+                    </button>
+                  </RibbonGroup>
+
+                  <RibbonGroup label="Cells">
+                    <ColorPicker
+                      kind="highlight"
+                      value={undefined}
+                      onPick={(c) => { editor?.chain().focus().setCellShading(c).run(); schedulePaginate() }}
+                      onClear={() => { editor?.chain().focus().setCellShading(null).run(); schedulePaginate() }}
+                    />
+                    <select
+                      defaultValue=""
+                      onChange={(e) => {
+                        const v = e.target.value
+                        e.target.value = ""
+                        if (!v || !editor) return
+                        if (v === "header") editor.chain().focus().toggleHeaderRow().run()
+                        else if (v === "borders") editor.chain().focus().toggleTableBorders().run()
+                        else editor.chain().focus().setCellVerticalAlign(v as "top" | "middle" | "bottom").run()
+                        schedulePaginate()
+                      }}
+                      className="h-7 mr-1 rounded border border-gray-200 bg-white px-1 text-[11px] text-gray-700 focus:border-blue-400 focus:outline-none"
+                      title="Table options (click inside a table first)"
+                    >
+                      <option value="" disabled>Cells</option>
+                      <option value="header">Header row on/off (repeats on every page)</option>
+                      <option value="borders">Borders on/off</option>
+                      <option value="top">Align top</option>
+                      <option value="middle">Align middle</option>
+                      <option value="bottom">Align bottom</option>
+                    </select>
+                  </RibbonGroup>
+
+                  <RibbonGroup label="Illustrations">
+                    <button
+                      type="button"
+                      title="Insert a signature (draw, type or upload). Once placed, click it for the same picture toolbar as an image — text wrapping (Behind Text / In Front of Text) and Glow Edges to remove a scanned signature's white background."
+                      onMouseDown={(e) => { e.preventDefault(); openSignaturePad() }}
+                      className="h-7 px-2 flex items-center gap-1 rounded hover:bg-gray-200 text-gray-700 transition-colors text-[11px] font-medium"
+                    >
+                      <PenTool className="h-3.5 w-3.5" />Signature
+                    </button>
+                    <button
+                      type="button"
+                      title="Insert an image (or just paste / drag one into the report). Click an inserted image for Word-style text wrapping — including Behind Text — and the Glow Edges effect that removes its background."
+                      onMouseDown={(e) => { e.preventDefault(); imageInputRef.current?.click() }}
+                      className="h-7 px-2 flex items-center gap-1 rounded hover:bg-gray-200 text-gray-700 transition-colors text-[11px] font-medium"
+                    >
+                      <ImageIcon className="h-3.5 w-3.5" />Image
+                    </button>
+                    <input
+                      ref={imageInputRef}
+                      type="file"
+                      accept="image/*"
+                      multiple
+                      hidden
+                      onChange={(e) => {
+                        void onImageFilesPicked(e.target.files)
+                        // Cleared so picking the same file twice in a row still fires
+                        // a change event (the browser suppresses it otherwise).
+                        e.target.value = ""
+                      }}
+                    />
+                  </RibbonGroup>
+
+                  <RibbonGroup label="Text">
+                    <SymbolPicker onPick={insertSymbol} />
+                    <QuickPhrases onInsert={insertPhrase} getSelectionHtml={readSelectionForPhrase} />
+                  </RibbonGroup>
+
+                  <RibbonGroup label="Breaks">
+                    <button
+                      type="button"
+                      title="Page break — start a new sheet here (Ctrl+Enter)"
+                      onMouseDown={(e) => { e.preventDefault(); insertPageBreak() }}
+                      className="h-7 px-2 flex items-center gap-1 rounded hover:bg-gray-200 text-gray-700 transition-colors text-[11px] font-medium"
+                    >
+                      <SeparatorHorizontal className="h-3.5 w-3.5" />Page break
+                    </button>
+                  </RibbonGroup>
+                </>
+              )}
+
+            </RibbonBar>
+          </>
+        )}
+
+        {/* Find & replace — docked under the toolbar, like Word's pane */}
+        {!isReadOnly && findMode && (
+          <FindReplacePanel editor={editor} mode={findMode} onClose={() => setFindMode(null)} />
         )}
       </div>
 
@@ -2593,19 +3355,28 @@ function ReportEditorInner() {
       <div className="flex flex-col sm:flex-row flex-1 min-h-screen bg-slate-200">
 
         {/* ── Templates — a separate panel to the left of the document, never
-            overlapping or sitting inside the report itself ── */}
+            overlapping or sitting inside the report itself. It sticks below the
+            toolbar, and the whole panel is one scroll area: search, categories
+            and every card scroll together, so nothing can end up parked below
+            the fold out of reach. Its own title bar stays pinned while it
+            scrolls, so Close is always one click away. ── */}
         <AnimatePresence>
           {showTemplates && (
             <motion.aside
               key="template-sidebar"
+              ref={templatePanelRef}
               initial={{ opacity: 0, x: -16 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -16 }}
               transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-              className="w-full sm:w-[300px] shrink-0 bg-white border-b sm:border-b-0 sm:border-r border-gray-200 flex flex-col"
+              style={{
+                "--tpl-top": `${toolbarBottom}px`,
+                maxHeight: panelMaxH ? `${panelMaxH}px` : undefined,
+              } as React.CSSProperties}
+              className="w-full sm:w-[300px] shrink-0 bg-white border-b sm:border-b-0 sm:border-r border-gray-200 flex flex-col overflow-y-auto overscroll-contain sm:sticky sm:self-start sm:top-[var(--tpl-top)]"
             >
               {/* Sidebar header */}
-              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+              <div className="sticky top-0 z-10 flex items-center justify-between bg-white px-4 py-3 border-b border-gray-100">
                 <div className="flex items-center gap-1.5">
                   <LayoutTemplate className="h-4 w-4 text-blue-500" />
                   <p className="text-sm font-semibold text-gray-800">Templates</p>
@@ -2655,15 +3426,17 @@ function ReportEditorInner() {
                 </div>
               )}
 
-              {/* Adding/removing templates happens on the Add Template page,
-                  not here — this picker is browse-and-apply only. */}
+              {/* Adding a template happens right here — leaving the editor for
+                  the Add Template page meant abandoning the report being
+                  written. Removing one still lives on that page. */}
               <div className="px-4 pt-3">
-                <Link
-                  href="/add-template"
+                <button
+                  type="button"
+                  onClick={() => setAddTemplateOpen(true)}
                   className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-200 text-gray-500 hover:border-blue-300 hover:text-blue-600 transition-colors"
                 >
                   <Upload className="h-3.5 w-3.5" />Add Template
-                </Link>
+                </button>
               </div>
 
               {/* Count label */}
@@ -2672,9 +3445,10 @@ function ReportEditorInner() {
                 {(templateSearchResults ?? allTemplates(templateTab)).length !== 1 ? "s" : ""}
               </p>
 
-              {/* Template list — single column, scrolls within the sidebar so it
-                  never needs to push or overlap the document beside it. */}
-              <div className="flex-1 px-4 py-3 space-y-2 overflow-y-auto max-h-[50vh] sm:max-h-none">
+              {/* Template list — single column. The panel around it does the
+                  scrolling; a second scrollbar in here only ever shrank the
+                  list into a sliver. */}
+              <div className="px-4 py-3 space-y-2">
                 {templateSearchResults !== null ? (
                   templateSearchResults.length === 0 ? (
                     <p className="text-center text-xs text-gray-400 py-8">No templates match &ldquo;{templateSearch}&rdquo;.</p>
@@ -2684,7 +3458,7 @@ function ReportEditorInner() {
                         key={tpl.id}
                         tpl={tpl}
                         categoryLabel={categoryTabLabel(tpl.category)}
-                        onApply={() => applyTemplate(tpl)}
+                        onApply={() => { void applyTemplate(tpl) }}
                       />
                     ))
                   )
@@ -2698,7 +3472,7 @@ function ReportEditorInner() {
                           <TemplateCard
                             key={tpl.id}
                             tpl={tpl}
-                            onApply={() => applyTemplate(tpl)}
+                            onApply={() => { void applyTemplate(tpl) }}
                           />
                         ))
                       )}
@@ -2715,7 +3489,10 @@ function ReportEditorInner() {
           <div
             ref={wrapRef}
             className="relative max-w-[794px] mx-auto"
-            style={{ minHeight: `${numPages * A4_STRIDE - A4_GAP_PX}px` }}
+            // `zoom` rather than a transform: it reflows, so the sheet backdrop,
+            // the caret and every drag handle stay aligned with the text. What
+            // measures the document divides its rects back out (see zoomRef).
+            style={{ minHeight: `${numPages * A4_STRIDE - A4_GAP_PX}px`, zoom }}
             onClick={handleBodyClick}
             onPointerDown={handleBodyPointerDown}
           >
@@ -2837,6 +3614,41 @@ function ReportEditorInner() {
               {/* ── Document body ── */}
               {showDoc && study && (
                 <>
+                  {/* ── The empty line above the patient box ──
+                  Word opens a report with the caret in a blank paragraph above
+                  the patient table; pressing Enter there walks the whole report
+                  down the page. The patient box and heading here are React
+                  elements rather than document nodes, so this stands in for that
+                  paragraph: click it for a caret, Enter adds a blank line,
+                  Backspace takes one away. The lines are real height in the
+                  flow, but they are inserted below the patient box (see further
+                  down) so the box itself never moves. */}
+                  {!isReadOnly && (
+                    <div
+                      contentEditable
+                      suppressContentEditableWarning
+                      spellCheck={false}
+                      data-top-spacer=""
+                      title="Press Enter to push the report down, Backspace to pull it back up"
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault()
+                          setTopSpacerLines((n) => Math.min(30, n + 1))
+                        } else if (e.key === "Backspace" || e.key === "Delete") {
+                          e.preventDefault()
+                          setTopSpacerLines((n) => Math.max(0, n - 1))
+                        } else if (e.key.length === 1) {
+                          // It is space, not a paragraph — the report's own text
+                          // belongs in the body below.
+                          e.preventDefault()
+                        }
+                        schedulePaginate()
+                      }}
+                      className="relative z-30 outline-none cursor-text"
+                      style={{ height: "24px" }}
+                    />
+                  )}
+
                   {/* Patient info — every field editable in place (except study),
                   matches the printed report header. Name/Ref By/Age/Sex edit
                   the patient's actual registration record (so bills and other
@@ -3024,6 +3836,15 @@ function ReportEditorInner() {
                     </div>
                   </div>
 
+                  {/* The blank lines the caret strip above counts out. They live
+                  HERE, under the patient box, so pressing Enter moves the study
+                  heading and the report text down while the patient box stays
+                  where the doctor put it — the box is a fixed part of the
+                  letterhead, not something the typing should shove around. */}
+                  {topSpacerLines > 0 && (
+                    <div aria-hidden style={{ height: `${topSpacerLines * 24}px` }} />
+                  )}
+
                   {/* Study heading — editable, boxed like the printed report */}
                   <div
                     ref={titleWrapRef}
@@ -3091,11 +3912,16 @@ function ReportEditorInner() {
                           }
                         }}
                         title={isReadOnly ? undefined : "Click to edit the study heading"}
+                        // Empty until a template is applied — see the
+                        // `.doc-heading` rules in globals.css, which show this
+                        // hint while the box is editable and collapse the box
+                        // entirely on a submitted report that has no heading.
+                        data-placeholder="Apply a template, or type a heading"
                         style={{
                           ...(headingFont ? { fontFamily: headingFont } : {}),
                           ...(titleBoxWidthPx ? { width: `${titleBoxWidthPx}px` } : {}),
                         }}
-                        className={`text-center font-bold text-base py-1 px-8 min-w-[240px] border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900 focus:outline-none${isReadOnly ? "" : " hover:bg-blue-50/60 focus:bg-blue-50/60 transition-colors cursor-text"
+                        className={`doc-heading text-center font-bold text-base py-1 px-8 min-w-[240px] border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900 focus:outline-none${isReadOnly ? "" : " hover:bg-blue-50/60 focus:bg-blue-50/60 transition-colors cursor-text"
                           }`}
                       />
                       {!isReadOnly && (
@@ -3145,7 +3971,7 @@ function ReportEditorInner() {
                     className="mt-0 select-none text-gray-900 w-full cursor-text"
                   >
                     <SignatureColumns
-                      signatories={signatories}
+                      signatories={reportSignatories}
                       layouts={loadedSigLayout}
                       editable={!isReadOnly}
                     />
@@ -3242,7 +4068,59 @@ function ReportEditorInner() {
             )}
           </div>
         </div>
+
       </div>
+
+      {/* Word's right-click menu and selection mini toolbar, over the whole
+          document (heading, patient box and body alike) — they run the same
+          handlers as the toolbar above, so they format whichever region the
+          caret is in. */}
+      <EditorMenus
+        editor={editor}
+        containerRef={wrapRef}
+        disabled={isReadOnly || !showDoc}
+        actions={{
+          fontFamily,
+          fontSize,
+          onFontFamily: applyFontFamily,
+          onFontSizeStep: changeFontSize,
+          onLineSpacing: applyLineSpacing,
+          onBold: () => runFormat("bold", (e) => { e.chain().focus().toggleBold().run() }),
+          onItalic: () => runFormat("italic", (e) => { e.chain().focus().toggleItalic().run() }),
+          onUnderline: () => runFormat("underline", (e) => { e.chain().focus().toggleUnderline().run() }),
+          onStrike: () => runFormat("strikeThrough", (e) => { e.chain().focus().toggleStrike().run() }),
+          onSuperscript: () => runFormat("superscript", (e) => { e.chain().focus().toggleSuperscript().run() }),
+          onSubscript: () => runFormat("subscript", (e) => { e.chain().focus().toggleSubscript().run() }),
+          textColor: textColor ?? undefined,
+          highlightColor: highlightColor ?? undefined,
+          onTextColor: applyTextColor,
+          onHighlight: applyHighlight,
+          onSymbol: insertSymbol,
+          onAlign: (align) => runFormat(
+            align === "left" ? "justifyLeft" : align === "center" ? "justifyCenter" : "justifyRight",
+            (e) => { e.chain().focus().setTextAlign(align).run() },
+          ),
+          onBulletList: () => runFormat("insertUnorderedList", (e) => { e.chain().focus().toggleBulletList().run() }),
+          onOrderedList: () => runFormat("insertOrderedList", (e) => { e.chain().focus().toggleOrderedList().run() }),
+          onClearFormat: () => runFormat("removeFormat", (e) => { e.chain().focus().unsetAllMarks().clearNodes().run() }),
+          table: tableMenuActions,
+        }}
+      />
+
+      <AddTemplateDialog
+        open={addTemplateOpen}
+        onClose={() => setAddTemplateOpen(false)}
+        categories={allCategoryTabs}
+        defaultCategory={templateTab}
+        currentBodyHtml={showDoc ? readCleanBody() : ""}
+        currentHeading={getDocTitle()}
+        onAdded={(category, tpl) => {
+          // Straight into the panel's own list, so the new template is one
+          // click away without a refetch.
+          setCustomTemplates((prev) => ({ ...prev, [category]: [tpl, ...(prev[category] ?? [])] }))
+          setTemplateTab(category)
+        }}
+      />
 
       <SignaturePadDialog
         key={sigPadKey}

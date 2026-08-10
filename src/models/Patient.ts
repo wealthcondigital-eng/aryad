@@ -22,6 +22,7 @@ export interface ISignatureLayout {
   width?: number
   height?: number
   hidden?: boolean
+  hiddenSignatory?: boolean
   overrideImage?: string
 }
 
@@ -32,6 +33,7 @@ export interface IStudyEntry {
   heading?: string            // doctor-edited report heading (falls back to the study name if unset)
   headingFont?: string        // font family chosen for the heading, applied in print/DOCX output
   patientBoxFont?: string     // font family chosen for the NAME/REF.BY/DATE/AGE/SEX box, applied in print/DOCX output
+  topSpacerLines?: number      // blank lines above the patient box
   headerHeightPx?: number     // resized top letterhead band (editor/print/PDF); unset falls back to LETTERHEAD_TOP_PX
   footerHeightPx?: number     // resized bottom letterhead band (editor/print/PDF); unset falls back to LETTERHEAD_BOTTOM_PX
   reportDate?: string         // per-study override for the date shown in the patient box (falls back to the patient's registration date)
@@ -97,6 +99,7 @@ const StudyEntrySchema = new Schema<IStudyEntry>(
     heading:      { type: String, default: "" },
     headingFont:  { type: String, default: "" },
     patientBoxFont: { type: String, default: "" },
+    topSpacerLines: { type: Number },
     headerHeightPx: { type: Number },
     footerHeightPx: { type: Number },
     reportDate:   { type: String, default: "" },

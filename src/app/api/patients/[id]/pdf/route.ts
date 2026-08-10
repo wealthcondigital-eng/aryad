@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import Patient from "@/models/Patient"
+import { pdfResponse, pdfFileName, pdfUnavailableResponse } from "@/lib/pdf-response"
 
-// GET /api/patients/:id/pdf?sidx=N — public (no auth) so the shared link works for patients
+// GET /api/patients/:id/pdf?sidx=N — public (no auth) so a shared link works
+// for the patient. The fallback used when a report has no pretty slug yet.
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     await connectDB()
@@ -10,21 +12,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const sidx = parseInt(new URL(req.url).searchParams.get("sidx") ?? "0", 10) || 0
     const patient = await Patient.findById(id).select("reportPdf name study studies.reportPdf studies.name")
     const pdf: string | undefined = patient?.studies?.[sidx]?.reportPdf || patient?.reportPdf
-    if (!pdf) {
-      return NextResponse.json({ error: "PDF not available" }, { status: 404 })
-    }
+    if (!pdf) return pdfUnavailableResponse("This report isn't ready yet.")
 
-    const buffer   = Buffer.from(pdf, "base64")
-    const safeName = (patient.name || "Patient").replace(/\s+/g, "_").replace(/[^A-Za-z0-9_]/g, "")
-    const fileName = `${safeName}_Report.pdf`
-
-    return new NextResponse(buffer, {
-      headers: {
-        "Content-Type":        "application/pdf",
-        "Content-Disposition": `inline; filename="${fileName}"`,
-        "Cache-Control":       "no-store",
-      },
-    })
+    const studyName = patient?.studies?.[sidx]?.name || patient?.study
+    return pdfResponse(pdf, pdfFileName(patient?.name, "Report", studyName), req)
   } catch {
     return NextResponse.json({ error: "Server error" }, { status: 500 })
   }

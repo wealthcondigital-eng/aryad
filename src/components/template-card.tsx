@@ -14,7 +14,12 @@ import type { ReportTemplate } from "@/lib/report-templates"
 const BUILT_IN_TAB_LABEL: Record<string, string> = {
   usg: "USG", doppler: "Doppler", xray: "X-Ray", pathology: "Pathology", obstetric: "Obstetric USG",
 }
-export const categoryTabLabel = (cat: string) => BUILT_IN_TAB_LABEL[cat] ?? cat
+// A category the clinic typed keeps its own casing ("MRI", "CT Scan"); one
+// created in lower case by a bulk import reads better capitalised.
+export const prettyCategory = (cat: string) =>
+  cat === cat.toLowerCase() ? cat.replace(/\b[a-z]/g, (c) => c.toUpperCase()) : cat
+
+export const categoryTabLabel = (cat: string) => BUILT_IN_TAB_LABEL[cat] ?? prettyCategory(cat)
 
 export function TemplateCard({
   tpl,

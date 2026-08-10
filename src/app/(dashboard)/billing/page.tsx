@@ -26,6 +26,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { useConfirm, showAlert } from "@/components/confirm-dialog"
 
 interface BillDoc {
   _id: string
@@ -260,7 +261,7 @@ function printBillReceipt(b: BillDoc, index: number) {
   const blob = new Blob([html], { type: "text/html" })
   const url  = URL.createObjectURL(blob)
   const win  = window.open(url, "_blank", "width=620,height=800")
-  if (!win) { alert("Please allow pop-ups to print."); URL.revokeObjectURL(url); return }
+  if (!win) { showAlert({ title: "Pop-up blocked", message: "Allow pop-ups for this site to print." }); URL.revokeObjectURL(url); return }
   win.onafterprint = () => { win.close(); URL.revokeObjectURL(url) }
   setTimeout(() => win.print(), 600)
 }
@@ -524,6 +525,7 @@ function BillsTable({
 }
 
 export default function BillingPage() {
+  const { notify } = useConfirm()
   const { user } = useRole()
   const [bills,        setBills]       = useState<BillDoc[]>([])
   const [loading,      setLoading]     = useState(true)
@@ -567,7 +569,7 @@ export default function BillingPage() {
       })
       fetchBills()
     } catch {
-      alert("Failed to update bill.")
+      await notify({ title: "Update failed", message: "The bill could not be updated. Please try again." })
     }
   }
 

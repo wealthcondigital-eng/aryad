@@ -10,6 +10,8 @@ export interface ReportTemplate {
   heading: string   // study heading shown centered + underlined, editable in the editor
   preview: string
   body: string      // HTML for the contentEditable report body
+  signatureCount?: number // present on Word imports; limits the fixed sign-off columns
+  preserveSignature?: boolean // custom DOCX keeps its own exact sign-off formatting
   _id?: string      // present only on clinic-added templates (backed by MongoDB) — lets
                      // the UI tell them apart from the built-in bundled ones and offer delete
 }

@@ -19,11 +19,13 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { useRole } from "@/lib/role-context"
-import { printShellHtml, reportHeaderHtml, reportTitleHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, MM_TO_PX, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
+import { printShellHtml, reportHeaderHtml, reportTitleHtml, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, MM_TO_PX, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, type SignatureLayout } from "@/lib/report-signatures"
 import { parseHtml, makeImageRun } from "@/lib/report-docx"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { motion } from "motion/react"
+import { useConfirm, showAlert } from "@/components/confirm-dialog"
+import { reportShareUrl, resolveReportShareUrl } from "@/lib/share-links"
 
 interface StudyEntry {
   name: string
@@ -120,15 +122,20 @@ function builtInReportHref(r: ReportRow, mode: "fill" | "edit" = "fill") {
 }
 
 function pdfUrlFor(r: ReportRow) {
-  return r.slug
-    ? `${window.location.origin}/${r.slug}/pdf`
-    : `${window.location.origin}/api/patients/${r.p._id}/pdf?sidx=${r.sidx}`
+  return reportShareUrl(window.location.origin, { slug: r.slug, patientId: r.p._id, sidx: r.sidx })
 }
 
-function whatsAppShare(r: ReportRow) {
-  const msg = `Dear ${r.p.name},\n\nYour *${r.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrlFor(r)}`
-  // Open WhatsApp Web on the logged-in account; sender picks the recipient
-  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank")
+async function whatsAppShare(r: ReportRow) {
+  // Opened before the await, or a popup blocker eats the window.
+  const win = window.open("", "_blank")
+  const url = await resolveReportShareUrl(window.location.origin, {
+    slug: r.slug, patientId: r.p._id, sidx: r.sidx,
+  })
+  const msg = `Dear ${r.p.name},\n\nYour *${r.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${url}`
+  // WhatsApp Web on the logged-in account; the sender picks the recipient.
+  const wa = `https://wa.me/?text=${encodeURIComponent(msg)}`
+  if (win) win.location.href = wa
+  else window.open(wa, "_blank")
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -199,11 +206,13 @@ async function generateDocxBase64(r: ReportRow, reportHtml: string, signatureLay
   }
 
   const children = [
-    new Paragraph({
+    // Only the report's own heading (the template's, or what the doctor typed).
+    // No heading means no title line — the study is the referral, not the title.
+    ...(heading?.trim() ? [new Paragraph({
       alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: heading || r.study.toUpperCase(), bold: true, size: 26, underline: {} })],
+      children: [new TextRun({ text: heading, bold: true, size: 26, underline: {} })],
       spacing: { before: 120, after: 240 },
-    }),
+    })] : []),
     ...makeParas(cleanHtml),
     new Paragraph({ children: [new TextRun("")], spacing: { before: 560 } }),
     new Table({
@@ -313,7 +322,9 @@ async function printReportDirect(r: ReportRow) {
   const { body: reportBody, heading, headingFont, patientBoxFont, headerHeightPx, footerHeightPx, signatureLayout } = await fetchStudyReport(r)
   const signatories = await fetchSignatories()
   const p = r.p
-  const title = heading || getDisplayTitle(r.study).toUpperCase()
+  // Only the heading the report was saved with — a report written without a
+  // template has none, and prints without a heading box (reportTitleHtml).
+  const title = heading || ""
 
   const cleanBody = stripReportEditMarks(reportBody)
   const body      = cleanBody || "<em style='color:#aaa;font-size:12px'>No report content saved.</em>"
@@ -329,12 +340,13 @@ ${reportTitleHtml(title, headingFont)}
   const blob = new Blob([html], { type: "text/html" })
   const url  = URL.createObjectURL(blob)
   const win  = window.open(url, "_blank", "width=820,height=1000")
-  if (!win) { alert("Please allow pop-ups to print."); URL.revokeObjectURL(url); return }
+  if (!win) { showAlert({ title: "Pop-up blocked", message: "Allow pop-ups for this site to print." }); URL.revokeObjectURL(url); return }
   win.onafterprint = () => { win.close(); URL.revokeObjectURL(url) }
   setTimeout(() => win.print(), 600)
 }
 
 export default function ReportsPage() {
+  const { confirm, notify } = useConfirm()
   const { user } = useRole()
   const [patients,     setPatients]     = useState<PatientDoc[]>([])
   const [loading,      setLoading]      = useState(true)
@@ -360,14 +372,14 @@ export default function ReportsPage() {
       let base64 = docx
       if (!base64) {
         if (!body) {
-          alert("No report content found. The report has not been submitted yet.")
+          await notify({ title: "Nothing to download", message: "This report has not been submitted yet." })
           return
         }
         base64 = await generateDocxBase64(r, body, signatureLayout, heading)
       }
       downloadDocx(base64, `Report_${r.p.name.replace(/\s+/g, "_")}_${(heading || r.study).replace(/[^A-Za-z0-9]+/g, "_")}.docx`)
     } catch {
-      alert("Failed to download. Please try again.")
+      await notify({ title: "Download failed", message: "Please try again." })
     } finally {
       setDownloadingKey(null)
     }
@@ -388,10 +400,14 @@ export default function ReportsPage() {
   // it was the patient's only study — the whole patient record.
   const handleDeleteReport = async (r: ReportRow) => {
     const isLast = (r.p.studies?.length ?? 1) <= 1
-    const msg = isLast
-      ? `Delete the "${r.study}" report for ${r.p.name}?\n\nThis is their only study, so the patient record and their bill will be deleted too. This cannot be undone.`
-      : `Delete the "${r.study}" report for ${r.p.name}?\n\nThe study is removed from the patient and its line comes off their bill. This cannot be undone.`
-    if (!confirm(msg)) return
+    if (!(await confirm({
+      title: `Delete the "${r.study}" report?`,
+      message: isLast
+        ? `${r.p.name} has no other study, so their patient record and bill will be deleted too. This cannot be undone.`
+        : `The study is removed from ${r.p.name} and its line comes off their bill. This cannot be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    }))) return
     try {
       const res = await fetch(`/api/patients/${r.p._id}`, {
         method: "PATCH",
@@ -401,7 +417,7 @@ export default function ReportsPage() {
       if (!res.ok) throw new Error()
       fetchPatients()
     } catch {
-      alert("Failed to delete the report. Please try again.")
+      await notify({ title: "Delete failed", message: "Please try again." })
     }
   }
 

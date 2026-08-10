@@ -11,6 +11,8 @@ export interface ITemplate extends Document {
   heading: string   // study heading shown centered + underlined in the editor
   preview: string   // short plain-text excerpt shown on the template card
   body: string      // HTML for the contentEditable report body
+  signatureCount?: number // doctors present in the imported Word sign-off
+  preserveSignature?: boolean // imported DOCX owns its original formatted sign-off
   createdAt: Date
 }
 
@@ -21,6 +23,8 @@ const TemplateSchema = new Schema<ITemplate>(
     heading:  { type: String, required: true, trim: true },
     preview:  { type: String, default: "" },
     body:     { type: String, required: true },
+    signatureCount: { type: Number, min: 0, max: 2, default: undefined },
+    preserveSignature: { type: Boolean, default: false },
   },
   { timestamps: true }
 )

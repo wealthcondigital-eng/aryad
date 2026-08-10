@@ -4,9 +4,11 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { X, Printer, Share2, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, MM_TO_PX, applyReportBodySpacing, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE, paginateDomBlocks, stripPageSpacerRows } from "@/lib/report-layout"
+import { reportHeaderHtml, reportTitleHtml, printShellHtml, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, MM_TO_PX, applyReportBodySpacing, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE, paginateDomBlocks, stripPageSpacerRows } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
 import { SignatureColumns } from "@/components/signature-columns"
+import { showAlert } from "@/components/confirm-dialog"
+import { reportShareUrl } from "@/lib/share-links"
 
 export interface ViewablePatient {
   _id: string
@@ -52,9 +54,11 @@ export function ReportViewModal({
   // older reports keep looking exactly as they always have.
   const [headerPx, setHeaderPx] = useState<number>(LETTERHEAD_TOP_PX)
   const [footerPx, setFooterPx] = useState<number>(LETTERHEAD_BOTTOM_PX)
-  // A saved heading keeps the exact casing the doctor typed; only the derived
-  // fallback is upper-cased (matching how the editor seeds it).
-  const displayTitle = savedHeading || getDisplayTitle(patient.study).toUpperCase()
+  // The heading the report was saved with, in the exact casing it was typed —
+  // which is the template's own heading, or whatever the doctor edited it to.
+  // A report written without a template has none, and shows no heading box at
+  // all: the study name belongs to the referral, not to the document.
+  const displayTitle = savedHeading
   useEffect(() => { fetchSignatories().then(setSignatories) }, [])
 
   // Pagination: lay the preview out as A4 sheets so the doctor sees where pages
@@ -218,9 +222,7 @@ export function ReportViewModal({
       })
       const data = await res.json()
       const slug = data?.patient?.studies?.[sidx]?.reportSlug || data?.patient?.reportSlug
-      const pdfUrl = slug
-        ? `${window.location.origin}/${slug}/pdf`
-        : `${window.location.origin}/api/patients/${patient._id}/pdf?sidx=${sidx}`
+      const pdfUrl = reportShareUrl(window.location.origin, { slug, patientId: patient._id, sidx })
 
       // Mobile Direct Share
       if (navigator.share && navigator.canShare) {
@@ -255,12 +257,12 @@ export function ReportViewModal({
 ${reportHeaderHtml({ name: patient.name, refBy: patient.referredBy, date, age: patient.age, gender: patient.gender, srNo: patient.srNo || undefined }, savedBoxFont)}
 ${reportTitleHtml(displayTitle, savedHeadingFont)}
 <div class="doc-field" style="${REPORT_BODY_STYLE}">${currentBody}</div>
-<div style="${REPORT_SIGS_STYLE}">${signatureColumnsHtml(signatories, signatureLayout)}</div>`, "", headerPx / MM_TO_PX, footerPx / MM_TO_PX)
+<div style="${REPORT_SIGS_STYLE}">${signatureColumnsHtml(signatories, signatureLayout)}</div>`, "", headerPx / MM_TO_PX, footerPx / MM_TO_PX, numPages)
 
     const blob = new Blob([html], { type: "text/html" })
     const url  = URL.createObjectURL(blob)
     const win  = window.open(url, "_blank", "width=820,height=1000")
-    if (!win) { alert("Please allow pop-ups."); URL.revokeObjectURL(url); return }
+    if (!win) { showAlert({ title: "Pop-up blocked", message: "Allow pop-ups for this site to print." }); URL.revokeObjectURL(url); return }
     win.onafterprint = () => { win.close(); URL.revokeObjectURL(url) }
     setTimeout(() => win.print(), 600)
   }
@@ -344,15 +346,18 @@ ${reportTitleHtml(displayTitle, savedHeadingFont)}
                   </div>
                 </div>
 
-                {/* Study title — boxed like the printed report */}
-                <div ref={titleWrapRef} className="flex justify-center mb-3">
-                  <div
-                    style={savedHeadingFont ? { fontFamily: savedHeadingFont } : undefined}
-                    className="text-center font-bold text-base py-1 px-8 min-w-[240px] border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900"
-                  >
-                    {displayTitle}
+                {/* Study title — boxed like the printed report. Omitted, box and
+                    all, when the report has no heading (see displayTitle). */}
+                {displayTitle && (
+                  <div ref={titleWrapRef} className="flex justify-center mb-3">
+                    <div
+                      style={savedHeadingFont ? { fontFamily: savedHeadingFont } : undefined}
+                      className="text-center font-bold text-base py-1 px-8 min-w-[240px] border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900"
+                    >
+                      {displayTitle}
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {/* Report body — no min-height: this modal only ever shows a
                     completed report's real content, and pagination below

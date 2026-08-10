@@ -26,6 +26,7 @@ export interface SignatureLayout {
   width?: number
   height?: number
   hidden?: boolean
+  hiddenSignatory?: boolean
   overrideImage?: string
 }
 
@@ -80,7 +81,7 @@ export function signatureColumnsHtml(signatories: Signatory[], layouts?: (Signat
   // Only a per-report overrideImage ever shows here — never the signatory's
   // master image from the Signatures page — matching the component exactly.
   const imageOf = (s?: Signatory, layout?: SignatureLayout | null) =>
-    s && !layout?.hidden ? layout?.overrideImage || undefined : undefined
+    s && !layout?.hidden && !layout?.hiddenSignatory ? layout?.overrideImage || undefined : undefined
   const img0 = imageOf(s0, l0)
   const img1 = imageOf(s1, l1)
   const hasAnyImg = !!(img0 || img1)
@@ -113,7 +114,7 @@ export function signatureColumnsHtml(signatories: Signatory[], layouts?: (Signat
 <div style="width:100%;display:flex;flex-direction:column;">
   ${hasAnyImg ? `<div style="display:flex;gap:32px;align-items:flex-end;margin-bottom:4px;">${imgHtml(img0, l0)}${imgHtml(img1, l1)}</div>` : ""}
   <div style="display:flex;gap:32px;">
-    ${textHtml(s0)}${textHtml(s1)}
+    ${l0?.hiddenSignatory ? '<div style="flex:1;"></div>' : textHtml(s0)}${l1?.hiddenSignatory ? '<div style="flex:1;"></div>' : textHtml(s1)}
   </div>
 </div>`
 }
@@ -136,6 +137,7 @@ export function drawPdfSignatures(
 
   for (let i = 0; i < 2; i++) {
     const layout = layouts?.[i]
+    if (layout?.hiddenSignatory) continue
     const displayImg = layout?.overrideImage
     if (!displayImg || layout?.hidden) continue
     const x = i === 0 ? M : rightX
@@ -145,15 +147,15 @@ export function drawPdfSignatures(
   }
 
   doc.setFont("helvetica", "bold"); doc.setFontSize(9); doc.setTextColor(0)
-  doc.text(signatories[0]?.name ?? "", M, y)
-  doc.text(signatories[1]?.name ?? "", rightX, y)
+  doc.text(layouts?.[0]?.hiddenSignatory ? "" : signatories[0]?.name ?? "", M, y)
+  doc.text(layouts?.[1]?.hiddenSignatory ? "" : signatories[1]?.name ?? "", rightX, y)
   y += ln(9)
 
   doc.setFont("helvetica", "normal"); doc.setFontSize(7.5); doc.setTextColor(60)
   const rows = Math.max(signatories[0]?.credentials.length ?? 0, signatories[1]?.credentials.length ?? 0)
   for (let i = 0; i < rows; i++) {
-    doc.text(signatories[0]?.credentials[i] ?? "", M, y)
-    doc.text(signatories[1]?.credentials[i] ?? "", rightX, y)
+    doc.text(layouts?.[0]?.hiddenSignatory ? "" : signatories[0]?.credentials[i] ?? "", M, y)
+    doc.text(layouts?.[1]?.hiddenSignatory ? "" : signatories[1]?.credentials[i] ?? "", rightX, y)
     y += ln(7.5)
   }
   return y
@@ -171,7 +173,7 @@ export async function buildDocxSignatureCells(signatories: Signatory[], layouts?
   const makeImg = (layout?: SignatureLayout | null) => {
     const children = []
     const displayImg = layout?.overrideImage
-    if (displayImg && !layout?.hidden) {
+    if (displayImg && !layout?.hidden && !layout?.hiddenSignatory) {
       children.push(new Paragraph({
         children: [new ImageRun({
           type: imageFormat(displayImg),
@@ -207,7 +209,7 @@ export async function buildDocxSignatureCells(signatories: Signatory[], layouts?
   return {
     imgLeft: makeImg(layouts?.[0]),
     imgRight: makeImg(layouts?.[1]),
-    textLeft: makeText(signatories[0]),
-    textRight: makeText(signatories[1]),
+    textLeft: makeText(layouts?.[0]?.hiddenSignatory ? undefined : signatories[0]),
+    textRight: makeText(layouts?.[1]?.hiddenSignatory ? undefined : signatories[1]),
   }
 }

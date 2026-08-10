@@ -15,6 +15,7 @@ const CONTENT_SIDE_PX = 56    // left/right content margin (Tailwind px-14)
 const CAPTURE_SCALE = 2       // render at 2x for crisp print/PDF quality
 
 export async function buildPagedPdfBlob(opts: {
+  topSpacerHtml?: string   // blank lines the doctor left under the patient box
   headerHtml: string       // reportHeaderHtml(...)
   titleHtml: string        // reportTitleHtml(...)
   bodyHtml: string         // cleaned report body HTML (font/bold/italic/images intact)
@@ -31,6 +32,7 @@ export async function buildPagedPdfBlob(opts: {
   content.style.cssText = `padding:${topPx}px ${CONTENT_SIDE_PX}px ${bottomPx}px;box-sizing:border-box;font-family:${DEFAULT_REPORT_FONT},Georgia,serif;`
   content.innerHTML = `
     <div>${opts.headerHtml}</div>
+    ${opts.topSpacerHtml ?? ""}
     <div>${opts.titleHtml}</div>
     <div id="pgb-body" class="doc-field report-paper text-gray-900" style="${REPORT_BODY_STYLE}">${opts.bodyHtml}</div>
     <div style="${REPORT_SIGS_STYLE}">${opts.signaturesHtml}</div>

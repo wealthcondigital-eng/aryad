@@ -21,6 +21,7 @@ import { registerColumns, RegisterSuggestions, SavedRegisterRow, sourceTypeOf } 
 import { readRegisterWorkbook, SheetRead, monthLabel } from "@/lib/xlsx-read"
 import { useRole } from "@/lib/role-context"
 import { autoCategory, STUDY_CATEGORIES } from "@/lib/study-catalogue"
+import { useConfirm } from "@/components/confirm-dialog"
 
 // Type-ahead lists and the "seen before" details for a repeat patient
 interface Facets {
@@ -67,6 +68,7 @@ function defaultDate(month: string) {
 }
 
 export default function RegisterPage() {
+  const { confirm, notify } = useConfirm()
   const { user } = useRole()
   const fileInput = useRef<HTMLInputElement>(null)
 
@@ -270,7 +272,12 @@ export default function RegisterPage() {
 
   const deleteRow = async (row: SavedRegisterRow) => {
     if (!row._id) return
-    if (!confirm(`Remove ${row.name || "this row"} from ${row.month ?? sheetMonth}?`)) return
+    if (!(await confirm({
+      title: "Remove row?",
+      message: `${row.name || "This row"} will be removed from ${row.month ?? sheetMonth}.`,
+      confirmLabel: "Remove",
+      danger: true,
+    }))) return
     setRowBusy(row._id)
     try {
       const res  = await fetch(`/api/register/${row._id}`, { method: "DELETE" })
@@ -437,10 +444,14 @@ export default function RegisterPage() {
 
   const deleteMonth = async () => {
     if (!activeMonth) return
-    const question = entries.length === 0
-      ? `Remove the empty ${activeMonth} sheet?`
-      : `Remove the ${activeMonth} sheet and all ${entries.length} of its rows — imported and hand-added? The Excel file itself is untouched.`
-    if (!confirm(question)) return
+    if (!(await confirm({
+      title: `Remove the ${activeMonth} sheet?`,
+      message: entries.length === 0
+        ? "The sheet is empty, so nothing else is affected."
+        : `All ${entries.length} of its rows — imported and hand-added — go with it. The Excel file itself is untouched.`,
+      confirmLabel: "Remove sheet",
+      danger: true,
+    }))) return
     setDeleting(true)
     try {
       await fetch(`/api/register?month=${encodeURIComponent(activeMonth)}`, { method: "DELETE" })

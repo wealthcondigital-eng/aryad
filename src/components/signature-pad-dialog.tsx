@@ -6,6 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { cutOutSignature } from "@/lib/signature-cutout"
 
 const SCRIPT_FONTS = [
   "'Segoe Script', 'Brush Script MT', cursive",
@@ -162,27 +163,11 @@ function TypePad({ onChange }: { onChange: (dataUrl: string | null) => void }) {
 }
 
 // A phone photo of a pen signature can be several MB straight off the camera —
-// far bigger than a signature ever needs to render at. Downscaling it here
-// keeps the report save payload small; skipping this step is what let a large
-// upload blow past the server's request-size limit and fail the save silently.
+// far bigger than a signature ever needs to render at. cutOutSignature caps the
+// resolution as it works and crops to the ink, which keeps the report save
+// payload small; skipping that is what let a large upload blow past the
+// server's request-size limit and fail the save silently.
 const MAX_UPLOAD_DIM = 900
-
-async function shrinkImage(rawDataUrl: string): Promise<string> {
-  try {
-    const img = await loadImage(rawDataUrl)
-    const scale = Math.min(1, MAX_UPLOAD_DIM / Math.max(img.naturalWidth, img.naturalHeight))
-    if (scale === 1 && rawDataUrl.length < 300_000) return rawDataUrl // already small enough
-    const canvas = document.createElement("canvas")
-    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale))
-    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale))
-    const ctx = canvas.getContext("2d")
-    if (!ctx) return rawDataUrl
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-    return canvas.toDataURL("image/jpeg", 0.85)
-  } catch {
-    return rawDataUrl
-  }
-}
 
 // A doctor's already-uploaded master signature (from the Signatures admin
 // page) shown as a one-click option — filling out a report shouldn't force
@@ -208,22 +193,34 @@ function SavedPad({ image, label, onChange }: { image: string; label?: string; o
 // signature, whatever the user has.
 function UploadPad({ onChange }: { onChange: (dataUrl: string | null) => void }) {
   const [preview, setPreview] = useState<string | null>(null)
+  const [working, setWorking] = useState(false)
   const [error, setError] = useState("")
   const inputRef = useRef<HTMLInputElement>(null)
 
   const handleFile = (file: File | null) => {
     if (!file) return
-    if (!/^image\//i.test(file.type)) {
-      setError("Please choose an image file.")
+    // Some browsers/desktop file pickers leave File.type blank, so keep the
+    // extension check as a fallback while still limiting this flow to the
+    // three signature formats supported by the Signatures page.
+    const supportedType = /^image\/(png|jpe?g)$/i.test(file.type)
+    const supportedName = /\.(png|jpe?g)$/i.test(file.name)
+    if (!supportedType && !(file.type === "" && supportedName)) {
+      setError("Please choose a PNG, JPG, or JPEG image.")
       return
     }
     setError("")
+    setWorking(true)
     const reader = new FileReader()
     reader.onload = async () => {
-      const dataUrl = await shrinkImage(reader.result as string)
+      // The cutout also does the downscaling. It has to: re-encoding as JPEG
+      // first (what this used to do) drops the alpha channel, so a signature
+      // could only ever land on the report as an opaque white box.
+      const dataUrl = await cutOutSignature(reader.result as string, MAX_UPLOAD_DIM)
       setPreview(dataUrl)
       onChange(dataUrl)
+      setWorking(false)
     }
+    reader.onerror = () => { setError("Could not read that file."); setWorking(false) }
     reader.readAsDataURL(file)
   }
 
@@ -233,15 +230,20 @@ function UploadPad({ onChange }: { onChange: (dataUrl: string | null) => void })
         className="w-full h-40 rounded-lg border-2 border-dashed border-gray-300 bg-white flex items-center justify-center overflow-hidden cursor-pointer"
         onClick={() => inputRef.current?.click()}
       >
-        {preview ? (
+        {working ? (
+          <p className="text-xs text-gray-400">Removing the background…</p>
+        ) : preview ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={preview} alt="Signature" className="max-h-36 max-w-full object-contain" />
         ) : (
           <p className="text-xs text-gray-400 flex items-center gap-1.5"><Upload className="h-3.5 w-3.5" />Click to choose an image</p>
         )}
       </div>
+      <p className="text-[11px] text-gray-500 text-center">
+        The paper behind the signature is removed automatically, so it sits on the report without a white box.
+      </p>
       <input
-        ref={inputRef} type="file" accept="image/*" className="hidden"
+        ref={inputRef} type="file" accept=".png,.jpg,.jpeg,image/png,image/jpeg" className="hidden"
         onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
       />
       {error && <p className="text-xs text-red-600">{error}</p>}

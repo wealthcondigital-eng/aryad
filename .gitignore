@@ -45,11 +45,26 @@ next-env.d.ts
 /deploy/onlyoffice/fonts/*
 !/deploy/onlyoffice/fonts/.gitkeep
 
-# clinic template files & sensitive docs — do not push to GitHub
+# clinic template files & sensitive docs — do not push to GitHub.
+# These are the clinic's real Word reports and registers: they carry actual
+# patient names, so they belong on the clinic's machines, not in the repo.
 /fwdsonographyformat/
 /fwdxrayformat/
+/OBSTRETIC FORMATS/
 sheet-copy.html
 sample.doc
 Report_Rakesh_Bedi.docx
+
+# Monthly register spreadsheets (JUN.xlsx and friends) — real patient rows.
+*.xlsx
+*.xls
+
+# One-off maintenance scripts and the template dumps they produce. Not part of
+# the app (tsconfig already excludes them) and the dumps hold report bodies.
+/scratch/
+
+# Word / LibreOffice lock files left behind while a document is open
+~$*
+.~lock.*#
 
 .vercel

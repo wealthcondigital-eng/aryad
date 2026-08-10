@@ -12,6 +12,9 @@ import { syncPatientToRegister } from "@/lib/register-sync"
 
 type PatientDoc = InstanceType<typeof Patient>
 
+/** Report versions kept per study — see where editHistory is trimmed below. */
+const MAX_REPORT_VERSIONS = 25
+
 // Older records only carry the single legacy `study` + report fields.
 // Materialize them into the `studies` array before any per-study operation.
 function ensureStudies(patient: PatientDoc) {
@@ -345,7 +348,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // ── Per-study report fields ──
     const {
       patientBoxOffsetX, patientBoxOffsetY, titleBoxOffsetX, titleBoxOffsetY,
-      patientBoxWidthPx, titleBoxWidthPx
+      patientBoxWidthPx, titleBoxWidthPx, topSpacerLines
     } = body
     const hasReportFields =
       reportStatus !== undefined || reportBody !== undefined ||
@@ -355,7 +358,8 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       headerHeightPx !== undefined || footerHeightPx !== undefined || reportDate !== undefined ||
       patientBoxOffsetX !== undefined || patientBoxOffsetY !== undefined ||
       titleBoxOffsetX !== undefined || titleBoxOffsetY !== undefined ||
-      patientBoxWidthPx !== undefined || titleBoxWidthPx !== undefined
+      patientBoxWidthPx !== undefined || titleBoxWidthPx !== undefined ||
+      topSpacerLines !== undefined
 
     if (hasReportFields) {
       const idx = Math.min(Math.max(Number(rawStudyIndex) || 0, 0), Math.max(patient.studies.length - 1, 0))
@@ -374,13 +378,32 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         if (patientBoxOffsetY !== undefined) entry.patientBoxOffsetY = patientBoxOffsetY
         if (titleBoxOffsetX !== undefined)   entry.titleBoxOffsetX   = titleBoxOffsetX
         if (titleBoxOffsetY !== undefined)   entry.titleBoxOffsetY   = titleBoxOffsetY
+        if (topSpacerLines !== undefined)    entry.topSpacerLines    = topSpacerLines
         if (patientBoxWidthPx !== undefined) entry.patientBoxWidthPx = patientBoxWidthPx
         if (titleBoxWidthPx !== undefined)   entry.titleBoxWidthPx   = titleBoxWidthPx
-        if (reportPdf    !== undefined) {
-          entry.reportPdf = reportPdf
-          if (!entry.reportSlug) entry.reportSlug = await generateSlug(patient, entry.name, id)
+        if (reportPdf    !== undefined) entry.reportPdf = reportPdf
+        // The shareable `/{patient-name}-{study-name}-report` link is minted as
+        // soon as the report has any content. It used to be minted only when a
+        // PDF was stored alongside it, so a report written and submitted from
+        // the editor — where the PDF is built later, on Share — had no slug,
+        // and every share button fell back to the raw
+        // `/api/patients/<mongo id>/pdf?sidx=0` URL. That is the ugly link the
+        // patient received.
+        if (!entry.reportSlug && (reportBody !== undefined || reportPdf !== undefined || reportStatus === "completed")) {
+          entry.reportSlug = await generateSlug(patient, entry.name, id)
         }
-        if (editHistoryEntry) entry.editHistory.unshift(editHistoryEntry)
+        if (editHistoryEntry) {
+          entry.editHistory.unshift(editHistoryEntry)
+          // Every entry carries a full copy of the report's HTML, and the editor
+          // now leaves one behind every few minutes of work — unbounded, that
+          // grows the patient document without limit (Mongo caps a document at
+          // 16MB) and makes every read of it heavier, including the reports
+          // list. The most recent MAX_REPORT_VERSIONS are what a doctor would
+          // ever roll back to.
+          if (entry.editHistory.length > MAX_REPORT_VERSIONS) {
+            entry.editHistory = entry.editHistory.slice(0, MAX_REPORT_VERSIONS)
+          }
+        }
         // Per-report drag/resize override for the two signature-block images
         if (signatureLayout !== undefined) entry.signatureLayout = signatureLayout
       }
@@ -409,7 +432,24 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     syncLegacyMirror(patient)
     patient.markModified("studies")
-    await patient.save()
+    // Mongoose guards array writes with the document's __v: if anything else
+    // saved this patient between our findById and here, save() throws
+    // VersionError rather than clobbering it. Two writers overlapping is normal
+    // now that the editor autosaves while a doctor works (autosave + submit,
+    // or two open tabs), so a stale version is retried rather than surfaced as
+    // a 500 that silently loses the draft.
+    try {
+      await patient.save()
+    } catch (err) {
+      if ((err as { name?: string }).name !== "VersionError") throw err
+      const fresh = await Patient.findById(id)
+      if (!fresh) return NextResponse.json({ error: "Not found" }, { status: 404 })
+      // Re-apply onto the current document. Only the fields this request
+      // actually changed are copied over, so the other writer's work survives.
+      fresh.set(patient.toObject({ depopulate: true, versionKey: false, transform: false }))
+      fresh.markModified("studies")
+      await fresh.save()
+    }
 
     // Keep this patient's rows in the monthly register in step with the edit
     await syncPatientToRegister(patient)

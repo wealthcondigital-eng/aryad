@@ -18,6 +18,7 @@ import { useRole } from "@/lib/role-context"
 import { motion } from "motion/react"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { BillDocViewer } from "@/components/bill-doc-viewer"
+import { resolveReportShareUrl } from "@/lib/share-links"
 
 interface StudyEntry {
   name: string
@@ -59,16 +60,21 @@ function studiesOf(p: PatientDoc): StudyEntry[] {
     : [{ name: p.study, reportStatus: p.reportStatus, reportSlug: p.reportSlug }]
 }
 
-function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
+async function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
   const entry  = studiesOf(p)[sidx]
-  const pdfUrl = entry?.reportSlug
-    ? `${window.location.origin}/${entry.reportSlug}/pdf`
-    : p.reportSlug && sidx === 0
-    ? `${window.location.origin}/${p.reportSlug}/pdf`
-    : `${window.location.origin}/api/patients/${p._id}/pdf?sidx=${sidx}`
+  // Opened before the await, or a popup blocker eats the window (see the same
+  // pattern on the patients list).
+  const win = window.open("", "_blank")
+  const pdfUrl = await resolveReportShareUrl(window.location.origin, {
+    slug: entry?.reportSlug || (sidx === 0 ? p.reportSlug : undefined),
+    patientId: p._id,
+    sidx,
+  })
   const msg = `Dear ${p.name},\n\nYour *${entry?.name ?? p.study}* report from *Aarya Diagnostics Center* is ready.\n\n📄 Download your report:\n${pdfUrl}`
-  // Open WhatsApp Web on the logged-in account; sender picks the recipient
-  window.open(`https://wa.me/?text=${encodeURIComponent(msg)}`, "_blank")
+  // WhatsApp Web on the logged-in account; the sender picks the recipient.
+  const wa = `https://wa.me/?text=${encodeURIComponent(msg)}`
+  if (win) win.location.href = wa
+  else window.open(wa, "_blank")
 }
 
 function dateOf(d: string) {

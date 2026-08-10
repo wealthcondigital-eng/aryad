@@ -2,26 +2,16 @@ import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import Patient from "@/models/Patient"
 import Bill from "@/models/Bill"
+import { pdfResponse, pdfFileName, pdfUnavailableResponse } from "@/lib/pdf-response"
 
-function pdfResponse(base64: string, fileName: string) {
-  const buffer = Buffer.from(base64, "base64")
-  return new NextResponse(buffer, {
-    headers: {
-      "Content-Type":        "application/pdf",
-      "Content-Disposition": `inline; filename="${fileName}"`,
-      "Cache-Control":       "no-store",
-    },
-  })
-}
-
-function safeName(name?: string) {
-  return (name || "Patient").replace(/\s+/g, "_").replace(/[^A-Za-z0-9_]/g, "")
-}
-
-// GET /{slug}/pdf — pretty public PDF link, e.g. /sagar-dutta-x-ray-chest-pa-report/pdf
-// or /sagar-dutta-receipt/pdf. Report slugs may live on the legacy top-level field
-// or inside the studies array; receipt slugs live on the Bill collection.
-export async function GET(_req: NextRequest, { params }: { params: Promise<{ slug: string }> }) {
+// GET /{slug}/pdf — the public file behind a shared link, e.g.
+// /sagar-dutta-x-ray-chest-pa-report/pdf or /sagar-dutta-receipt/pdf.
+// Report slugs may live on the legacy top-level field or inside the studies
+// array; receipt slugs live on the Bill collection.
+//
+// `?download=1` switches the response from inline to attachment — the share
+// page's Download button, for in-app browsers that can't render a PDF.
+export async function GET(req: NextRequest, { params }: { params: Promise<{ slug: string }> }) {
   try {
     await connectDB()
     const { slug } = await params
@@ -31,19 +21,23 @@ export async function GET(_req: NextRequest, { params }: { params: Promise<{ slu
 
     if (patient) {
       let pdf: string | undefined
+      let studyName: string | undefined = patient.study
       if (patient.reportSlug === slug && patient.reportPdf) {
         pdf = patient.reportPdf
       } else {
         const entry = (patient.studies ?? []).find((s: { reportSlug: string }) => s.reportSlug === slug)
         pdf = entry?.reportPdf || (patient.reportSlug === slug ? patient.reportPdf : undefined)
+        if (entry?.name) studyName = entry.name
       }
-      if (pdf) return pdfResponse(pdf, `${safeName(patient.name)}_Report.pdf`)
+      if (pdf) return pdfResponse(pdf, pdfFileName(patient.name, "Report", studyName), req)
+      // The slug is real, so this is a report that exists but has no PDF yet.
+      return pdfUnavailableResponse("This report isn't ready yet.")
     }
 
     const bill = await Bill.findOne({ billSlug: slug }).select("billPdf patientName")
-    if (bill?.billPdf) return pdfResponse(bill.billPdf, `${safeName(bill.patientName)}_Receipt.pdf`)
+    if (bill?.billPdf) return pdfResponse(bill.billPdf, pdfFileName(bill.patientName, "Receipt"), req)
 
-    return NextResponse.json({ error: "PDF not available" }, { status: 404 })
+    return pdfUnavailableResponse("This link doesn't point to a report.")
   } catch {
     return NextResponse.json({ error: "Server error" }, { status: 500 })
   }

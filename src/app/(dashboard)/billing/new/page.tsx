@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge"
 import { ComboInput, StudyComboInput, getSavedDoctors, saveDoctor } from "@/components/combo-input"
 import { useRole } from "@/lib/role-context"
 import { receiptLetterheadHtml, receiptPatientBoxHtml, receiptItemsTableHtml, ReceiptRow } from "@/lib/receipt-letterhead"
+import { useConfirm, showAlert } from "@/components/confirm-dialog"
 
 const paymentModes = ["Cash", "UPI", "Card", "Cheque", "NEFT/RTGS"]
 
@@ -138,12 +139,13 @@ function printReceipt(data: SavedBillData) {
   const blob = new Blob([html], { type: "text/html" })
   const url  = URL.createObjectURL(blob)
   const win  = window.open(url, "_blank", "width=620,height=900")
-  if (!win) { alert("Please allow pop-ups to print."); URL.revokeObjectURL(url); return }
+  if (!win) { showAlert({ title: "Pop-up blocked", message: "Allow pop-ups for this site to print." }); URL.revokeObjectURL(url); return }
   win.onafterprint = () => { win.close(); URL.revokeObjectURL(url) }
   setTimeout(() => win.print(), 600)
 }
 
 function NewBillingForm() {
+  const { notify } = useConfirm()
   const params = useSearchParams()
   const router = useRouter()
   const { user } = useRole()
@@ -403,11 +405,11 @@ function NewBillingForm() {
 
   const doSave = async () => {
     if (!patientId && !billIdParam) {
-      alert("No patient linked. Please pick a patient first.")
+      await notify({ title: "No patient linked", message: "Pick a patient before saving the bill." })
       return
     }
     if (!items.some((i) => i.study && i.price > 0)) {
-      alert("Please add at least one study with a price.")
+      await notify({ title: "Nothing to bill", message: "Add at least one study with a price." })
       return
     }
     setLoading(true)
@@ -487,7 +489,7 @@ function NewBillingForm() {
       setSaved(true)
       router.push("/billing")
     } catch {
-      alert("Failed to save bill. Please try again.")
+      await notify({ title: "Save failed", message: "The bill could not be saved. Please try again." })
     } finally {
       setLoading(false)
     }

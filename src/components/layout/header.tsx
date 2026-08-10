@@ -179,122 +179,122 @@ export function Header({ onMenuClick, alwaysShowMenu = false }: HeaderProps) {
           <Menu className="h-5 w-5" />
         </Button>
 
-        {/* ── Live Search ── */}
-        <div className="flex-1 max-w-xs sm:max-w-sm" ref={searchRef}>
-          <div className="relative">
-            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
-            <Input
-              placeholder="Search patients, bills..."
-              className="pl-9 pr-8 bg-muted/50 h-9 rounded-lg"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onFocus={() => { if (results.length > 0) setOpen(true) }}
-              onKeyDown={(e) => { if (e.key === "Escape") closeSearch() }}
-              autoComplete="off"
-            />
-            {query && (
-              <button
-                className="absolute right-2.5 top-2 text-muted-foreground hover:text-foreground transition-colors"
-                onClick={closeSearch}
-              >
-                <X className="h-4 w-4" />
-              </button>
-            )}
-
-            {/* Dropdown */}
-            <AnimatePresence>
-              {(open || (searching && query)) && (
-                <motion.div
-                  className="absolute top-full left-0 right-0 mt-1.5 bg-background border border-border rounded-xl shadow-lg overflow-hidden z-50"
-                  initial={{ opacity: 0, y: -6, scale: 0.98 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, y: -4, scale: 0.98 }}
-                  transition={{ duration: 0.18, ease: "easeOut" }}
-                  style={{ minWidth: "min(360px, calc(100vw - 2rem))" }}
-                >
-                  {/* Header bar */}
-                  <div className="flex items-center justify-between px-3 py-2 border-b border-border/60 bg-muted/30">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                      {searching ? "Searching…" : `${results.length} result${results.length !== 1 ? "s" : ""} for "${query}"`}
-                    </p>
-                    <button onClick={closeSearch} className="text-muted-foreground hover:text-foreground transition-colors">
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-
-                  {/* Loading skeletons */}
-                  {searching && (
-                    <div className="px-3 py-2 space-y-2">
-                      {[...Array(3)].map((_, i) => (
-                        <motion.div
-                          key={i}
-                          className="flex items-center gap-3 py-1.5"
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          transition={{ delay: i * 0.06 }}
-                        >
-                          <Skeleton className="h-9 w-9 rounded-full shrink-0" />
-                          <div className="flex-1 space-y-1.5">
-                            <Skeleton className="h-3.5 w-32" />
-                            <Skeleton className="h-3 w-48" />
-                          </div>
-                          <Skeleton className="h-6 w-16 rounded-md shrink-0" />
-                        </motion.div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* No results */}
-                  {!searching && open && results.length === 0 && (
-                    <motion.div
-                      className="flex flex-col items-center gap-1.5 py-7 text-center"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                    >
-                      <Search className="h-8 w-8 text-muted-foreground/30" />
-                      <p className="text-sm font-medium text-muted-foreground">No patients found</p>
-                      <p className="text-xs text-muted-foreground/60">Try name, serial number, or phone</p>
-                    </motion.div>
-                  )}
-
-                  {/* Results */}
-                  {!searching && results.map((p, i) => (
-                    <motion.div
-                      key={p._id}
-                      className="flex items-center gap-3 px-3 py-3 hover:bg-muted/40 border-b border-border/40 last:border-0 cursor-pointer transition-colors group"
-                      initial={{ opacity: 0, x: -8 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: i * 0.05, duration: 0.2 }}
-                      onClick={() => handleResultClick(p)}
-                    >
-                      {/* Avatar */}
-                      <div className="h-9 w-9 rounded-full bg-primary/10 flex items-center justify-center text-xs font-bold text-primary shrink-0">
-                        {initials(p.name)}
-                      </div>
-
-                      {/* Info */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <p className="font-semibold text-sm leading-none">{p.name}</p>
-                          <StatusBadge status={p.reportStatus} />
-                        </div>
-                        <p className="text-xs text-muted-foreground mt-0.5 truncate">
-                          #{p.srNo} · {p.age}y {p.gender[0]} · {p.study}
-                          {p.referredBy ? ` · ${p.referredBy}` : ""}
-                        </p>
-                      </div>
-
-                      {/* Chevron hint */}
-                      <Search className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0 transition-colors" />
-                    </motion.div>
-                  ))}
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        </div>
-
         <div className="ml-auto flex items-center gap-2">
+          {/* ── Live Search — sits beside the bell rather than filling the bar ── */}
+          <div className="w-44 sm:w-64 lg:w-72" ref={searchRef}>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
+              <Input
+                placeholder="Search patients, bills..."
+                className="pl-9 pr-8 bg-muted/50 h-9 rounded-lg"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onFocus={() => { if (results.length > 0) setOpen(true) }}
+                onKeyDown={(e) => { if (e.key === "Escape") closeSearch() }}
+                autoComplete="off"
+              />
+              {query && (
+                <button
+                  className="absolute right-2.5 top-2 text-muted-foreground hover:text-foreground transition-colors"
+                  onClick={closeSearch}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+
+              {/* Dropdown */}
+              <AnimatePresence>
+                {(open || (searching && query)) && (
+                  <motion.div
+                    className="absolute top-full right-0 mt-1.5 bg-background border border-border rounded-xl shadow-lg overflow-hidden z-50"
+                    initial={{ opacity: 0, y: -6, scale: 0.98 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, y: -4, scale: 0.98 }}
+                    transition={{ duration: 0.18, ease: "easeOut" }}
+                    style={{ minWidth: "min(360px, calc(100vw - 2rem))" }}
+                  >
+                    {/* Header bar */}
+                    <div className="flex items-center justify-between px-3 py-2 border-b border-border/60 bg-muted/30">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        {searching ? "Searching…" : `${results.length} result${results.length !== 1 ? "s" : ""} for "${query}"`}
+                      </p>
+                      <button onClick={closeSearch} className="text-muted-foreground hover:text-foreground transition-colors">
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+
+                    {/* Loading skeletons */}
+                    {searching && (
+                      <div className="px-3 py-2 space-y-2">
+                        {[...Array(3)].map((_, i) => (
+                          <motion.div
+                            key={i}
+                            className="flex items-center gap-3 py-1.5"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            transition={{ delay: i * 0.06 }}
+                          >
+                            <Skeleton className="h-9 w-9 rounded-full shrink-0" />
+                            <div className="flex-1 space-y-1.5">
+                              <Skeleton className="h-3.5 w-32" />
+                              <Skeleton className="h-3 w-48" />
+                            </div>
+                            <Skeleton className="h-6 w-16 rounded-md shrink-0" />
+                          </motion.div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* No results */}
+                    {!searching && open && results.length === 0 && (
+                      <motion.div
+                        className="flex flex-col items-center gap-1.5 py-7 text-center"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                      >
+                        <Search className="h-8 w-8 text-muted-foreground/30" />
+                        <p className="text-sm font-medium text-muted-foreground">No patients found</p>
+                        <p className="text-xs text-muted-foreground/60">Try name, serial number, or phone</p>
+                      </motion.div>
+                    )}
+
+                    {/* Results */}
+                    {!searching && results.map((p, i) => (
+                      <motion.div
+                        key={p._id}
+                        className="flex items-center gap-3 px-3 py-3 hover:bg-muted/40 border-b border-border/40 last:border-0 cursor-pointer transition-colors group"
+                        initial={{ opacity: 0, x: -8 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: i * 0.05, duration: 0.2 }}
+                        onClick={() => handleResultClick(p)}
+                      >
+                        {/* Avatar */}
+                        <div className="h-9 w-9 rounded-full bg-primary/10 flex items-center justify-center text-xs font-bold text-primary shrink-0">
+                          {initials(p.name)}
+                        </div>
+
+                        {/* Info */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-semibold text-sm leading-none">{p.name}</p>
+                            <StatusBadge status={p.reportStatus} />
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-0.5 truncate">
+                            #{p.srNo} · {p.age}y {p.gender[0]} · {p.study}
+                            {p.referredBy ? ` · ${p.referredBy}` : ""}
+                          </p>
+                        </div>
+
+                        {/* Chevron hint */}
+                        <Search className="h-3.5 w-3.5 text-muted-foreground/40 group-hover:text-muted-foreground shrink-0 transition-colors" />
+                      </motion.div>
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
+
           {/* ── Notifications ── */}
           <DropdownMenu onOpenChange={(open) => { if (open && unreadCount > 0) markAllRead() }}>
             <DropdownMenuTrigger asChild>

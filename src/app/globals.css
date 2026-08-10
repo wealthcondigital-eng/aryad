@@ -178,9 +178,23 @@ input[type="date"]::-webkit-calendar-picker-indicator {
    study title box, signature block) keep their own Tailwind layout margins. */
 .report-paper .doc-field p,
 .report-paper .doc-field div {
-  margin: 0 0 0.5em;
-  min-height: 1.5em;
+  /* No paragraph gap of the app's own.
+     A report's spacing comes from the document: an imported Word file carries
+     its real margins as inline styles, and the clinic's own templates carry
+     explicit blank lines. Adding half a line on top of that double-spaced every
+     template that used blank lines — line + blank rendered 48px where Word
+     draws 32 — which is what made an imported two-page report run to three. */
+  margin: 0;
   white-space: pre-wrap;
+}
+
+/* See the note on the .doc-field rule further down: the height floor is for
+   BLANK lines. Applied to every paragraph it silently overrode the line height
+   of anything imported from Word — a single-spaced Word report (16px lines)
+   was redrawn at 24px a line and grew from two pages to four. */
+.report-paper .doc-field p:empty,
+.report-paper .doc-field div:empty {
+  min-height: 1em;
 }
 
 .report-paper .doc-field p:empty::before,
@@ -191,6 +205,27 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 
 .report-paper .doc-field> :last-child {
   margin-bottom: 0;
+}
+
+/* The study heading box, before a template has been applied.
+   A report's heading comes from its template (or is typed by hand), never from
+   the study name — so a fresh report opens with this box empty. While it is
+   editable it shows a hint, so an empty box reads as "nothing here yet" rather
+   than as a broken one; on a submitted (read-only) report with no heading the
+   box disappears completely, matching the view modal, the printout and the
+   Word export, none of which draw an empty heading box. */
+.doc-heading[contenteditable="true"]:empty::before {
+  content: attr(data-placeholder);
+  color: #9ca3af;
+  font-weight: 500;
+  text-decoration: none;
+  letter-spacing: normal;
+}
+
+.doc-heading:not([contenteditable="true"]):empty {
+  border: none;
+  padding: 0;
+  min-width: 0;
 }
 
 /* The report body is rendered by Tiptap's <EditorContent>, which wraps the
@@ -220,6 +255,43 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   overflow-x: auto;
 }
 
+/* Thin and pale, so a table that overruns the text column doesn't drop a chunky
+   OS scrollbar (arrow buttons and all) into the middle of the report.
+   Chromium IGNORES every ::-webkit-scrollbar rule on an element that also sets
+   the standard `scrollbar-width`/`scrollbar-color`, so those two live in the
+   @supports block below — which only Firefox (no ::-webkit-scrollbar support)
+   ever enters. Setting both here would silently give Chromium the OS bar back. */
+.doc-field .ProseMirror .tableWrapper::-webkit-scrollbar {
+  height: 7px;
+}
+
+.doc-field .ProseMirror .tableWrapper::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* The end arrows — Chromium on Linux/Windows draws them by default. */
+.doc-field .ProseMirror .tableWrapper::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.doc-field .ProseMirror .tableWrapper::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 999px;
+}
+
+.doc-field .ProseMirror .tableWrapper::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  .doc-field .ProseMirror .tableWrapper {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+  }
+}
+
 .doc-field .ProseMirror table {
   table-layout: fixed;
 }
@@ -234,9 +306,21 @@ input[type="date"]::-webkit-calendar-picker-indicator {
    uneven depending on how a paragraph was created. */
 .doc-field p,
 .doc-field div {
-  margin: 0 0 0.5em;
-  min-height: 1.5em;
+  /* See the .report-paper rule above — spacing belongs to the document. */
+  margin: 0;
   white-space: pre-wrap;
+}
+
+/* A blank line keeps its height — but ONLY when it really is blank.
+   This used to be `min-height: 1.5em` on every paragraph, which quietly
+   overrode the line height of anything imported from Word: a document set to
+   single spacing (16px lines) was forced to 24px per line, so a two-page Word
+   report arrived here three or four pages long. An empty paragraph gets its
+   line back from the `:empty::before` nbsp below and from this floor, both of
+   which follow the paragraph's OWN line height. */
+.doc-field p:empty,
+.doc-field div:empty {
+  min-height: 1em;
 }
 
 /* Report body = its own stacking context, so a "Behind Text" image (which is
@@ -272,6 +356,130 @@ input[type="date"]::-webkit-calendar-picker-indicator {
 .doc-field div:empty::before {
   content: "\00a0";
   visibility: hidden;
+}
+
+/* Word's "show paragraph marks" (¶) view, toggled from the toolbar. Screen only
+   — nothing here is a real character, so print, PDF and DOCX never see it.
+   Marks the END of each paragraph (that's what ¶ means in Word), and every line
+   break inside one. Spaces and tabs are deliberately not marked: doing that
+   needs a decoration over the text itself, not CSS. */
+.show-marks .doc-field p::after,
+.show-marks .doc-field div:not(.tableWrapper):not([data-rimg-anchor])::after {
+  content: "¶";
+  color: #93c5fd;
+  font-weight: 400;
+  pointer-events: none;
+  user-select: none;
+}
+
+.show-marks .doc-field br::after {
+  content: "↵";
+  color: #93c5fd;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Styles gallery (Normal / Heading 1-3). Sized in em so a heading follows the
+   report's own type scale — and a table scaled down to fit a page — instead of
+   being pinned to a pixel size the rest of the document has moved away from.
+   Mirrored in printShellCss for the print window and the PDF. */
+.doc-field h1,
+.doc-field h2,
+.doc-field h3 {
+  margin: 0.4em 0 0.25em;
+  line-height: 1.25;
+  font-weight: bold;
+}
+
+.doc-field h1 {
+  font-size: 1.25em;
+}
+
+.doc-field h2 {
+  font-size: 1.1em;
+  text-decoration: underline;
+}
+
+.doc-field h3 {
+  font-size: 1em;
+  font-style: italic;
+}
+
+/* Track changes: Word's colours — insertions underlined, deletions struck
+   through. Editor-only, because everything that leaves the editor is the
+   accepted document (see acceptTrackedHtml). */
+.doc-field [data-track-insert] {
+  color: #15803d;
+  text-decoration: underline;
+}
+
+.doc-field [data-track-delete] {
+  color: #b91c1c;
+  text-decoration: line-through;
+}
+
+/* A commented span, highlighted the way Word shades one. Also editor-only —
+   stripComments runs before print, PDF and DOCX. */
+.doc-field [data-comment-id] {
+  background: #fef3c7;
+  border-bottom: 1px dotted #d97706;
+  cursor: help;
+}
+
+/* Find & replace hits (see tiptap-search-extension.ts). Decorations only —
+   never part of the document, so nothing here reaches print, PDF or DOCX. */
+.doc-field .search-match {
+  background: #fde68a;
+  border-radius: 2px;
+}
+
+.doc-field .search-match-current {
+  background: #fb923c;
+  color: #1f2937;
+}
+
+/* A table switched to "borders off". The borders are kept in the layout as
+   transparent rather than removed, so hiding them cannot reflow the grid. */
+.doc-field table[data-borderless="1"] td,
+.doc-field table[data-borderless="1"] th {
+  border-color: transparent;
+}
+
+/* Bullet and numbered lists.
+   Tailwind's preflight resets `ol, ul { list-style: none; margin: 0; padding: 0 }`,
+   which left the toolbar's list buttons looking broken: the <ul><li> really was
+   inserted, it just drew with no marker and no indent — identical to the plain
+   paragraph it replaced. Mirrored in printShellCss (report-layout.ts) for the
+   print window and the PDF shell, which load none of this stylesheet. */
+.doc-field ul,
+.doc-field ol {
+  margin: 0 0 0.5em;
+  padding-left: 1.6em;
+}
+
+.doc-field ul {
+  list-style: disc outside;
+}
+
+.doc-field ol {
+  list-style: decimal outside;
+}
+
+.doc-field li {
+  margin: 0 0 0.15em;
+}
+
+/* Tiptap wraps each item's content in a <p>; the generic paragraph rule above
+   would otherwise give every bullet a half-line of space and a 1.5em floor. */
+.doc-field li>p,
+.doc-field li>div {
+  margin: 0;
+  min-height: 0;
+}
+
+.doc-field li>ul,
+.doc-field li>ol {
+  margin: 0.15em 0 0;
 }
 
 .doc-field> :last-child {

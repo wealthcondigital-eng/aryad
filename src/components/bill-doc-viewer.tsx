@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Button } from "@/components/ui/button"
 import { useEffect, useState } from "react"
 import { receiptLetterheadHtml, receiptPatientBoxHtml, receiptItemsTableHtml, drawReceiptPatientBox, loadLogoDataUrl, CLINIC_ADDRESS, CLINIC_CONTACT_LINE } from "@/lib/receipt-letterhead"
+import { showAlert } from "@/components/confirm-dialog"
 
 interface EditEntry { editor: string; editedAt: string; changedFields: string[] }
 
@@ -113,7 +114,7 @@ function printBill(props: BillViewerProps) {
   const blob = new Blob([html], { type: "text/html" })
   const url  = URL.createObjectURL(blob)
   const win  = window.open(url, "_blank", "width=620,height=800")
-  if (!win) { alert("Please allow pop-ups to print."); URL.revokeObjectURL(url); return }
+  if (!win) { showAlert({ title: "Pop-up blocked", message: "Allow pop-ups for this site to print." }); URL.revokeObjectURL(url); return }
   setTimeout(() => win.print(), 600)
 }
 

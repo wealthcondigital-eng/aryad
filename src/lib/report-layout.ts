@@ -5,23 +5,14 @@
 // print output and the WhatsApp-shared PDF so they all look identical.
 
 import type { jsPDF } from "jspdf"
-import { REPORT_TEMPLATES } from "@/lib/report-templates"
+import { reportFontFaceCss } from "@/lib/report-fonts"
 
-// Shared title fallback: a report only gets a custom heading once a doctor
-// has actually edited it — until then, every view of it (editor, view modal,
-// reports list) should fall back to the SAME canonical template heading
-// (e.g. study "Abd Pelvis" -> "ULTRASONOGRAPHY OF ABDOMEN AND PELVIS"), not
-// just the raw study name, or the same report would show a different title
-// depending on which screen you printed it from.
-export function getDisplayTitle(studyName: string): string {
-  if (!studyName) return ""
-  for (const cat of Object.keys(REPORT_TEMPLATES)) {
-    const list = REPORT_TEMPLATES[cat as keyof typeof REPORT_TEMPLATES]
-    const found = list.find((t) => t.name.toLowerCase() === studyName.toLowerCase())
-    if (found) return found.heading
-  }
-  return studyName
-}
+// NOTE: a report's heading comes from the template that was applied, or from
+// whatever the doctor typed in the heading box — nothing else. There is
+// deliberately no fallback to the study name here: the study is what the
+// patient was referred for and what gets billed, and it is not the title of
+// the document. A report with no template applied has no heading, and every
+// renderer below draws no heading box at all in that case.
 
 // Belt-and-suspenders version of the `.report-paper` CSS rule in globals.css:
 // stamps the same 0.5em bottom-margin directly onto every paragraph/div as an
@@ -32,10 +23,14 @@ export function getDisplayTitle(studyName: string): string {
 export function applyReportBodySpacing(root: HTMLElement): void {
   root.style.whiteSpace = "pre-wrap"
   root.querySelectorAll<HTMLElement>("p, div").forEach((el) => {
-    if (!el.style.marginBottom) el.style.marginBottom = "0.5em"
+    // Deliberately does NOT stamp a paragraph gap: the document's own blank
+    // lines and inline margins are the spacing (see globals.css).
+    if (!el.style.marginBottom) el.style.marginBottom = "0"
     if (!el.style.whiteSpace) el.style.whiteSpace = "pre-wrap"
     if (!el.textContent?.trim() && (!el.firstElementChild || el.firstElementChild.tagName === "BR")) {
-      if (!el.style.minHeight) el.style.minHeight = "1.5em"
+      // 1em, not 1.5: the floor is there to keep a blank line visible, and a
+      // taller one silently overrides the line height of imported Word content.
+      if (!el.style.minHeight) el.style.minHeight = "1em"
     }
   })
   const children = Array.from(root.children) as HTMLElement[]
@@ -98,10 +93,98 @@ export interface ReportHeaderInfo {
 // than being allowed to run through the band (a table is a single block — there
 // is nowhere to push it to).
 
+/**
+ * Marks a block the doctor forced onto a new sheet (Word's Ctrl+Enter). Lives
+ * here rather than with the editor extension that writes it, because all three
+ * paginators have to agree on it: the editor's decorations, paginateDomBlocks
+ * (view modal + PDF), and the print window's own CSS page-break-before.
+ */
+export const PAGE_BREAK_ATTR = "data-page-break"
+
 export const PAGE_SPACER_ROW_ATTR = "data-pgb-spacer"
+
+// Word breaks a paragraph between its LINES when it doesn't fit in what's left
+// of a page. Moving the whole paragraph instead — which is all a block-level
+// margin can do — is what leaves a band of blank space above every long
+// paragraph that happens to straddle a page boundary, and it cannot place a
+// paragraph taller than one page's content area at all (there is no position
+// where the whole block clears the footer, so it gets pushed once and then
+// drawn straight through the letterhead band).
+//
+// The fix is a full-width inline-block spacer dropped between two line boxes:
+// being 100% wide it takes a line to itself, and its height carries the rest of
+// the paragraph past the footer band, the sheet gap and the next sheet's header
+// band — the same trick the table path already uses with spacer <tr>s, one
+// level down.
+export const PAGE_SPACER_INLINE_ATTR = "data-pgb-inline"
 
 export function isPageSpacerRow(el: Element | null | undefined): boolean {
   return !!el && el.nodeType === 1 && (el as HTMLElement).hasAttribute(PAGE_SPACER_ROW_ATTR)
+}
+
+export function isPageSpacerInline(el: Element | null | undefined): boolean {
+  return !!el && el.nodeType === 1 && (el as HTMLElement).hasAttribute(PAGE_SPACER_INLINE_ATTR)
+}
+
+/**
+ * Word's default widow/orphan control: never strand fewer than two lines of a
+ * paragraph on either side of a page break. When a paragraph can't be split
+ * without breaking this, the whole paragraph moves to the next sheet instead —
+ * which is exactly what the old code did unconditionally.
+ */
+export const MIN_LINES_EITHER_SIDE = 2
+
+/**
+ * How much of a sheet may be left blank to keep a table intact.
+ *
+ * A table is one block, so the only ways to place one that doesn't fit in what's
+ * left of a page are to move it whole (leaving a hole) or to break it between
+ * rows. Neither is right unconditionally: Word flows tables across pages by
+ * default, but this clinic's tables are 4-8 row biometry grids where splitting
+ * is worse for the reader than a small gap.
+ *
+ * So the decision is made on the size of the HOLE rather than the size of the
+ * table. Under a quarter of a sheet reads as ordinary spacing and the grid stays
+ * whole; more than that reads as a printing fault, and it splits between rows
+ * instead. A table taller than a whole sheet always splits — there is nowhere to
+ * move it to.
+ */
+export const MAX_ORPHAN_GAP_RATIO = 0.25
+
+/**
+ * A header row reprinted at the top of a table's continuation page. Marked so it
+ * is stripped alongside the spacers — like them it is layout scaffolding, and it
+ * must never reach saved HTML, the DOCX export or the change-tracking diff,
+ * where it would read as a duplicated row of real content.
+ */
+export const PAGE_REPEAT_ROW_ATTR = "data-pgb-repeat"
+
+export function buildRepeatedHeaderRow(source: HTMLTableRowElement): HTMLTableRowElement {
+  const clone = source.cloneNode(true) as HTMLTableRowElement
+  clone.setAttribute(PAGE_REPEAT_ROW_ATTR, "1")
+  clone.setAttribute("aria-hidden", "true")
+  clone.removeAttribute("id")
+  clone.querySelectorAll("[id]").forEach((el) => el.removeAttribute("id"))
+  return clone
+}
+
+/** True when a table's first row is a real header row (all cells are `<th>`). */
+export function isHeaderRow(row: HTMLTableRowElement | undefined): boolean {
+  if (!row || !row.cells.length) return false
+  return Array.from(row.cells).every((c) => c.tagName === "TH")
+}
+
+export function buildPageSpacerInline(height: number): HTMLElement {
+  const span = document.createElement("span")
+  span.setAttribute(PAGE_SPACER_INLINE_ATTR, "1")
+  span.setAttribute("aria-hidden", "true")
+  // `width:100%` is what forces the spacer onto its own line (and therefore the
+  // following text onto the line after it); `vertical-align:top` keeps it from
+  // adding the baseline leading an inline-block would otherwise contribute on
+  // top of its explicit height.
+  span.style.cssText =
+    `display:inline-block;width:100%;height:${height}px;vertical-align:top;user-select:none;pointer-events:none;`
+  return span
 }
 
 /**
@@ -115,7 +198,12 @@ export function isPageSpacerRow(el: Element | null | undefined): boolean {
 export function reportTableRows(tableEl: HTMLTableElement): HTMLTableRowElement[] {
   const rows: HTMLTableRowElement[] = []
   const take = (el: Element) => {
-    if (el.tagName === "TR" && !isPageSpacerRow(el)) rows.push(el as HTMLTableRowElement)
+    // Spacer rows AND repeated header rows are both scaffolding — either one
+    // left in would desynchronise DOM row `i` from row `i` of the document,
+    // which every row-height read and write depends on.
+    if (el.tagName !== "TR") return
+    if (isPageSpacerRow(el) || (el as HTMLElement).hasAttribute(PAGE_REPEAT_ROW_ATTR)) return
+    rows.push(el as HTMLTableRowElement)
   }
   Array.from(tableEl.children).forEach((child) => {
     if (child.tagName === "TBODY" || child.tagName === "THEAD" || child.tagName === "TFOOT") {
@@ -139,22 +227,127 @@ export function buildPageSpacerRow(height: number, colspan: number): HTMLTableRo
   return tr
 }
 
-/** Drops every page-break spacer row from a subtree (or an HTML string). */
+const SPACER_SELECTOR = `[${PAGE_SPACER_ROW_ATTR}],[${PAGE_SPACER_INLINE_ATTR}],[${PAGE_REPEAT_ROW_ATTR}]`
+
+/**
+ * Drops every page-break spacer — row and inline — from a subtree (or an HTML
+ * string). Spacers are layout scaffolding, never content: they must be gone
+ * before anything is saved, exported to DOCX, diffed for change tracking, or
+ * re-measured for a fresh pagination run.
+ */
 export function stripPageSpacerRows<T extends HTMLElement | string>(target: T): T {
   if (typeof target === "string") {
     if (typeof DOMParser === "undefined") return target
     const doc = new DOMParser().parseFromString(target, "text/html")
-    doc.querySelectorAll(`[${PAGE_SPACER_ROW_ATTR}]`).forEach((n) => n.remove())
+    doc.querySelectorAll(SPACER_SELECTOR).forEach((n) => n.remove())
     return doc.body.innerHTML as T
   }
-  target.querySelectorAll(`[${PAGE_SPACER_ROW_ATTR}]`).forEach((n) => n.remove())
+  target.querySelectorAll(SPACER_SELECTOR).forEach((n) => n.remove())
   return target
+}
+
+export interface LineBox {
+  /** Vertical advance this line consumes — see the note on line-height below. */
+  height: number
+  /** Text node the line starts in, and the character offset it starts at. */
+  node: Text
+  offset: number
+}
+
+/**
+ * Where each line of a text block starts, and how much vertical space it takes.
+ *
+ * Deliberately NOT coordinate-based. The obvious implementation — read each
+ * line's rect, then hand the coordinates to caretRangeFromPoint (or
+ * ProseMirror's posAtCoords) to find the matching document position — is broken
+ * for exactly the documents this feature exists for: both APIs only resolve
+ * points inside the VISIBLE VIEWPORT, so on any report taller than the window
+ * every break below the fold silently returns null and the text runs straight
+ * through the letterhead band. A (node, offset) pair has no such limit: the DOM
+ * path inserts at it with a Range, and the editor maps it with posAtDOM.
+ *
+ * `height` is the line's ADVANCE (its line-height), not the height of the rect
+ * getClientRects reports. Those rects are ink boxes — for 16px/1.5 text they
+ * come back 17px tall against a real 24px advance, and accumulating the rect
+ * height instead under-counts by 7px on every line, which after a page of text
+ * is enough drift to place the next block inside a letterhead band. A line
+ * carrying something taller than the type (an inline image, a large-font run)
+ * keeps its measured height instead.
+ */
+export function naturalLineBoxes(dom: HTMLElement, zoom = 1): LineBox[] {
+  if (typeof document === "undefined") return []
+
+  const cs = getComputedStyle(dom)
+  let lineHeight = parseFloat(cs.lineHeight)
+  if (!Number.isFinite(lineHeight)) lineHeight = (parseFloat(cs.fontSize) || 16) * 1.2
+
+  const walker = document.createTreeWalker(dom, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => {
+      // Skip a previous pass's spacers, and nested tables — the row-splitting
+      // path owns those.
+      for (let el = n.parentElement; el && el !== dom; el = el.parentElement) {
+        if (isPageSpacerInline(el) || isPageSpacerRow(el) || el.tagName === "TABLE") return NodeFilter.FILTER_REJECT
+      }
+      return n.nodeValue && n.nodeValue.length ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT
+    },
+  })
+
+  const range = document.createRange()
+  const lines: (LineBox & { top: number; bottom: number })[] = []
+
+  // Rects come back in SCREEN pixels, so at any zoom other than 100% they must
+  // be divided back into layout pixels — the unit `lineHeight` above is in, and
+  // the unit every A4 constant is in. See PageBreakOpts.zoom.
+  const charRect = (node: Text, i: number) => {
+    range.setStart(node, i)
+    range.setEnd(node, Math.min(i + 1, node.length))
+    const r = range.getBoundingClientRect()
+    return zoom === 1 ? r : { top: r.top / zoom, bottom: r.bottom / zoom }
+  }
+
+  for (let n = walker.nextNode() as Text | null; n; n = walker.nextNode() as Text | null) {
+    const len = n.length
+    if (!len) continue
+
+    // One entry per line this node contributes. Each pass binary-searches for
+    // the first character sitting below the current line, so the cost is
+    // O(lines × log length) rect reads rather than one read per character.
+    let start = 0
+    let startRect = charRect(n, 0)
+    for (;;) {
+      const record = { top: startRect.top, bottom: startRect.bottom, height: lineHeight, node: n, offset: start }
+      const last = lines[lines.length - 1]
+      // A line can span several text nodes (`<b>LIVER :</b> the rest`). Those
+      // fragments are merged by vertical overlap — and the merged line keeps the
+      // FIRST fragment's node/offset, which is where the line truly begins.
+      if (last && record.top < last.bottom - 1) {
+        last.bottom = Math.max(last.bottom, record.bottom)
+        last.height = Math.max(last.height, lineHeight, last.bottom - last.top)
+      } else {
+        lines.push(record)
+      }
+
+      let lo = start + 1
+      let hi = len
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (charRect(n, mid).top > startRect.top + 1) hi = mid
+        else lo = mid + 1
+      }
+      if (lo >= len) break
+      start = lo
+      startRect = charRect(n, lo)
+    }
+  }
+
+  return lines.map(({ height, node, offset }) => ({ height, node, offset }))
 }
 
 function tableWithin(el: HTMLElement): HTMLTableElement | null {
   if (el.tagName === "TABLE") return el as HTMLTableElement
   return el.querySelector("table")
 }
+
 
 export interface DomPageBreakOpts {
   /** Top-level blocks, in flow order (patient box, title, each body block, signatures). */
@@ -185,8 +378,12 @@ export function paginateDomBlocks(o: DomPageBreakOpts): number {
       delete it.dataset.pgb
       it.removeAttribute("data-pgb-base")
     }
-    const table = tableWithin(it)
-    if (table) stripPageSpacerRows(table)
+    // Clears spacer rows AND inline line-break spacers, and is called on the
+    // block itself rather than only on a table inside it — a paragraph carries
+    // its breaks directly. Leaving any behind would make the next run measure
+    // the previous run's layout and stack break on break.
+    stripPageSpacerRows(it)
+    it.normalize()
   })
 
   let page = 0
@@ -203,39 +400,145 @@ export function paginateDomBlocks(o: DomPageBreakOpts): number {
     const footerLimit = page * stride + (pagePx - bottomPx)
     const pageTop = page * stride + topPx
 
-    // What has to clear the band for this block to stay put: the whole block,
-    // or — for a table too tall for any sheet — just its first row, since the
-    // rest is going to be split between rows below anyway.
-    const mustClear = !table ? height : rowsHeight <= pageContentPx ? rowsHeight : (rowHeights[0] ?? 0)
+    // Mirrors computeBodyPageDecorations exactly — the editor and these
+    // plain-HTML views MUST agree on every break or a report fitted onto one
+    // sheet in the editor comes out over two when it's viewed, printed or sent
+    // to the patient. Keep the two in step when either changes.
+    //
+    // What has to clear the band for this block to stay put: for a table too
+    // tall for any sheet, just its first row, since the rest is split between
+    // rows below anyway; for a table that fits, the whole table. A text block
+    // is split between its LINES instead of being required to fit whole.
+    const lines = table ? [] : naturalLineBoxes(it)
+
+    // Blank lines are never pushed — see the same rule in the editor's own pass
+    // (tiptap-pagination-extension.ts). All three paginators have to agree.
+    if (!table && !it.textContent?.trim() && !it.querySelector("img")) continue
 
     let pushed = 0
-    if (top + mustClear > footerLimit + 1 && top > pageTop + 2) {
+    // A manual page break wins outright, exactly as in the editor's own pass —
+    // otherwise a break the doctor put in would show on screen and vanish from
+    // the PDF and the view modal, which share this function.
+    let needsPush = it.hasAttribute(PAGE_BREAK_ATTR) || it.style.pageBreakBefore === "always"
+    if (needsPush) {
+      // Skip the fitting tests below; the decision is already made.
+    } else if (table) {
+      // Move the whole grid only when it both fits on a sheet AND doing so
+      // wouldn't leave a hole bigger than MAX_ORPHAN_GAP_RATIO. Otherwise the
+      // table stays put and is broken between its rows below, so requiring only
+      // its FIRST row to clear the footer is the right test.
+      const keepWhole =
+        rowsHeight <= pageContentPx
+        && footerLimit - top <= pageContentPx * MAX_ORPHAN_GAP_RATIO
+      const mustClear = keepWhole ? rowsHeight : (rowHeights[0] ?? 0)
+      needsPush = top + mustClear > footerLimit + 1
+    } else if (top + height > footerLimit + 1) {
+      let fitting = 0
+      let y = top
+      for (const line of lines) {
+        if (y + line.height > footerLimit + 1) break
+        y += line.height
+        fitting++
+      }
+      needsPush = !(
+        lines.length >= MIN_LINES_EITHER_SIDE * 2
+        && fitting >= MIN_LINES_EITHER_SIDE
+        && lines.length - fitting >= MIN_LINES_EITHER_SIDE
+      )
+    }
+
+    if (needsPush && top > pageTop + 2) {
       page++
-      const delta = page * stride + topPx - top
+      const target = page * stride + topPx
+      const delta = target - top
       if (delta > 0) {
         const base = parseFloat(getComputedStyle(it).marginTop) || 0
         it.setAttribute("data-pgb-base", it.style.marginTop || "")
         it.dataset.pgb = "1"
         it.style.marginTop = `${base + delta}px`
-        pushed = delta
+
+        // Adjacent block margins COLLAPSE: the gap between two paragraphs is
+        // max(this margin-top, the previous one's margin-bottom), so writing a
+        // margin of `delta` actually moves the block by `delta` minus the
+        // neighbour's bottom margin — landing it ~8px high with the report
+        // body's 0.5em spacing, which is enough to put its first line inside
+        // the letterhead band it was moved to clear.
+        //
+        // The editor's decoration path converges out of this by re-measuring
+        // over several passes; this one runs once, so it corrects itself here
+        // by measuring where the block actually landed.
+        const landed = it.getBoundingClientRect().top - wrapTop
+        const residual = target - landed
+        if (Math.abs(residual) > 0.5) it.style.marginTop = `${base + delta + residual}px`
+        pushed = it.getBoundingClientRect().top - wrapTop - top
       }
     }
 
-    if (!table || !rowEls.length) continue
+    if (!table || !rowEls.length) {
+      // Line-level breaks, run whether or not the block was just pushed: a block
+      // moved to the top of a fresh sheet can still be taller than one page.
+      if (lines.length >= MIN_LINES_EITHER_SIDE * 2) {
+        // Two phases on purpose. Inserting at (node, offset) SPLITS that text
+        // node — the original keeps the text before the offset and the
+        // remainder becomes a new node — so any later line recorded against the
+        // same node would have an offset past its new end. Deciding every break
+        // first (pure arithmetic, no DOM writes) and then applying them from the
+        // last to the first means each insertion only ever splits text that no
+        // remaining break refers to.
+        const breaks: { node: Text; offset: number; spacer: number }[] = []
+        let cursor = top + pushed
+        for (let i = 0; i < lines.length; i++) {
+          const { height: lh, node, offset } = lines[i]
+          const lineFooter = page * stride + (pagePx - bottomPx)
+          const linePageTop = page * stride + topPx
+          if (
+            i > 0 && cursor + lh > lineFooter + 1 && cursor > linePageTop + 2
+            && i >= MIN_LINES_EITHER_SIDE && lines.length - i >= MIN_LINES_EITHER_SIDE
+          ) {
+            const spacer = Math.round((page + 1) * stride + topPx - cursor)
+            if (spacer > 0) {
+              page++
+              breaks.push({ node, offset, spacer })
+              cursor += spacer
+            }
+          }
+          cursor += lh
+        }
+
+        const at = document.createRange()
+        for (let i = breaks.length - 1; i >= 0; i--) {
+          const { node, offset, spacer } = breaks[i]
+          at.setStart(node, Math.min(offset, node.length))
+          at.collapse(true)
+          at.insertNode(buildPageSpacerInline(spacer))
+        }
+      }
+      continue
+    }
 
     // Split between rows. Never before the first row — a break there is just
     // "move the whole table", which the push above has already decided.
     const colspan = rowEls[0].cells.length || 1
+    // Only a genuine header row (every cell a <th>) is reprinted on the
+    // continuation sheet. Most of the clinic's grids are plain measurement rows
+    // with no header at all, and copying their first row onto page two would
+    // invent a heading that isn't in the document.
+    const headerRow = isHeaderRow(rowEls[0]) ? rowEls[0] : null
     let cursor = top + pushed
     rowEls.forEach((row, i) => {
       const rowFooter = page * stride + (pagePx - bottomPx)
       const rowPageTop = page * stride + topPx
       if (i > 0 && cursor + rowHeights[i] > rowFooter + 1 && cursor > rowPageTop + 2) {
-        page++
-        const spacer = Math.round(page * stride + topPx - cursor)
+        const spacer = Math.round((page + 1) * stride + topPx - cursor)
         if (spacer > 0) {
+          page++
           row.parentNode?.insertBefore(buildPageSpacerRow(spacer, colspan), row)
           cursor += spacer
+          if (headerRow) {
+            const repeat = buildRepeatedHeaderRow(headerRow)
+            row.parentNode?.insertBefore(repeat, row)
+            cursor += repeat.getBoundingClientRect().height
+          }
         }
       }
       cursor += rowHeights[i]
@@ -332,9 +635,32 @@ td.pg-content{padding:15mm 14.8mm;}
    box) already overrides this by CSS precedence, so it only actually affects
    the plain body paragraphs it's meant for. */
 td.pg-content .doc-field, td.pg-content .body, td.pg-content p, td.pg-content div{white-space:pre-wrap;word-break:break-word;}
-td.pg-content .doc-field p, td.pg-content .doc-field div, td.pg-content .body p, td.pg-content .body div{margin:0 0 0.5em;min-height:1.5em;}
+/* No paragraph gap of our own — see the same rule in globals.css. */
+td.pg-content .doc-field p, td.pg-content .doc-field div, td.pg-content .body p, td.pg-content .body div{margin:0;}
+/* Only a genuinely empty line reserves height — see the same rule in globals.css. */
+td.pg-content .doc-field p:empty, td.pg-content .doc-field div:empty, td.pg-content .body p:empty, td.pg-content .body div:empty{min-height:1em;}
 td.pg-content .doc-field p:empty::before, td.pg-content .doc-field div:empty::before, td.pg-content p:empty::before, td.pg-content div:empty::before{content:"\\00a0";visibility:hidden;}
 td.pg-content .doc-field > :last-child, td.pg-content .body > :last-child{margin-bottom:0;}
+/* Lists — the *{margin:0;padding:0} reset above strips the marker's indent, and
+   a print window has no stylesheet to put it back, so a bullet list would print
+   as unmarked paragraphs. Mirrors the ".doc-field ul/ol/li" rules in
+   globals.css so screen, print and PDF agree. */
+/* Headings from the Styles gallery. The *{margin:0} reset above would otherwise
+   print a section heading flush against the paragraph before it, and the browser
+   default sizes are gone with it (mirrors the ".doc-field h1/h2/h3" rules in
+   globals.css). */
+td.pg-content .doc-field h1, td.pg-content .doc-field h2, td.pg-content .doc-field h3, td.pg-content .body h1, td.pg-content .body h2, td.pg-content .body h3{margin:0.4em 0 0.25em;line-height:1.25;font-weight:bold;}
+td.pg-content .doc-field h1, td.pg-content .body h1{font-size:1.25em;}
+td.pg-content .doc-field h2, td.pg-content .body h2{font-size:1.1em;text-decoration:underline;}
+td.pg-content .doc-field h3, td.pg-content .body h3{font-size:1em;font-style:italic;}
+/* A table the doctor switched to "borders off" in the editor prints the same
+   way (mirrors the [data-borderless] rule in globals.css). */
+td.pg-content .doc-field table[data-borderless="1"] td, td.pg-content .doc-field table[data-borderless="1"] th{border-color:transparent;}
+td.pg-content .doc-field ul, td.pg-content .body ul, td.pg-content .doc-field ol, td.pg-content .body ol{margin:0 0 0.5em;padding-left:1.6em;}
+td.pg-content .doc-field ul, td.pg-content .body ul{list-style:disc outside;}
+td.pg-content .doc-field ol, td.pg-content .body ol{list-style:decimal outside;}
+td.pg-content .doc-field li, td.pg-content .body li{margin:0 0 0.15em;}
+td.pg-content .doc-field li > p, td.pg-content .doc-field li > div, td.pg-content .body li > p, td.pg-content .body li > div{margin:0;min-height:0;}
 /* Tables inside the report body — measurement grids from imported Word
    templates, anything inserted with the editor's table button — print with the
    same visible grid the editor and view modal show on screen (mirrors the
@@ -374,6 +700,16 @@ td.pg-content .doc-field img[data-rimg]{max-width:none;}
    let them reach paper. */
 td.pg-content .doc-field .column-resize-handle{display:none;}
 td.pg-content .doc-field .selectedCell::after{display:none;}
+/* Page numbers. The obvious CSS answer — @page margin boxes with
+   content:counter(page) — is unusable: no shipping browser implements them, and
+   @page{margin:0} above (which the pre-printed letterhead needs) would disable
+   them anyway. So each number is placed absolutely at a computed offset from the
+   top of the document instead, which is exact because every sheet is exactly one
+   A4 height with no browser margin.
+   They sit in the TOP few mm of the reserved footer band: the band is left blank
+   for the clinic's pre-printed address, and the top edge of it is the one strip
+   that is both out of the body text's way and clear of the printed masthead. */
+.pg-num{position:absolute;left:0;right:0;text-align:center;font-size:9pt;color:#374151;pointer-events:none;}
 @media print{
 /* Horizontal padding matched to the editor/view modal's own side padding
    (56px "px-14" ≈ 14.8mm) rather than a rounder 20mm — a free-form signature
@@ -387,10 +723,44 @@ tfoot.pg-foot>tr>td{height:${bottomMm}mm;}
 }`
 }
 
-export function printShellHtml(title: string, innerHtml: string, extraCss = "", topMm: number = LETTERHEAD_TOP_MM, bottomMm: number = LETTERHEAD_BOTTOM_MM): string {
+const A4_HEIGHT_MM = 297
+
+/**
+ * "Page N of M" for every sheet, absolutely positioned into the top of each
+ * sheet's reserved footer band. See the .pg-num rule in printShellCss for why
+ * this is done with arithmetic rather than CSS page counters.
+ *
+ * `pageCount` comes from paginateDomBlocks(), so the printed numbering always
+ * agrees with the pagination the editor previewed — deriving it here
+ * independently would be a second source of truth for how many sheets a report
+ * takes, and the two would drift.
+ */
+export function pageNumbersHtml(pageCount: number, bottomMm: number = LETTERHEAD_BOTTOM_MM): string {
+  if (!Number.isFinite(pageCount) || pageCount < 2) return ""
+  const parts: string[] = []
+  for (let i = 0; i < pageCount; i++) {
+    const top = i * A4_HEIGHT_MM + (A4_HEIGHT_MM - bottomMm) + 2
+    parts.push(`<div class="pg-num" style="top:${top}mm;">Page ${i + 1} of ${pageCount}</div>`)
+  }
+  return parts.join("")
+}
+
+export function printShellHtml(
+  title: string,
+  innerHtml: string,
+  extraCss = "",
+  topMm: number = LETTERHEAD_TOP_MM,
+  bottomMm: number = LETTERHEAD_BOTTOM_MM,
+  pageCount = 0,
+): string {
+  const numbers = pageNumbersHtml(pageCount, bottomMm)
+  // A print window is written into about:blank and loads none of the app's CSS,
+  // so the report's fonts have to travel with the HTML — with absolute URLs,
+  // since a root-relative "/fonts/..." has no origin to resolve against there.
+  const fontCss = reportFontFaceCss(typeof window !== "undefined" ? window.location.origin : "")
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>
-<style>${printShellCss(topMm, bottomMm)}${extraCss ? `\n${extraCss}` : ""}</style>
-</head><body>
+<style>${fontCss}\n${printShellCss(topMm, bottomMm)}${extraCss ? `\n${extraCss}` : ""}</style>
+</head><body${numbers ? ` style="position:relative;"` : ""}>
 <table class="pg">
 <thead class="pg-head"><tr><td></td></tr></thead>
 <tbody><tr><td class="pg-content">
@@ -398,6 +768,7 @@ ${innerHtml}
 </td></tr></tbody>
 <tfoot class="pg-foot"><tr><td></td></tr></tfoot>
 </table>
+${numbers}
 </body></html>`
 }
 
@@ -436,6 +807,10 @@ export function reportHeaderHtml(i: ReportHeaderInfo, fontFamily?: string): stri
 }
 
 export function reportTitleHtml(title: string, fontFamily?: string): string {
+  // No heading, no box. A report only has a heading once a template has been
+  // applied (the template's own) or the doctor has typed one — printing an
+  // empty bordered box in the meantime reads as a mistake on the page.
+  if (!title.trim()) return ""
   const fontCss = fontFamily ? `font-family:${fontFamily};` : ""
   // Metrics mirror the editor's title box exactly (see the constants block
   // above): 16px bold, 4px/32px padding, a 240px floor so a short heading

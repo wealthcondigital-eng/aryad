@@ -7,21 +7,57 @@
 // import produces a plain-text report instead of a crash.
 
 import { buildDocxSignatureCells, dataUrlToBytes, imageFormat, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
-import { DEFAULT_REPORT_FONT } from "@/lib/report-layout"
+import { DEFAULT_REPORT_FONT, PAGE_BREAK_ATTR } from "@/lib/report-layout"
 import { isFloatingWrap, readImageDataAttrs, type ImageWrap } from "@/lib/report-image"
 
 export type Seg = {
   text: string; bold?: boolean; italic?: boolean; underline?: boolean; font?: string
+  /** Struck-through text (<s>/<del>/<strike>, or a line-through style). */
+  strike?: boolean
+  /** cm² / H₂O — <sup> and <sub>, which Word has as run properties. */
+  superScript?: boolean
+  subScript?: boolean
+  /** Run colour and highlight, as 6-digit hex without the leading #. */
+  color?: string
+  highlight?: string
   image?: string; imgWidth?: number; imgHeight?: number
   /** Word text-wrapping mode for an inserted image (see report-image.ts). */
   wrap?: ImageWrap
   /** Free-placement offset from the anchor, px — only set for floating wraps. */
   imgLeft?: number
   imgTop?: number
+  /**
+   * Marker emitted at the start of an <li>, carrying the kind and depth of the
+   * list around it. Without it a bullet list exports as ordinary lines: the
+   * markers live in the browser's list rendering, not in the text.
+   */
+  list?: { ordered: boolean; level: number }
+  /**
+   * Marker emitted at the start of a block, carrying the paragraph properties
+   * Word keeps on the paragraph rather than on its runs. Alignment used to be
+   * lost entirely on export for exactly this reason — a centred line came out
+   * left-aligned in the .docx.
+   */
+  block?: BlockFormat
+}
+
+export type BlockFormat = {
+  /** 1-3 for a Styles-gallery heading; absent for body text. */
+  heading?: 1 | 2 | 3
+  align?: "left" | "center" | "right" | "justify"
+  /** px, converted to twips on the way into Word. */
+  indentLeft?: number
+  firstLine?: number
+  spaceBefore?: number
+  spaceAfter?: number
+  pageBreakBefore?: boolean
 }
 
 /** px → EMU (English Metric Units): 914400 per inch, at the app's 96dpi basis. */
 const EMU_PER_PX = 9525
+
+/** Id of the one numbering definition every numbered list in a report shares. */
+const NUMBERED_LIST_REF = "report-numbered-list"
 
 type DocxModule = Awaited<typeof import("docx")>
 
@@ -108,11 +144,62 @@ function fontOf(el: HTMLElement): string | undefined {
   return styleFont ? styleFont.split(",")[0].trim().replace(/^["']|["']$/g, "") : undefined
 }
 
+/**
+ * CSS colour → the "RRGGBB" Word wants. Handles the two forms the editor and
+ * execCommand actually produce (#rgb/#rrggbb and rgb(...)); anything else —
+ * a named colour, a gradient — is left alone rather than guessed at.
+ */
+function hexOf(css: string | undefined | null): string | undefined {
+  if (!css) return undefined
+  const s = css.trim()
+  if (/^#[0-9a-f]{6}$/i.test(s)) return s.slice(1).toUpperCase()
+  if (/^#[0-9a-f]{3}$/i.test(s)) return s.slice(1).split("").map((c) => c + c).join("").toUpperCase()
+  const rgb = s.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i)
+  if (rgb) {
+    return [rgb[1], rgb[2], rgb[3]]
+      .map((n) => Math.max(0, Math.min(255, parseInt(n, 10))).toString(16).padStart(2, "0"))
+      .join("").toUpperCase()
+  }
+  return undefined
+}
+
+/**
+ * The paragraph-level formatting on a block element, or null when it carries
+ * none — the editor writes all of it as inline styles (see
+ * tiptap-paragraph-format-extension.ts), which is what makes it readable here.
+ */
+function blockFormatOf(el: HTMLElement): BlockFormat | null {
+  const out: BlockFormat = {}
+  const heading = /^h([123])$/.exec(el.tagName.toLowerCase())
+  if (heading) out.heading = Number(heading[1]) as 1 | 2 | 3
+  const align = el.style?.textAlign
+  if (align === "center" || align === "right" || align === "justify" || align === "left") out.align = align
+
+  const num = (v: string | undefined) => {
+    const n = parseFloat(v ?? "")
+    return Number.isFinite(n) && n !== 0 ? n : undefined
+  }
+  out.indentLeft = num(el.style?.marginLeft)
+  out.firstLine = num(el.style?.textIndent)
+  out.spaceBefore = num(el.style?.marginTop)
+  out.spaceAfter = num(el.style?.marginBottom)
+  if (el.hasAttribute(PAGE_BREAK_ATTR) || el.style?.pageBreakBefore === "always") out.pageBreakBefore = true
+
+  return Object.values(out).some((v) => v !== undefined) ? out : null
+}
+
 export function parseHtml(html: string): Seg[] {
   const segs: Seg[] = []
   if (typeof window === "undefined") return [{ text: html }]
   const doc = new DOMParser().parseFromString(html, "text/html")
-  function walk(node: Node, fmt: { bold: boolean; italic: boolean; underline: boolean; font?: string }) {
+  /** One entry per open <ul>/<ol>; the value says whether it is ordered. */
+  const listStack: boolean[] = []
+  type Fmt = {
+    bold: boolean; italic: boolean; underline: boolean; font?: string
+    strike?: boolean; superScript?: boolean; subScript?: boolean
+    color?: string; highlight?: string
+  }
+  function walk(node: Node, fmt: Fmt) {
     if (node.nodeType === 3) {
       const t = node.textContent ?? ""
       if (t) segs.push({ text: t, ...fmt })
@@ -143,18 +230,39 @@ export function parseHtml(html: string): Seg[] {
         }
         return
       }
-      const f = { ...fmt }
+      const f: Fmt = { ...fmt }
       if (tag === "b" || tag === "strong") f.bold = true
       if (tag === "i" || tag === "em")     f.italic = true
       if (tag === "u")                     f.underline = true
+      if (tag === "s" || tag === "del" || tag === "strike") f.strike = true
+      if (tag === "sup")                   f.superScript = true
+      if (tag === "sub")                   f.subScript = true
       f.font = fontOf(el) ?? f.font
+      // Inline styles carry the rest: the editor writes colour/highlight as
+      // styles on a <span>, and execCommand writes line-through the same way.
+      if (el.style?.textDecorationLine?.includes("line-through") || el.style?.textDecoration?.includes("line-through")) f.strike = true
+      f.color = hexOf(el.style?.color) ?? (el.tagName.toLowerCase() === "font" ? hexOf(el.getAttribute("color")) : undefined) ?? f.color
+      f.highlight = hexOf(el.style?.backgroundColor) ?? f.highlight
+      // Nesting depth is what Word needs for the indent level, so the list kind
+      // is stacked on the way down and popped on the way back out.
+      const isList = tag === "ul" || tag === "ol"
+      if (isList) listStack.push(tag === "ol")
+      if (tag === "li" && listStack.length) {
+        segs.push({ text: "", list: { ordered: listStack[listStack.length - 1], level: listStack.length - 1 } })
+      }
+      // Paragraph properties, read off the block that is about to be walked.
+      if (["p", "div", "li", "h1", "h2", "h3"].includes(tag)) {
+        const block = blockFormatOf(el)
+        if (block) segs.push({ text: "", block })
+      }
       el.childNodes.forEach((c) => walk(c, f))
+      if (isList) listStack.pop()
       // Table cells/rows have no natural line-break tag of their own, so a
       // DOCX/plain-text export would otherwise run every cell's text together
       // with no separator at all — space cells with a tab and end each row
       // with a newline so an exported table still reads as a table.
       if (tag === "td" || tag === "th") segs.push({ text: "\t" })
-      if (["div", "p", "br", "li", "tr"].includes(tag)) segs.push({ text: "\n" })
+      if (["div", "p", "br", "li", "tr", "h1", "h2", "h3"].includes(tag)) segs.push({ text: "\n" })
     }
   }
   doc.body.childNodes.forEach((n) => walk(n, { bold: false, italic: false, underline: false }))
@@ -188,9 +296,24 @@ export async function buildReportDocxBase64(opts: ReportDocxOptions): Promise<st
   const docx = await import("docx")
   const {
     Document, Packer, Paragraph, TextRun, AlignmentType, BorderStyle,
-    Table, TableRow, TableCell, WidthType,
+    Table, TableRow, TableCell, WidthType, LevelFormat, HeadingLevel,
   } = docx
   const sigCells = await buildDocxSignatureCells(signatories, signatureLayouts)
+
+  // Real Word heading styles, so the report's sections show up in Word's
+  // navigation pane and pick up the document's own heading formatting.
+  const HEADING_LEVELS = {
+    1: HeadingLevel.HEADING_1,
+    2: HeadingLevel.HEADING_2,
+    3: HeadingLevel.HEADING_3,
+  } as const
+
+  const ALIGNMENTS = {
+    left: AlignmentType.LEFT,
+    center: AlignmentType.CENTER,
+    right: AlignmentType.RIGHT,
+    justify: AlignmentType.JUSTIFIED,
+  } as const
 
   // Vertical rhythm of the body.
   //
@@ -224,19 +347,27 @@ export async function buildReportDocxBase64(opts: ReportDocxOptions): Promise<st
     // after the fact.
     type Run = InstanceType<typeof TextRun> | ReturnType<typeof makeImageRun>
     type Line =
-      | { kind: "text"; runs: Run[] }
+      | { kind: "text"; runs: Run[]; list?: { ordered: boolean; level: number }; block?: BlockFormat }
       | { kind: "image"; run: Run; center: boolean }
       | { kind: "float"; run: Run }
       | { kind: "blank" }
 
     const linesOut: Line[] = []
     let runs: Run[] = []
+    // Set by the marker parseHtml emits at the start of an <li>, and consumed by
+    // the line that item's text ends up on.
+    let pendingList: { ordered: boolean; level: number } | undefined
+    let pendingBlock: BlockFormat | undefined
     const endLine = () => {
-      linesOut.push(runs.length ? { kind: "text", runs } : { kind: "blank" })
+      linesOut.push(runs.length ? { kind: "text", runs, list: pendingList, block: pendingBlock } : { kind: "blank" })
       runs = []
+      pendingList = undefined
+      pendingBlock = undefined
     }
 
     segs.forEach((s) => {
+      if (s.list) { pendingList = s.list; return }
+      if (s.block) { pendingBlock = s.block; return }
       if (s.image) {
         const run = makeImageRun(docx, s)
         // In line with text: stays in the run stream, so a small figure sits in
@@ -258,7 +389,18 @@ export async function buildReportDocxBase64(opts: ReportDocxOptions): Promise<st
         return
       }
       if (s.text === "\n") endLine()
-      else runs.push(new TextRun({ text: s.text, bold: s.bold, italics: s.italic, underline: s.underline ? {} : undefined, font: s.font || DEFAULT_REPORT_FONT, size }))
+      else runs.push(new TextRun({
+        text: s.text,
+        bold: s.bold, italics: s.italic, underline: s.underline ? {} : undefined,
+        strike: s.strike, superScript: s.superScript, subScript: s.subScript,
+        color: s.color,
+        // Word's own highlight palette only has 15 fixed colours, so an arbitrary
+        // pastel goes in as cell-style shading instead — which is what Word does
+        // when you use "Text Highlight" from the theme colours.
+        shading: s.highlight ? { fill: s.highlight } : undefined,
+        font: s.font || DEFAULT_REPORT_FONT,
+        size,
+      }))
     })
     if (runs.length) endLine()
 
@@ -287,7 +429,30 @@ export async function buildReportDocxBase64(opts: ReportDocxOptions): Promise<st
           spacing: { after: LINE_GAP },
         }))
       } else {
-        paras.push(new Paragraph({ children: [...takeFloats(), ...line.runs], spacing: { after: LINE_GAP } }))
+        // A list item becomes a real Word list paragraph — bullets keep Word's
+        // own bullet, numbered items get the shared numbering definition below
+        // so 1., 2., 3. continue across the report instead of restarting.
+        // px → twips (1440 per inch at the report's 96dpi basis).
+        const tw = (v: number | undefined) => (v ? Math.round(v * 15) : undefined)
+        const b = line.block
+        paras.push(new Paragraph({
+          children: [...takeFloats(), ...line.runs],
+          spacing: {
+            after: (tw(b?.spaceAfter) ?? 0) + LINE_GAP,
+            ...(b?.spaceBefore ? { before: tw(b.spaceBefore) } : {}),
+          },
+          ...(b?.heading ? { heading: HEADING_LEVELS[b.heading] } : {}),
+          ...(b?.align ? { alignment: ALIGNMENTS[b.align] } : {}),
+          ...(b?.indentLeft || b?.firstLine
+            ? { indent: { left: tw(b.indentLeft), firstLine: tw(b.firstLine) } }
+            : {}),
+          ...(b?.pageBreakBefore ? { pageBreakBefore: true } : {}),
+          ...(line.list
+            ? line.list.ordered
+              ? { numbering: { reference: NUMBERED_LIST_REF, level: Math.min(line.list.level, 2) } }
+              : { bullet: { level: Math.min(line.list.level, 2) } }
+            : {}),
+        }))
       }
     }
     // Floating pictures anchored past the last line of the report still have to
@@ -398,6 +563,10 @@ export async function buildReportDocxBase64(opts: ReportDocxOptions): Promise<st
     // exist in the clinic's real Word documents. Sized down to a 1pt run with
     // a hairline of spacing: present (still valid OOXML, still a real
     // paragraph mark), but no longer visible as a gap.
+    // The whole heading block is conditional: a report written without a
+    // template has no heading, and an empty bordered box in the Word file
+    // reads as a mistake rather than as a blank to fill in.
+    ...(docTitle.trim() ? [
     new Paragraph({ children: [new TextRun({ text: "", size: 2 })], spacing: { before: 20, after: 20 } }),
     // ── Study heading — bordered box sized to its own text, centered ──
     // A one-cell TABLE, deliberately, and sized in absolute twips.
@@ -450,6 +619,7 @@ export async function buildReportDocxBase64(opts: ReportDocxOptions): Promise<st
     }),
     // Same fix, same reason, on the other side of the heading box.
     new Paragraph({ children: [new TextRun({ text: "", size: 2 })], spacing: { before: 20, after: 20 } }),
+    ] : []),
     // ── Report body ──
     ...makeParas(bodyHtml),
     // ── Gap before signatures ──
@@ -520,7 +690,21 @@ export async function buildReportDocxBase64(opts: ReportDocxOptions): Promise<st
   // fall back to its own default — relying on Word's own default (US Letter,
   // in its US builds) would silently reflow every report. Stating A4 is simply
   // correct: these reports are printed on A4.
+  // Word bullets need no definition of their own, but numbered lists do: three
+  // levels, indented the same 0.25" per level Word's own default list uses.
+  const numberedListConfig = {
+    reference: NUMBERED_LIST_REF,
+    levels: [0, 1, 2].map((level) => ({
+      level,
+      format: LevelFormat.DECIMAL,
+      text: `%${level + 1}.`,
+      alignment: AlignmentType.LEFT,
+      style: { paragraph: { indent: { left: 720 + level * 360, hanging: 360 } } },
+    })),
+  }
+
   return await Packer.toBase64String(new Document({
+    numbering: { config: [numberedListConfig] },
     sections: [{
       properties: {
         page: {
