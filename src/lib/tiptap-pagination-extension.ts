@@ -368,13 +368,19 @@ export function computeBodyPageDecorations(view: EditorView, opts: PageBreakOpts
     const firstRowHeight = (rowEls[0]?.getBoundingClientRect().height ?? 0) / zoom
     const lines = tableEl ? [] : naturalLineBoxes(dom, zoom)
 
-    // An empty line is never worth a page break. Word lets a blank paragraph
-    // fall wherever the boundary lands — pushing one to the next sheet leaves a
-    // hole the height of everything below it (an imported template is half
-    // blank paragraphs, so this was costing ~300px of white space per report,
-    // and could push real content onto an extra page).
+    // A blank line doesn't force a page break while there is still room for it.
+    // Pushing one early leaves a hole the height of everything below it, and an
+    // imported template is half blank paragraphs, so that used to cost ~300px of
+    // white space per report and could push real content onto an extra sheet.
+    //
+    // What a blank line must NOT do is keep going once the page is full. Word
+    // never draws a line inside the bottom margin: blank paragraphs fill the
+    // page down to it, and the first one that no longer fits starts the next
+    // sheet, taking the caret with it. Letting them run on is what put the
+    // cursor inside the footer band, and what printed with the spacing wrong.
     const isEmptyLine = node.type.name === "paragraph" && node.content.size === 0
-    if (isEmptyLine) {
+    const emptyLineFits = isEmptyLine && naturalTop + rectHeight <= footerLimit + 1
+    if (emptyLineFits) {
       exitBottomPx = naturalBottom
       return
     }
@@ -388,6 +394,13 @@ export function computeBodyPageDecorations(view: EditorView, opts: PageBreakOpts
       page++
       const delta = page * stride + letterheadTopPx - naturalTop
       if (delta > 0) margin = delta
+    } else if (isEmptyLine) {
+      // Out of room: this blank line belongs at the top of the next page.
+      if (naturalTop > pageTop + 2) {
+        page++
+        const delta = page * stride + letterheadTopPx - naturalTop
+        if (delta > 0) margin = delta
+      }
     } else if (tableEl) {
       // Keep the grid intact only when it fits a sheet AND moving it whole
       // wouldn't leave a hole bigger than MAX_ORPHAN_GAP_RATIO; otherwise it

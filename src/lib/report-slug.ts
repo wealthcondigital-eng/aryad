@@ -1,4 +1,4 @@
-// Per-study report slug generation — the pretty `/<name>-<study>-report/pdf`
+// Per-study report slug generation — the pretty `/<name>-<study>-report.pdf`
 // URL that gets shared over WhatsApp.
 
 import Patient from "@/models/Patient"

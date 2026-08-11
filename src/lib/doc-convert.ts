@@ -14,9 +14,8 @@
 //
 // It runs on the SERVER, not on anyone's machine: a Windows user uploading a
 // .doc through the browser never touches LibreOffice. The only requirement is
-// that the host allows the binary to be installed — fine on a VPS, Docker,
-// Railway, Render or Fly; not possible on plain Vercel serverless, which is why
-// this degrades instead of throwing when it isn't found.
+// that the host contains the binary. When it does not, the upload route keeps
+// its legacy text fallback so importing remains available without OS setup.
 
 import { spawn } from "node:child_process"
 import { randomUUID } from "node:crypto"
@@ -52,9 +51,7 @@ export async function findSoffice(): Promise<string | null> {
 
 /**
  * Converts a legacy .doc buffer to .docx. Returns null when LibreOffice is
- * unavailable or the conversion fails, so the caller can fall back to the
- * text-only path rather than rejecting the upload outright — a degraded import
- * is a better outcome for the clinic than no import.
+ * unavailable or conversion fails, so the caller can use its legacy fallback.
  */
 export async function convertDocToDocx(buffer: Buffer): Promise<Buffer | null> {
   const soffice = await findSoffice()

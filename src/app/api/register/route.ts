@@ -96,6 +96,9 @@ export async function GET(req: NextRequest) {
     if (month && month !== "all") await backfillSystemRows(month)
 
     const grouped = await RegisterEntry.aggregate([
+      // Rows taken off a sheet by hand are gone as far as the register is
+      // concerned — they must not count towards the month's totals either.
+      { $match: { hidden: { $ne: true } } },
       {
         $group: {
           _id:        "$month",
@@ -141,10 +144,11 @@ export async function GET(req: NextRequest) {
     // to. Date-then-row keeps the month reading exactly as the sheet does, and
     // lets hand-added and system rows fall into place chronologically.
     let entries: unknown[] = []
+    const visible = { hidden: { $ne: true } }
     if (month === "all") {
-      entries = await RegisterEntry.find().sort({ date: 1, rowNo: 1, srNo: 1 }).lean()
+      entries = await RegisterEntry.find(visible).sort({ date: 1, rowNo: 1, srNo: 1 }).lean()
     } else if (month) {
-      entries = await RegisterEntry.find({ month }).sort({ date: 1, rowNo: 1, srNo: 1 }).lean()
+      entries = await RegisterEntry.find({ month, ...visible }).sort({ date: 1, rowNo: 1, srNo: 1 }).lean()
     }
 
     return NextResponse.json({

@@ -9,6 +9,7 @@ import RegisterEntry from "@/models/RegisterEntry"
 import { autoCategory } from "@/lib/study-catalogue"
 import { generateReportSlug } from "@/lib/report-slug"
 import { syncPatientToRegister } from "@/lib/register-sync"
+import { applyBillToStudies, patientTotals } from "@/lib/bill-allocation"
 
 type PatientDoc = InstanceType<typeof Patient>
 
@@ -54,9 +55,11 @@ function syncLegacyMirror(patient: PatientDoc) {
   patient.reportSlug  = first.reportSlug
   patient.editHistory = first.editHistory
   patient.billId      = first.billId
-  patient.charges     = first.charges ?? 0
-  patient.paid        = first.paid ?? 0
-  patient.discount    = first.discount ?? 0
+  // Money mirrors the whole patient — see the note in api/billing/route.ts
+  const money = patientTotals(patient.studies)
+  patient.charges     = money.charges
+  patient.paid        = money.paid
+  patient.discount    = money.discount
   patient.paymentMode = first.paymentMode ?? "Cash"
 
   const statuses: string[] = patient.studies.map((s: { reportStatus: string }) => s.reportStatus)
@@ -74,7 +77,9 @@ const generateSlug = (patient: PatientDoc, studyName: string, excludeId: string)
 // When a study is dropped from a patient's study list, pull its line off
 // whatever Bill it was billed on (deleting the Bill outright if that was the
 // only study on it), and keep any sibling studies still on that Bill in sync.
-async function cascadeRemoveStudiesFromBills(patient: PatientDoc, removed: Array<{ name: string; billId?: mongoose.Types.ObjectId | null }>) {
+// Returns whether any bill's money actually moved, so the caller knows whether
+// the monthly register's money columns have to be re-taken from the bill.
+async function cascadeRemoveStudiesFromBills(patient: PatientDoc, removed: Array<{ name: string; billId?: mongoose.Types.ObjectId | null }>): Promise<boolean> {
   const billIds = Array.from(
     new Set(removed.filter((s) => s.billId).map((s) => String(s.billId)))
   )
@@ -104,16 +109,15 @@ async function cascadeRemoveStudiesFromBills(patient: PatientDoc, removed: Array
     await bill.save()
 
     // Studies still remaining on this patient that share the same bill need
-    // their mirrored charges/balance updated to match the trimmed-down bill.
-    for (const entry of patient.studies) {
-      if (String(entry.billId) === billId) {
-        entry.charges = bill.charges
-        entry.paid = bill.paid
-        entry.discount = bill.discount
-        entry.paymentMode = bill.paymentMode
-      }
-    }
+    // their mirrored charges/balance updated to match the trimmed-down bill —
+    // each taking its own line off it, not the whole thing.
+    applyBillToStudies(
+      patient.studies.filter((e: { billId?: unknown }) => String(e.billId) === billId),
+      bill.items,
+      bill,
+    )
   }
+  return billIds.length > 0
 }
 
 // The mirror image of cascadeRemoveStudiesFromBills: when a study is added to
@@ -122,12 +126,12 @@ async function cascadeRemoveStudiesFromBills(patient: PatientDoc, removed: Array
 // otherwise a study added after billing never shows on any bill at all.
 // Patients with no bill yet are left alone; the "New Bill" screen already
 // picks up every unbilled study when a bill is eventually raised.
-async function cascadeAddStudiesToBill(patient: PatientDoc, added: Array<{ name: string; billId?: mongoose.Types.ObjectId | null }>) {
+async function cascadeAddStudiesToBill(patient: PatientDoc, added: Array<{ name: string; billId?: mongoose.Types.ObjectId | null }>): Promise<boolean> {
   const unbilled = added.filter((s) => !s.billId && s.name?.trim())
-  if (unbilled.length === 0) return
+  if (unbilled.length === 0) return false
 
   const bill = await Bill.findOne({ patientId: patient._id }).sort({ createdAt: -1 })
-  if (!bill) return
+  if (!bill) return false
 
   const existingNames = new Set(bill.items.map((i: { study: string }) => i.study.trim().toLowerCase()))
   let changed = false
@@ -145,7 +149,7 @@ async function cascadeAddStudiesToBill(patient: PatientDoc, added: Array<{ name:
     s.billId = bill._id
     changed = true
   }
-  if (!changed) return
+  if (!changed) return false
 
   bill.charges = bill.items.reduce((sum: number, i: { quantity: number; price: number }) => sum + i.quantity * i.price, 0)
   bill.balance = bill.charges - bill.discount - bill.paid
@@ -158,15 +162,13 @@ async function cascadeAddStudiesToBill(patient: PatientDoc, added: Array<{ name:
   bill.markModified("items")
   await bill.save()
 
-  // Every study entry linked to this bill mirrors the new totals.
-  for (const entry of patient.studies) {
-    if (String(entry.billId) === String(bill._id)) {
-      entry.charges = bill.charges
-      entry.paid = bill.paid
-      entry.discount = bill.discount
-      entry.paymentMode = bill.paymentMode
-    }
-  }
+  // Every study entry linked to this bill takes its own line off the new totals.
+  applyBillToStudies(
+    patient.studies.filter((e: { billId?: unknown }) => String(e.billId) === String(bill._id)),
+    bill.items,
+    bill,
+  )
+  return true
 }
 
 // GET /api/patients/:id
@@ -213,6 +215,11 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (!patient) return NextResponse.json({ error: "Not found" }, { status: 404 })
     ensureStudies(patient)
 
+    // Set when this edit moves money on a bill (a study added to or dropped from
+    // a billed patient). Only then may the register's money columns overwrite
+    // what was typed onto the sheet — a plain report save must never do that.
+    let billMoneyMoved = false
+
     // ── Delete one study's report (drops the study + its bill line) ──
     // Removing the last remaining study deletes the whole patient record —
     // a patient with zero studies can't exist in this app.
@@ -222,7 +229,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         return NextResponse.json({ error: "Invalid study index" }, { status: 400 })
       }
       const removed = patient.studies.splice(idx, 1)
-      await cascadeRemoveStudiesFromBills(patient, removed)
+      const moved = await cascadeRemoveStudiesFromBills(patient, removed)
       if (patient.studies.length === 0) {
         await Patient.findByIdAndDelete(id)
         await RegisterEntry.deleteMany({ sourceType: "system", patientId: patient._id })
@@ -231,7 +238,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       syncLegacyMirror(patient)
       patient.markModified("studies")
       await patient.save()
-      await syncPatientToRegister(patient)
+      await syncPatientToRegister(patient, "", { moneyFromBill: moved })
       return NextResponse.json({ patient })
     }
 
@@ -285,7 +292,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
           return Object.assign(old[matchIdx], { category: s.category })
         })
         const removed = old.filter((_: unknown, i: number) => !usedOldIndices.has(i))
-        if (removed.length > 0) await cascadeRemoveStudiesFromBills(patient, removed)
+        if (removed.length > 0 && await cascadeRemoveStudiesFromBills(patient, removed)) billMoneyMoved = true
 
         patient.studies = merged
         await Promise.all(cleaned.map((s) =>
@@ -297,7 +304,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         ))
         // Studies newly added by this edit also get a line on the existing bill
         if (newIndices.length > 0) {
-          await cascadeAddStudiesToBill(patient, newIndices.map((i) => patient.studies[i]).filter(Boolean))
+          if (await cascadeAddStudiesToBill(patient, newIndices.map((i) => patient.studies[i]).filter(Boolean))) billMoneyMoved = true
         }
       }
     }
@@ -315,7 +322,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         { $setOnInsert: { name, category, price: 0, fromCatalogue: false, firstSeenAt: new Date() } },
         { upsert: true }
       )
-      await cascadeAddStudiesToBill(patient, [patient.studies[patient.studies.length - 1]])
+      if (await cascadeAddStudiesToBill(patient, [patient.studies[patient.studies.length - 1]])) billMoneyMoved = true
     }
 
     // ── Rename the current study (report template / heading changed) ──
@@ -381,16 +388,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         if (topSpacerLines !== undefined)    entry.topSpacerLines    = topSpacerLines
         if (patientBoxWidthPx !== undefined) entry.patientBoxWidthPx = patientBoxWidthPx
         if (titleBoxWidthPx !== undefined)   entry.titleBoxWidthPx   = titleBoxWidthPx
-        if (reportPdf    !== undefined) entry.reportPdf = reportPdf
-        // The shareable `/{patient-name}-{study-name}-report` link is minted as
-        // soon as the report has any content. It used to be minted only when a
-        // PDF was stored alongside it, so a report written and submitted from
-        // the editor — where the PDF is built later, on Share — had no slug,
-        // and every share button fell back to the raw
-        // `/api/patients/<mongo id>/pdf?sidx=0` URL. That is the ugly link the
-        // patient received.
-        if (!entry.reportSlug && (reportBody !== undefined || reportPdf !== undefined || reportStatus === "completed")) {
-          entry.reportSlug = await generateSlug(patient, entry.name, id)
+        if (reportPdf    !== undefined) {
+          entry.reportPdf = reportPdf
+          if (!entry.reportSlug) entry.reportSlug = await generateSlug(patient, entry.name, id)
         }
         if (editHistoryEntry) {
           entry.editHistory.unshift(editHistoryEntry)
@@ -452,7 +452,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     }
 
     // Keep this patient's rows in the monthly register in step with the edit
-    await syncPatientToRegister(patient)
+    await syncPatientToRegister(patient, "", { moneyFromBill: billMoneyMoved })
 
     // Notify receptionists when a completed report is submitted
     if (editHistoryEntry && reportStatus === "completed") {

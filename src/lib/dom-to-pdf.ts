@@ -1,5 +1,5 @@
 // Browser-only: rasterizes clean report HTML (header/title/body/signatures)
-// into paginated A4 sheets and packs them into a PDF via html2canvas-pro + jsPDF.
+// into paginated A4 sheets and packs them into a PDF via html2canvas + jsPDF.
 //
 // Why not draw text directly with jsPDF? jsPDF only ships 4 built-in fonts
 // (Helvetica/Times/Courier/Symbol), so any font picked in the report editor's
@@ -29,18 +29,12 @@ export async function buildPagedPdfBlob(opts: {
   host.style.cssText = `position:fixed;left:-99999px;top:0;width:${A4_WIDTH_PX}px;background:#ffffff;`
 
   const content = document.createElement("div")
-  // `color` is set explicitly so nothing in here inherits the app's theme
-  // colour from <body>: the report is black on white on paper, and an
-  // inherited theme token is both wrong and (being oklch) a needless risk for
-  // the rasterizer.
-  content.style.cssText = `padding:${topPx}px ${CONTENT_SIDE_PX}px ${bottomPx}px;box-sizing:border-box;font-family:${DEFAULT_REPORT_FONT},Georgia,serif;color:#111827;background:#ffffff;`
-  // No Tailwind colour utility on the body div — REPORT_BODY_STYLE already
-  // carries `color:#111827`, and `text-gray-900` resolves to an oklch value.
+  content.style.cssText = `padding:${topPx}px ${CONTENT_SIDE_PX}px ${bottomPx}px;box-sizing:border-box;font-family:${DEFAULT_REPORT_FONT},Georgia,serif;`
   content.innerHTML = `
     <div>${opts.headerHtml}</div>
     ${opts.topSpacerHtml ?? ""}
     <div>${opts.titleHtml}</div>
-    <div id="pgb-body" class="doc-field report-paper" style="${REPORT_BODY_STYLE}">${opts.bodyHtml}</div>
+    <div id="pgb-body" class="doc-field report-paper text-gray-900" style="${REPORT_BODY_STYLE}">${opts.bodyHtml}</div>
     <div style="${REPORT_SIGS_STYLE}">${opts.signaturesHtml}</div>
   `
   host.appendChild(content)
@@ -70,15 +64,7 @@ export async function buildPagedPdfBlob(opts: {
     })
     host.style.height = `${numPages * A4_PAGE_PX}px`
 
-    // html2canvas-pro, not html2canvas.
-    //
-    // This app is Tailwind v4, whose entire palette is `oklch()`, and
-    // html2canvas 1.4.1 throws "unsupported color function" the moment it meets
-    // one — which every capture did, since anything without an explicit colour
-    // inherits `color` from <body>. Every PDF build failed for that reason, so
-    // no report ever had a PDF stored to share. The -pro fork exists precisely
-    // to parse the modern colour functions; the API is otherwise identical.
-    const html2canvas = (await import("html2canvas-pro")).default
+    const html2canvas = (await import("html2canvas")).default
     const canvas = await html2canvas(host, { scale: CAPTURE_SCALE, backgroundColor: "#ffffff", useCORS: true })
 
     const { jsPDF } = await import("jspdf")

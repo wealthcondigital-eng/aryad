@@ -9,6 +9,7 @@
 import { buildDocxSignatureCells, dataUrlToBytes, imageFormat, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
 import { DEFAULT_REPORT_FONT, PAGE_BREAK_ATTR } from "@/lib/report-layout"
 import { isFloatingWrap, readImageDataAttrs, type ImageWrap } from "@/lib/report-image"
+import { cssLengthToPx } from "@/lib/css-length"
 
 export type Seg = {
   text: string; bold?: boolean; italic?: boolean; underline?: boolean; font?: string
@@ -176,10 +177,10 @@ function blockFormatOf(el: HTMLElement): BlockFormat | null {
   if (align === "center" || align === "right" || align === "justify" || align === "left") out.align = align
 
   const num = (v: string | undefined) => {
-    const n = parseFloat(v ?? "")
-    return Number.isFinite(n) && n !== 0 ? n : undefined
+    const n = cssLengthToPx(v)
+    return n != null && n !== 0 ? n : undefined
   }
-  out.indentLeft = num(el.style?.marginLeft)
+  out.indentLeft = num(el.style?.marginLeft || el.style?.marginInlineStart)
   out.firstLine = num(el.style?.textIndent)
   out.spaceBefore = num(el.style?.marginTop)
   out.spaceAfter = num(el.style?.marginBottom)
@@ -563,10 +564,6 @@ export async function buildReportDocxBase64(opts: ReportDocxOptions): Promise<st
     // exist in the clinic's real Word documents. Sized down to a 1pt run with
     // a hairline of spacing: present (still valid OOXML, still a real
     // paragraph mark), but no longer visible as a gap.
-    // The whole heading block is conditional: a report written without a
-    // template has no heading, and an empty bordered box in the Word file
-    // reads as a mistake rather than as a blank to fill in.
-    ...(docTitle.trim() ? [
     new Paragraph({ children: [new TextRun({ text: "", size: 2 })], spacing: { before: 20, after: 20 } }),
     // ── Study heading — bordered box sized to its own text, centered ──
     // A one-cell TABLE, deliberately, and sized in absolute twips.
@@ -619,7 +616,6 @@ export async function buildReportDocxBase64(opts: ReportDocxOptions): Promise<st
     }),
     // Same fix, same reason, on the other side of the heading box.
     new Paragraph({ children: [new TextRun({ text: "", size: 2 })], spacing: { before: 20, after: 20 } }),
-    ] : []),
     // ── Report body ──
     ...makeParas(bodyHtml),
     // ── Gap before signatures ──

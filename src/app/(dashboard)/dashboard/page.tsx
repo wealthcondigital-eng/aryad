@@ -19,7 +19,6 @@ import { motion } from "motion/react"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { BillDocViewer } from "@/components/bill-doc-viewer"
 import { shareReportOnWhatsApp } from "@/lib/share-whatsapp"
-import { showAlert } from "@/components/confirm-dialog"
 
 interface StudyEntry {
   name: string
@@ -61,17 +60,17 @@ function studiesOf(p: PatientDoc): StudyEntry[] {
     : [{ name: p.study, reportStatus: p.reportStatus, reportSlug: p.reportSlug }]
 }
 
-async function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
+// Converts the saved report to PDF and stores it before WhatsApp opens, so the
+// link in the message always resolves to a file. No contact is passed: WhatsApp
+// Web opens on the logged-in account and the sender picks the recipient.
+function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
   const entry = studiesOf(p)[sidx]
-  // Converts the saved report to a PDF and stores it before composing the
-  // message, so the link the patient taps always has a real PDF behind it.
-  const res = await shareReportOnWhatsApp({
+  void shareReportOnWhatsApp({
     patientId: p._id,
     sidx,
     patientName: p.name,
     studyName: entry?.name ?? p.study,
   })
-  if (!res.ok) showAlert({ title: "Couldn't share the report", message: res.error ?? "" })
 }
 
 function dateOf(d: string) {

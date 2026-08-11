@@ -274,7 +274,9 @@ export default function RegisterPage() {
     if (!row._id) return
     if (!(await confirm({
       title: "Remove row?",
-      message: `${row.name || "This row"} will be removed from ${row.month ?? sheetMonth}.`,
+      message: sourceTypeOf(row) === "system"
+        ? `${row.name || "This row"} comes off the ${row.month ?? sheetMonth} sheet. The patient record and their report are untouched — only this line goes.`
+        : `${row.name || "This row"} will be removed from ${row.month ?? sheetMonth}.`,
       confirmLabel: "Remove",
       danger: true,
     }))) return
@@ -312,31 +314,69 @@ export default function RegisterPage() {
     }
   }, [facets, entries])
 
+  // The second and later study of one visit, and what the visit owes as a whole.
+  // Worked out from the month's rows themselves — a patient's study index, or
+  // their name and date on a typed or imported row — never from where a row
+  // happens to sit on screen, so sorting or filtering the grid can't leave a lone
+  // row with its name blanked out.
+  const visits = useMemo(() => {
+    const groups = new Map<string, SavedRegisterRow[]>()
+    for (const r of entries) {
+      const name = (r.name ?? "").trim().toLowerCase()
+      const key = sourceTypeOf(r) === "system" && r.patientId
+        ? `p:${r.patientId}`
+        : name ? `n:${name}|${r.date ? String(r.date).slice(0, 10) : ""}` : ""
+      if (!key) continue          // a nameless imported line is already blank
+      const list = groups.get(key)
+      if (list) list.push(r)
+      else groups.set(key, [r])
+    }
+
+    const continuationIds = new Set<string>()
+    // First row of a multi-study visit → that visit's total dues
+    const balanceByLeadId = new Map<string, { total: number; studies: number }>()
+    for (const rows of groups.values()) {
+      if (rows.length < 2) continue
+      const ordered = [...rows].sort((a, b) =>
+        (a.studyIndex ?? 0) - (b.studyIndex ?? 0) ||
+        (a.rowNo ?? 0) - (b.rowNo ?? 0) ||
+        String(a._id).localeCompare(String(b._id)))
+      for (const r of ordered.slice(1)) if (r._id) continuationIds.add(r._id)
+      const lead = ordered[0]
+      if (lead?._id) {
+        balanceByLeadId.set(lead._id, {
+          total: ordered.reduce((s, r) => s + (Number(r.balance) || 0), 0),
+          studies: ordered.length,
+        })
+      }
+    }
+    return { continuationIds, balanceByLeadId }
+  }, [entries])
+
   const columns: ExcelColumn<SavedRegisterRow>[] = useMemo(() => [
-    ...registerColumns({ withSource: true, editable: true, suggestions }),
+    ...registerColumns({
+      withSource: true,
+      editable: true,
+      suggestions,
+      isContinuation: (r) => !!r._id && visits.continuationIds.has(r._id),
+      visitBalance: (r) => (r._id ? visits.balanceByLeadId.get(r._id) ?? null : null),
+    }),
     {
       key: "rowActions", label: "", width: 44, align: "center", filterable: false,
       text: () => "",
-      render: (r) => {
-        const locked = sourceTypeOf(r) === "system"
-        return (
-          <button
-            onClick={() => deleteRow(r)}
-            disabled={locked || rowBusy === r._id}
-            title={locked ? "Comes from a patient record — delete the patient's study instead" : "Remove this row"}
-            className={`h-6 w-6 rounded border flex items-center justify-center ${
-              locked
-                ? "border-gray-100 bg-gray-50 text-gray-300 cursor-not-allowed"
-                : "border-gray-200 bg-white hover:bg-red-50 hover:border-red-300 text-gray-500 hover:text-red-700"
-            }`}
-          >
-            {rowBusy === r._id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-          </button>
-        )
-      },
+      render: (r) => (
+        <button
+          onClick={() => deleteRow(r)}
+          disabled={rowBusy === r._id}
+          title="Remove this row from the sheet"
+          className="h-6 w-6 rounded border flex items-center justify-center border-gray-200 bg-white hover:bg-red-50 hover:border-red-300 text-gray-500 hover:text-red-700"
+        >
+          {rowBusy === r._id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+        </button>
+      ),
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [rowBusy, suggestions])
+  ], [rowBusy, suggestions, visits])
 
   // The import preview is read-only — nothing there is saved yet
   const previewColumns = useMemo(() => registerColumns(), [])
@@ -800,14 +840,13 @@ export default function RegisterPage() {
               rowKey={(r, i) => r._id ?? `${r.rowNo}-${i}`}
               emptyMessage={`Nothing in ${sheetMonth} yet — type the first row on the green line below.`}
               onCellCommit={commitCell}
-              isRowLocked={(r) => sourceTypeOf(r) === "system"}
               newRow={{
                 draft,
                 onChange: onDraftChange,
                 onCommit: addRow,
                 busy: adding,
                 focusKey: "name",
-                hint: "Type across the green line and press Enter (or the ✚ at its end) to add the row. Click any saved cell to correct it — rows marked “System entry” are patients booked in the system and update themselves.",
+                hint: "Type across the green line and press Enter (or the ✚ at its end) to add the row. Every cell on every row can be clicked and corrected — on a “System entry” the cells you type over keep what you typed, while the rest stays in step with the patient record.",
               }}
               maxHeight="62vh"
             />

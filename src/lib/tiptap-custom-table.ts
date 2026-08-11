@@ -80,6 +80,19 @@ export const CustomTable = Table.extend({
           return { style: `width: ${attributes.width}` }
         },
       },
+      importedLayout: {
+        default: null,
+        parseHTML: (element: HTMLElement) => {
+          const allowed = ["margin-left", "margin-right", "border-collapse", "border-spacing", "table-layout"]
+          const styles = allowed.flatMap((property) => {
+            const value = element.style.getPropertyValue(property).trim()
+            return value && !/url\s*\(|expression\s*\(/i.test(value) ? [`${property}: ${value}`] : []
+          })
+          return styles.length ? styles.join("; ") : null
+        },
+        renderHTML: (attributes: { importedLayout?: string | null }) =>
+          attributes.importedLayout ? { style: attributes.importedLayout } : {},
+      },
       fontScale: {
         default: null,
         parseHTML: parseScale,

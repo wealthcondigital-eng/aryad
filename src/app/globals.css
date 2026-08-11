@@ -207,27 +207,6 @@ input[type="date"]::-webkit-calendar-picker-indicator {
   margin-bottom: 0;
 }
 
-/* The study heading box, before a template has been applied.
-   A report's heading comes from its template (or is typed by hand), never from
-   the study name — so a fresh report opens with this box empty. While it is
-   editable it shows a hint, so an empty box reads as "nothing here yet" rather
-   than as a broken one; on a submitted (read-only) report with no heading the
-   box disappears completely, matching the view modal, the printout and the
-   Word export, none of which draw an empty heading box. */
-.doc-heading[contenteditable="true"]:empty::before {
-  content: attr(data-placeholder);
-  color: #9ca3af;
-  font-weight: 500;
-  text-decoration: none;
-  letter-spacing: normal;
-}
-
-.doc-heading:not([contenteditable="true"]):empty {
-  border: none;
-  padding: 0;
-  min-width: 0;
-}
-
 /* The report body is rendered by Tiptap's <EditorContent>, which wraps the
    actual editable element (.ProseMirror) in its own outer <div> — className
    on <EditorContent> lands on that outer wrapper, not the editable element

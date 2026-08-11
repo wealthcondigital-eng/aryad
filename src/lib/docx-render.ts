@@ -29,6 +29,7 @@
 //      into the body.
 
 import type { JSDOM as JSDOMType } from "jsdom"
+import { pxCss } from "@/lib/css-length"
 
 /** Globals docx-preview reaches for directly rather than off the passed-in document. */
 const DOM_GLOBALS = [
@@ -200,7 +201,14 @@ export function rewriteWordLineHeight(style: string): string {
 
 function tidyInlineStyles(host: HTMLElement, dom: JSDOMType): void {
   host.querySelectorAll<HTMLElement>("[style]").forEach((el) => {
-    const style = el.getAttribute("style") ?? ""
+    // ProseMirror table/row attributes are numeric pixel values. Leaving Word's
+    // native points in the HTML makes `12.9pt` come back as `12px`, and the
+    // error compounds across every row. Normalize absolute point lengths once
+    // at the import boundary so screen, pagination, PDF and DOCX all use the
+    // same 96dpi measurements.
+    const original = el.getAttribute("style") ?? ""
+    const style = original.replace(/(-?[\d.]+)pt\b/gi, (value) => pxCss(value) ?? value)
+    if (style !== original) el.setAttribute("style", style)
     const withLineHeight = rewriteWordLineHeight(style)
     if (withLineHeight !== style) el.setAttribute("style", withLineHeight)
     if (!withLineHeight.includes("min-height")) return
@@ -235,34 +243,5 @@ function tidyInlineStyles(host: HTMLElement, dom: JSDOMType): void {
     }
   }
 
-  collapseLayoutOnlyParagraphs(host)
   void dom
-}
-
-/**
- * Word templates are often laid out by pressing Enter until the next section
- * lands on the following sheet. Word treats those empty paragraphs as part of
- * its own page layout; after the page wrappers are removed for our editor they
- * become a tall, editable hole in the middle of an independently paginated
- * page. Keep one empty paragraph (a real visual paragraph break), but collapse
- * longer runs so the report paginator can place the next section itself.
- *
- * A paragraph containing an image, drawing, explicit break, or other element
- * is not empty and is therefore never removed.
- */
-function collapseLayoutOnlyParagraphs(host: HTMLElement): void {
-  const isEmptyParagraph = (element: Element): boolean => {
-    if (element.tagName !== "P") return false
-    if (element.querySelector("img, svg, table, hr, br")) return false
-    return !(element.textContent ?? "").replace(/\u00a0/g, " ").trim()
-  }
-
-  for (const parent of [host, ...Array.from(host.querySelectorAll("article, section, td, th"))]) {
-    let previousWasEmpty = false
-    for (const child of Array.from(parent.children)) {
-      const empty = isEmptyParagraph(child)
-      if (empty && previousWasEmpty) child.remove()
-      previousWasEmpty = empty
-    }
-  }
 }

@@ -73,11 +73,20 @@ const EDIT_SPEC: Record<string, Partial<ExcelColumn<SavedRegisterRow>>> = {
   charges:       { inputType: "number", editValue: (r) => String(r.charges ?? "") },
   discount:      { inputType: "number", editValue: (r) => String(r.discount ?? "") },
   paid:          { inputType: "number", editValue: (r) => String(r.paid ?? "") },
-  // Balance is deliberately absent: it is charges − discount − paid, recomputed on
-  // every save. Letting it be typed meant a stray 0 could override the arithmetic
-  // and leave a row claiming nothing was due.
+  // Balance is charges − discount − paid and is recomputed on every save that
+  // doesn't name it. Typing into it sets it outright, for the odd row where the
+  // register's own figure is the one that has to stand. On a multi-study visit
+  // the cell DRAWS the whole visit's dues, but it is still this row's own balance
+  // that is edited here — the same as the name cell on a continuation row.
+  balance:       { inputType: "number", editValue: (r) => String(r.balance ?? "") },
   entryBy:       {},
 }
+
+// Columns that describe the patient and the visit rather than the study. A
+// patient billed for two studies gets a row per study, and these are written
+// once — the way the centre's own sheets put the second investigation on the
+// next line with the Sr No left blank.
+const VISIT_COLUMNS = new Set(["srNo", "date", "name", "age", "gender", "contact", "referredBy", "entryBy"])
 
 // Distinct values already in use, offered as type-ahead per column
 export type RegisterSuggestions = Partial<Record<string, string[]>>
@@ -88,6 +97,20 @@ export function registerColumns(
     withSource?: boolean
     editable?: boolean
     suggestions?: RegisterSuggestions
+    /**
+     * True for the second and later study of the same patient visit. Those rows
+     * show only what differs — the investigation and its money — leaving the
+     * patient's name, age and contact written once, on the first of them.
+     */
+    isContinuation?: (row: SavedRegisterRow) => boolean
+    /**
+     * For the FIRST row of a visit that has more than one study: what the visit
+     * as a whole is owed, across all of its rows. Charges, discount and paid stay
+     * per study — ₹1200 and ₹500 on their own lines — so the outstanding amount
+     * would otherwise be split across two cells with no single figure to read.
+     * Null for a single-study visit, whose own balance already is the total.
+     */
+    visitBalance?: (row: SavedRegisterRow) => { total: number; studies: number } | null
   } = {}
 ): ExcelColumn<SavedRegisterRow>[] {
   const cols: ExcelColumn<SavedRegisterRow>[] = []
@@ -140,16 +163,52 @@ export function registerColumns(
     { key: "paid", label: "Paid", width: 88, numeric: true, align: "right", total: true,
       text: (r) => String(r.paid ?? 0), render: (r) => money(r.paid ?? 0) },
     { key: "balance", label: "Balance", width: 88, numeric: true, align: "right", total: true,
+      // `text` stays this row's own balance, so the footer sums the month once
+      // and the CSV export carries a figure per study rather than a total
+      // repeated down the visit.
       text: (r) => String(r.balance ?? 0),
-      render: (r) => (r.balance ? <span className="font-semibold text-red-600">₹{r.balance.toLocaleString("en-IN")}</span> : <span className="text-gray-300">—</span>) },
+      render: (r) => {
+        // A visit's dues are written once, on its first line, the way the sheet
+        // writes the Sr No and the name once — the studies beside it carry their
+        // own charges, and one of them alone is not what the patient owes.
+        if (opts.isContinuation?.(r)) return null
+        const visit = opts.visitBalance?.(r)
+        const shown = visit ? visit.total : r.balance ?? 0
+        if (!shown) return <span className="text-gray-300">—</span>
+        return (
+          <span
+            className="font-semibold text-red-600"
+            title={visit ? `₹${visit.total.toLocaleString("en-IN")} outstanding for this visit — all ${visit.studies} studies together` : undefined}
+          >
+            ₹{shown.toLocaleString("en-IN")}
+          </span>
+        )
+      } },
     { key: "entryBy", label: "Entry Done By", width: 110, text: (r) => r.entryBy ?? "" },
   )
 
-  if (!opts.editable) return cols
+  let out = cols
 
-  return cols.map((c) => {
-    const spec = EDIT_SPEC[c.key]
-    if (!spec) return c
-    return { ...c, editable: true, ...spec, suggestions: opts.suggestions?.[c.key] }
-  })
+  if (opts.editable) {
+    out = out.map((c) => {
+      const spec = EDIT_SPEC[c.key]
+      if (!spec) return c
+      return { ...c, editable: true, ...spec, suggestions: opts.suggestions?.[c.key] }
+    })
+  }
+
+  const repeats = opts.isContinuation
+  if (repeats) {
+    out = out.map((c) => {
+      if (!VISIT_COLUMNS.has(c.key)) return c
+      const base = c.render ?? ((r: SavedRegisterRow) => c.text(r) || "")
+      // Only what is DRAWN is blanked. `text` still returns the stored value, so
+      // searching a patient's name, filtering by doctor and the CSV export all
+      // still find the continuation rows — and clicking the empty cell opens the
+      // editor on the real value, not on nothing.
+      return { ...c, render: (r: SavedRegisterRow) => (repeats(r) ? null : base(r)) }
+    })
+  }
+
+  return out
 }

@@ -28,7 +28,6 @@ import { motion } from "motion/react"
 import { BillDocViewer } from "@/components/bill-doc-viewer"
 import { ComboInput, StudyComboInput, INITIAL_DOCTORS, getSavedDoctors, saveDoctor } from "@/components/combo-input"
 import { shareReportOnWhatsApp } from "@/lib/share-whatsapp"
-import { showAlert } from "@/components/confirm-dialog"
 
 interface RegistrationEditEntry {
   editor: string
@@ -147,17 +146,20 @@ function billHrefFor(p: PatientDoc) {
   return `/billing/new?${params}`
 }
 
-async function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
+// Sharing from this list used to build a link and open WhatsApp on the spot,
+// which sent the patient a URL to a PDF that had never been generated. The
+// shared helper converts the saved report first and only then composes the
+// message, so the link in it always resolves to a file.
+function shareOnWhatsApp(p: PatientDoc, sidx = 0) {
   const entry = studiesOf(p)[sidx]
-  // Converts the saved report to a PDF and stores it before composing the
-  // message, so the link the patient taps always has a real PDF behind it.
-  const res = await shareReportOnWhatsApp({
+  // No contact passed: WhatsApp Web opens on the logged-in account and the
+  // sender picks the recipient, which is how this screen has always worked.
+  void shareReportOnWhatsApp({
     patientId: p._id,
     sidx,
     patientName: p.name,
     studyName: entry?.name ?? p.study,
   })
-  if (!res.ok) showAlert({ title: "Couldn't share the report", message: res.error ?? "" })
 }
 
 // Shared column template so rows stay aligned across separate patient cards

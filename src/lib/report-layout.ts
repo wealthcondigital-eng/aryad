@@ -5,14 +5,24 @@
 // print output and the WhatsApp-shared PDF so they all look identical.
 
 import type { jsPDF } from "jspdf"
+import { REPORT_TEMPLATES } from "@/lib/report-templates"
 import { reportFontFaceCss } from "@/lib/report-fonts"
 
-// NOTE: a report's heading comes from the template that was applied, or from
-// whatever the doctor typed in the heading box — nothing else. There is
-// deliberately no fallback to the study name here: the study is what the
-// patient was referred for and what gets billed, and it is not the title of
-// the document. A report with no template applied has no heading, and every
-// renderer below draws no heading box at all in that case.
+// Shared title fallback: a report only gets a custom heading once a doctor
+// has actually edited it — until then, every view of it (editor, view modal,
+// reports list) should fall back to the SAME canonical template heading
+// (e.g. study "Abd Pelvis" -> "ULTRASONOGRAPHY OF ABDOMEN AND PELVIS"), not
+// just the raw study name, or the same report would show a different title
+// depending on which screen you printed it from.
+export function getDisplayTitle(studyName: string): string {
+  if (!studyName) return ""
+  for (const cat of Object.keys(REPORT_TEMPLATES)) {
+    const list = REPORT_TEMPLATES[cat as keyof typeof REPORT_TEMPLATES]
+    const found = list.find((t) => t.name.toLowerCase() === studyName.toLowerCase())
+    if (found) return found.heading
+  }
+  return studyName
+}
 
 // Belt-and-suspenders version of the `.report-paper` CSS rule in globals.css:
 // stamps the same 0.5em bottom-margin directly onto every paragraph/div as an
@@ -411,9 +421,13 @@ export function paginateDomBlocks(o: DomPageBreakOpts): number {
     // is split between its LINES instead of being required to fit whole.
     const lines = table ? [] : naturalLineBoxes(it)
 
-    // Blank lines are never pushed — see the same rule in the editor's own pass
+    // A blank line is only left where it falls while it still FITS above the
+    // band — see the same rule in the editor's own pass
     // (tiptap-pagination-extension.ts). All three paginators have to agree.
-    if (!table && !it.textContent?.trim() && !it.querySelector("img")) continue
+    // One that no longer fits is pushed like any other block, because Word
+    // never prints a line inside the bottom margin.
+    const isBlankLine = !table && !it.textContent?.trim() && !it.querySelector("img")
+    if (isBlankLine && top + height <= footerLimit + 1) continue
 
     let pushed = 0
     // A manual page break wins outright, exactly as in the editor's own pass —
@@ -422,6 +436,8 @@ export function paginateDomBlocks(o: DomPageBreakOpts): number {
     let needsPush = it.hasAttribute(PAGE_BREAK_ATTR) || it.style.pageBreakBefore === "always"
     if (needsPush) {
       // Skip the fitting tests below; the decision is already made.
+    } else if (isBlankLine) {
+      needsPush = true    // it only reaches here having outgrown the page
     } else if (table) {
       // Move the whole grid only when it both fits on a sheet AND doing so
       // wouldn't leave a hole bigger than MAX_ORPHAN_GAP_RATIO. Otherwise the
@@ -807,10 +823,6 @@ export function reportHeaderHtml(i: ReportHeaderInfo, fontFamily?: string): stri
 }
 
 export function reportTitleHtml(title: string, fontFamily?: string): string {
-  // No heading, no box. A report only has a heading once a template has been
-  // applied (the template's own) or the doctor has typed one — printing an
-  // empty bordered box in the meantime reads as a mistake on the page.
-  if (!title.trim()) return ""
   const fontCss = fontFamily ? `font-family:${fontFamily};` : ""
   // Metrics mirror the editor's title box exactly (see the constants block
   // above): 16px bold, 4px/32px padding, a 240px floor so a short heading

@@ -82,8 +82,12 @@ function createBillHref(p: UnbilledPatient): string {
     gender: p.gender,
     contact: p.contact,
     refBy: p.referredBy || "Self",
-    study: p.study,
   })
+  // One `study` per unbilled study, not just the legacy top-level one — a
+  // patient booked for two scans opens the bill with a line for each, drawn
+  // before the bill screen has fetched anything.
+  const studies = unbilledStudiesOf(p)
+  for (const s of (studies.length ? studies : [p.study].filter(Boolean))) params.append("study", s)
   return `/billing/new?${params}`
 }
 

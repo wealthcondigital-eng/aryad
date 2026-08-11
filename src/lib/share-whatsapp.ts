@@ -16,6 +16,7 @@
 
 import { buildAndStoreReportPdf } from "@/lib/report-pdf"
 import { reportShareUrl } from "@/lib/share-links"
+import { showAlert } from "@/components/confirm-dialog"
 
 /**
  * A blocking "converting" overlay on the page that started the share.
@@ -97,12 +98,15 @@ export async function shareReportOnWhatsApp(t: WhatsAppShareTarget): Promise<{ o
 
   if (!result.ok) {
     try { win?.close() } catch {}
-    return {
-      ok: false,
-      error: result.empty
-        ? "This report has no content yet, so there is nothing to send."
-        : result.error || "Couldn't prepare the PDF.",
-    }
+    const error = result.empty
+      ? "This report has no content yet, so there is nothing to send."
+      : result.error || "Couldn't prepare the PDF."
+    // Said here rather than left to the caller: the list screens share from a
+    // plain function with no state of their own, and a failure that only came
+    // back as a return value would leave the sender staring at a button that
+    // did nothing.
+    showAlert({ title: "Couldn't share this report", message: error })
+    return { ok: false, error }
   }
 
   const url = reportShareUrl(window.location.origin, {

@@ -36,6 +36,14 @@ export interface IRegisterEntry extends Document {
   paid: number
   balance: number
   entryBy: string
+  // Columns typed over by hand on this row. A system row stays in step with its
+  // patient except for these — otherwise the next bill or registration edit
+  // would silently undo the correction that was just made on the sheet.
+  editedFields: string[]
+  // A row taken off the sheet by hand. System rows are kept rather than deleted
+  // outright, because the patient they mirror is still there and the next sync
+  // would simply put the row back.
+  hidden: boolean
   importedAt: Date
   importedBy: string
   createdAt: Date
@@ -67,6 +75,8 @@ const RegisterEntrySchema = new Schema<IRegisterEntry>(
     paid:          { type: Number, default: 0 },
     balance:       { type: Number, default: 0 },
     entryBy:       { type: String, default: "" },
+    editedFields:  { type: [String], default: [] },
+    hidden:        { type: Boolean, default: false, index: true },
     importedAt:    { type: Date,   default: Date.now },
     importedBy:    { type: String, default: "" },
   },

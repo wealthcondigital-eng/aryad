@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import Template from "@/models/Template"
-import HiddenTemplate from "@/models/HiddenTemplate"
-import { countTrailingSignatories, splitHeaderFromHtml, splitHeaderFromPlainText } from "@/lib/doc-import"
+import { countTrailingSignatories, htmlText, splitHeaderFromHtml, splitHeaderFromPlainText } from "@/lib/doc-import"
 import { REPORT_TEMPLATES, TemplateCategory } from "@/lib/report-templates"
 
 function buildPreview(text: string, max = 150): string {
@@ -11,11 +10,7 @@ function buildPreview(text: string, max = 150): string {
 }
 
 // Case-insensitive exact-name match against both clinic-added templates (DB)
-// and the built-in bundled ones — either counts as "already present". A
-// built-in the clinic has removed does not: re-importing the clinic's own
-// version of a template they deliberately deleted is the normal way to
-// replace it, so warning about a clash with something no longer visible
-// anywhere in the app would just be noise.
+// and the built-in bundled ones — either counts as "already present".
 async function findDuplicateByName(name: string): Promise<{ source: "custom" | "built-in"; category: string } | null> {
   const trimmed = name.trim()
   if (!trimmed) return null
@@ -24,30 +19,19 @@ async function findDuplicateByName(name: string): Promise<{ source: "custom" | "
   const existingCustom = await Template.findOne({ name: re })
   if (existingCustom) return { source: "custom", category: existingCustom.category }
 
-  const hidden = new Set<string>((await HiddenTemplate.find().select("templateId")).map((h: { templateId: string }) => h.templateId))
   for (const cat of Object.keys(REPORT_TEMPLATES) as TemplateCategory[]) {
-    const found = REPORT_TEMPLATES[cat].find((t) => t.name.toLowerCase() === trimmed.toLowerCase() && !hidden.has(t.id))
+    const found = REPORT_TEMPLATES[cat].find((t) => t.name.toLowerCase() === trimmed.toLowerCase())
     if (found) return { source: "built-in", category: cat }
   }
   return null
 }
 
-// GET /api/templates — every clinic-added template (built-ins live in
-// report-templates.ts), plus the ids of built-ins the clinic has removed so
-// callers can filter those out of the bundled list.
+// GET /api/templates — every clinic-added template (built-ins live in report-templates.ts)
 export async function GET() {
   try {
     await connectDB()
-    const [templates, hidden] = await Promise.all([
-      Template.find().sort({ createdAt: -1 }),
-      HiddenTemplate.find().sort({ createdAt: -1 }),
-    ])
-    return NextResponse.json({
-      templates,
-      hiddenBuiltIns: hidden.map((h: { templateId: string; name: string; category: string }) => ({
-        id: h.templateId, name: h.name, category: h.category,
-      })),
-    })
+    const templates = await Template.find().sort({ createdAt: -1 })
+    return NextResponse.json({ templates })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: "Server error" }, { status: 500 })
@@ -56,7 +40,7 @@ export async function GET() {
 
 // POST /api/templates — add a new template, either:
 //  - multipart/form-data with a `file` — modern .docx (via mammoth) or legacy
-//    .doc (via word-extractor) are both accepted, or
+//    .doc (read directly by doc-binary.ts) are both accepted, or
 //  - application/json with a ready-made `body` HTML string
 // A name that already exists (built-in or clinic-added) is rejected with a
 // 409 unless the caller passes `force` — the client uses that to show a
@@ -122,9 +106,9 @@ export async function POST(req: NextRequest) {
       // instead of a generic 500.
       try {
         // A legacy .doc is converted to .docx first so it can take the
-        // high-fidelity path below instead of the text-only one. Returns null
-        // when LibreOffice isn't installed on this host, in which case the old
-        // word-extractor fallback still runs — see doc-convert.ts.
+        // high-fidelity path below instead of flattening it to plain text.
+        // Returns null when LibreOffice isn't installed; that case is reported
+        // explicitly below because silently losing the formatting is worse.
         let docxBuffer: Buffer | null = isDocx ? buffer : null
         if (!isDocx) {
           const { convertDocToDocx } = await import("@/lib/doc-convert")
@@ -149,22 +133,37 @@ export async function POST(req: NextRequest) {
           const split = splitHeaderFromHtml(html, text, true, true)
           detectedHeading = split.heading
           bodyHtml = split.bodyHtml
-          previewSource = split.bodyHtml.replace(/<[^>]+>/g, " ")
+          previewSource = htmlText(split.bodyHtml)
         } else {
-          // Legacy .doc with no LibreOffice available. word-extractor returns
-          // plain text only, so everything visual in the original is already
-          // gone by this point and doc-import.ts rebuilds an approximation.
-          const { default: WordExtractor } = await import("word-extractor")
-          const doc = await new WordExtractor().extract(buffer)
-          const text = doc.getBody()
-          signatureCount = countTrailingSignatories(text)
-          if (!text.trim()) {
-            return NextResponse.json({ error: "Couldn't read any content from that file" }, { status: 400 })
+          // Legacy .doc with no LibreOffice on this host. doc-binary.ts reads
+          // the binary format directly — fonts, sizes, bold/underline,
+          // alignment, paragraph spacing and tables all come out of the FILE —
+          // so these imports go down the same rich-HTML path a .docx does
+          // instead of being rebuilt from bare text by regexes.
+          const { parseLegacyDoc } = await import("@/lib/doc-binary")
+          const parsed = parseLegacyDoc(buffer)
+
+          if (parsed) {
+            signatureCount = countTrailingSignatories(parsed.text)
+            const split = splitHeaderFromHtml(parsed.html, parsed.text, true, true)
+            detectedHeading = split.heading
+            bodyHtml = split.bodyHtml
+            previewSource = htmlText(split.bodyHtml)
+          } else {
+            // Encrypted, or some shape the reader doesn't recognise. Plain text
+            // is all that's left, and doc-import.ts rebuilds an approximation.
+            const { default: WordExtractor } = await import("word-extractor")
+            const doc = await new WordExtractor().extract(buffer)
+            const text = doc.getBody()
+            signatureCount = countTrailingSignatories(text)
+            if (!text.trim()) {
+              return NextResponse.json({ error: "Couldn't read any content from that file" }, { status: 400 })
+            }
+            const split = splitHeaderFromPlainText(text, true)
+            detectedHeading = split.heading
+            bodyHtml = split.bodyHtml
+            previewSource = htmlText(split.bodyHtml)
           }
-          const split = splitHeaderFromPlainText(text, true)
-          detectedHeading = split.heading
-          bodyHtml = split.bodyHtml
-          previewSource = split.bodyHtml.replace(/<[^>]+>/g, " ")
         }
       } catch {
         return NextResponse.json({ error: "Couldn't read this file — it may be corrupted, password-protected, or not a real Word document" }, { status: 400 })
@@ -211,7 +210,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const preview = buildPreview(body.replace(/<[^>]+>/g, " "))
+    const preview = buildPreview(htmlText(body))
     const template = await Template.create({ category, name, heading, preview, body })
     return NextResponse.json({ template }, { status: 201 })
   } catch (err) {

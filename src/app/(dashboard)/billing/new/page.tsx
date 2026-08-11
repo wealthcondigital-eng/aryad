@@ -154,7 +154,9 @@ function NewBillingForm() {
   const patientIdParam = params.get("id")       ?? ""
   const nameParam      = params.get("name")     ?? ""
   const srNoParam      = parseInt(params.get("srNo") ?? "0", 10)
-  const studyParam     = params.get("study")    ?? ""
+  // One `study` per study to bill — the Pending Billing link sends every one of
+  // the patient's unbilled studies, older links (and hand-typed URLs) send one.
+  const studyParams    = params.getAll("study").map((s) => s.trim()).filter(Boolean)
   const ageParam       = parseInt(params.get("age") ?? "0", 10)
   const genderParam    = params.get("gender")   ?? ""
   const contactParam   = params.get("contact")  ?? ""
@@ -184,9 +186,26 @@ function NewBillingForm() {
   const [gender,    setGender]    = useState(genderParam)
   const [contact,   setContact]   = useState(contactParam)
 
-  const [items, setItems] = useState<BillItem[]>([
-    { id: 1, study: studyParam, studyInput: studyParam, price: 0, qty: 1, discount: 0 },
-  ])
+  const [items, setItems] = useState<BillItem[]>(() =>
+    (studyParams.length ? studyParams : [""]).map((n, i) => ({
+      id: i + 1, study: n, studyInput: n, price: 0, qty: 1, discount: 0,
+    }))
+  )
+
+  // Catalogue prices for whatever is on the form. Kept separate from the patient
+  // prefill so the studies named in the URL are still priced when that fetch
+  // fails — a bill screen with the right studies and blank prices is workable, a
+  // bill screen missing a study is not.
+  const fillCataloguePrices = () =>
+    fetch("/api/studies")
+      .then((r) => r.json())
+      .then((d) => {
+        const priceMap: Record<string, number> = Object.fromEntries(
+          (d.studies || []).map((s: { name: string; price: number }) => [s.name, s.price])
+        )
+        setItems((prev) => prev.map((it) => ({ ...it, price: it.price || priceMap[it.study] || 0 })))
+      })
+      .catch(() => {})
 
   // Patient picker (when the page is opened without a patient link)
   interface PickerPatient {
@@ -214,21 +233,13 @@ function NewBillingForm() {
       : (unbilled.length ? unbilled : allStudies).map((s) => s.name).filter(Boolean)
     if (names.length > 0) {
       setItems(names.map((n, i) => ({ id: i + 1, study: n, studyInput: n, price: 0, qty: 1, discount: 0 })))
-      // Fill known catalogue prices for the patient's studies
-      fetch("/api/studies")
-        .then((r) => r.json())
-        .then((d) => {
-          const priceMap: Record<string, number> = Object.fromEntries(
-            (d.studies || []).map((s: { name: string; price: number }) => [s.name, s.price])
-          )
-          setItems((prev) => prev.map((it) => ({ ...it, price: it.price || priceMap[it.study] || 0 })))
-        })
-        .catch(() => {})
+      fillCataloguePrices()
     }
   }
 
   useEffect(() => {
     if (billIdParam) return
+    if (studyParams.length > 0) fillCataloguePrices()
     if (patientIdParam) {
       // Prefill everything from the patient record (incl. all their studies)
       fetch(`/api/patients/${patientIdParam}`)

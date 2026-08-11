@@ -5,6 +5,7 @@ import Patient from "@/models/Patient"
 import Study from "@/models/Study"
 import { autoCategory } from "@/lib/study-catalogue"
 import { syncPatientToRegister } from "@/lib/register-sync"
+import { applyBillToStudies, patientTotals } from "@/lib/bill-allocation"
 
 function ensureStudies(patient: any) {
   if ((patient.studies?.length ?? 0) === 0 && patient.study) {
@@ -36,9 +37,11 @@ function syncLegacyMirror(patient: any) {
   patient.reportSlug  = first.reportSlug
   patient.editHistory = first.editHistory
   patient.billId      = first.billId
-  patient.charges     = first.charges ?? 0
-  patient.paid        = first.paid ?? 0
-  patient.discount    = first.discount ?? 0
+  // Money mirrors the whole patient — see the note in api/billing/route.ts
+  const money = patientTotals(patient.studies)
+  patient.charges     = money.charges
+  patient.paid        = money.paid
+  patient.discount    = money.discount
   patient.paymentMode = first.paymentMode ?? "Cash"
 
   const statuses: string[] = patient.studies.map((s: any) => s.reportStatus)
@@ -119,27 +122,23 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // name was just added as a line item on this bill (via the edit screen)
     // gets linked here too — without that, an unbilled study added to the
     // bill would stay marked unbilled on the patient forever.
+    const items = updatedFields.items ?? current.items ?? []
     const billedNames = new Set(
-      (updatedFields.items ?? current.items ?? []).map((i: { study: string }) => i.study.trim().toLowerCase())
+      items.map((i: { study: string }) => i.study.trim().toLowerCase())
     )
-    let touched = 0
+    const covered = []
     for (const entry of patient.studies) {
       const linked     = entry.billId?.toString() === id
       const nameOnBill = !entry.billId && billedNames.has((entry.name || "").trim().toLowerCase())
       if (!linked && !nameOnBill) continue
       if (nameOnBill) entry.billId = current._id
-      entry.charges = charges
-      entry.paid = paid
-      entry.discount = discount
-      entry.paymentMode = paymentMode
-      touched++
+      covered.push(entry)
     }
-    if (touched === 0 && patient.studies[0]) {
-      patient.studies[0].charges = charges
-      patient.studies[0].paid = paid
-      patient.studies[0].discount = discount
-      patient.studies[0].paymentMode = paymentMode
-    }
+    // Each covered study takes its own line off the bill rather than the bill's
+    // total. Nothing matched at all (a study renamed since it was billed) still
+    // has to land somewhere, so it goes on the first study as it always did.
+    if (covered.length === 0 && patient.studies[0]) covered.push(patient.studies[0])
+    applyBillToStudies(covered, items, { charges, discount, paid, paymentMode })
     syncLegacyMirror(patient)
     patient.markModified("studies")
 
@@ -159,8 +158,9 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     await patient.save()
 
-    // The bill's totals are what the monthly register's money columns show
-    await syncPatientToRegister(patient)
+    // The bill's totals are what the monthly register's money columns show —
+    // each study's own share of it, over anything typed onto the sheet before.
+    await syncPatientToRegister(patient, "", { moneyFromBill: true })
 
     if (Object.keys(identitySync).length > 0) {
       await Bill.updateMany({ patientId: patient._id, _id: { $ne: id } }, { $set: identitySync })

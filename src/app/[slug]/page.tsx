@@ -179,7 +179,9 @@ export default async function SharedDocumentPage({ params }: { params: Promise<{
   const found = await findBySlug(slug).catch(() => null)
 
   const heading = found?.kind === "receipt" ? "Receipt" : "Report"
-  const fileUrl = `/${encodeURIComponent(slug)}/pdf`
+  // The same file the WhatsApp link points at, in the same `.pdf` form, so a
+  // patient who saves it from here gets the URL they were sent.
+  const fileUrl = `/${encodeURIComponent(slug)}.pdf`
   const canPreview = found?.kind === "report" && !found.hasPdf && !!found.render
 
   return (

@@ -19,7 +19,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { useRole } from "@/lib/role-context"
-import { printShellHtml, reportHeaderHtml, reportTitleHtml, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, MM_TO_PX, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
+import { printShellHtml, reportHeaderHtml, reportTitleHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, MM_TO_PX, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, type SignatureLayout } from "@/lib/report-signatures"
 import { parseHtml, makeImageRun } from "@/lib/report-docx"
 import { ReportViewModal } from "@/components/report-view-modal"
@@ -121,16 +121,16 @@ function builtInReportHref(r: ReportRow, mode: "fill" | "edit" = "fill") {
   return `/reports/new?${params}`
 }
 
-async function whatsAppShare(r: ReportRow) {
-  // Converts the saved report to a PDF and stores it before composing the
-  // message, so the link the patient taps always has a real PDF behind it.
-  const res = await shareReportOnWhatsApp({
+// Converts the saved report to PDF and stores it before WhatsApp opens, so the
+// link in the message always resolves to a file. No contact is passed: WhatsApp
+// Web opens on the logged-in account and the sender picks the recipient.
+function whatsAppShare(r: ReportRow) {
+  void shareReportOnWhatsApp({
     patientId: r.p._id,
     sidx: r.sidx,
     patientName: r.p.name,
     studyName: r.study,
   })
-  if (!res.ok) showAlert({ title: "Couldn't share the report", message: res.error ?? "" })
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -201,13 +201,11 @@ async function generateDocxBase64(r: ReportRow, reportHtml: string, signatureLay
   }
 
   const children = [
-    // Only the report's own heading (the template's, or what the doctor typed).
-    // No heading means no title line — the study is the referral, not the title.
-    ...(heading?.trim() ? [new Paragraph({
+    new Paragraph({
       alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: heading, bold: true, size: 26, underline: {} })],
+      children: [new TextRun({ text: heading || r.study.toUpperCase(), bold: true, size: 26, underline: {} })],
       spacing: { before: 120, after: 240 },
-    })] : []),
+    }),
     ...makeParas(cleanHtml),
     new Paragraph({ children: [new TextRun("")], spacing: { before: 560 } }),
     new Table({
@@ -317,9 +315,7 @@ async function printReportDirect(r: ReportRow) {
   const { body: reportBody, heading, headingFont, patientBoxFont, headerHeightPx, footerHeightPx, signatureLayout } = await fetchStudyReport(r)
   const signatories = await fetchSignatories()
   const p = r.p
-  // Only the heading the report was saved with — a report written without a
-  // template has none, and prints without a heading box (reportTitleHtml).
-  const title = heading || ""
+  const title = heading || getDisplayTitle(r.study).toUpperCase()
 
   const cleanBody = stripReportEditMarks(reportBody)
   const body      = cleanBody || "<em style='color:#aaa;font-size:12px'>No report content saved.</em>"

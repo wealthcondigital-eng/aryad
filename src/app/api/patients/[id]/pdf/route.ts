@@ -1,10 +1,11 @@
-import { NextRequest, NextResponse } from "next/server"
+import { NextRequest } from "next/server"
 import { connectDB } from "@/lib/db"
 import Patient from "@/models/Patient"
 import { pdfResponse, pdfFileName, pdfUnavailableResponse } from "@/lib/pdf-response"
 
-// GET /api/patients/:id/pdf?sidx=N — public (no auth) so a shared link works
-// for the patient. The fallback used when a report has no pretty slug yet.
+// GET /api/patients/:id/pdf?sidx=N — public (no auth) so the shared link works
+// for patients. This is the fallback link, used only for reports saved before
+// slugs existed; anything shared today goes out as /{slug}.pdf.
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     await connectDB()
@@ -14,9 +15,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const pdf: string | undefined = patient?.studies?.[sidx]?.reportPdf || patient?.reportPdf
     if (!pdf) return pdfUnavailableResponse("This report isn't ready yet.")
 
-    const studyName = patient?.studies?.[sidx]?.name || patient?.study
-    return pdfResponse(pdf, pdfFileName(patient?.name, "Report", studyName), req)
+    const study = patient?.studies?.[sidx]?.name || patient?.study
+    return pdfResponse(pdf, pdfFileName(patient.name, "Report", study), req)
   } catch {
-    return NextResponse.json({ error: "Server error" }, { status: 500 })
+    return pdfUnavailableResponse("Something went wrong opening this report.")
   }
 }

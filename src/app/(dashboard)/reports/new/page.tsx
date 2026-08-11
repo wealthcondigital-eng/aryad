@@ -21,7 +21,7 @@ import { useConfirm } from "@/components/confirm-dialog"
 import { motion, AnimatePresence } from "framer-motion"
 import { REPORT_TEMPLATES, ReportTemplate, TemplateCategory } from "@/lib/report-templates"
 import {
-  reportHeaderHtml, reportTitleHtml, printShellHtml,
+  reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle,
   LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, MM_TO_PX,
   BAND_HEIGHT_MIN_PX, BAND_HEIGHT_MAX_PX, REPORT_BODY_STYLE, REPORT_SIGS_STYLE,
   DEFAULT_REPORT_FONT,
@@ -87,8 +87,7 @@ import { reportShareUrl } from "@/lib/share-links"
 // does understand before content ever reaches the editor.
 function normalizeLegacyHtml(html: string): string {
   if (typeof window === "undefined" || !html) return html
-  const cleaned = html.replace(/(?:<div><br><\/div>\s*){2,}/gi, "<div><br></div>")
-  const doc = new DOMParser().parseFromString(cleaned, "text/html")
+  const doc = new DOMParser().parseFromString(html, "text/html")
   doc.querySelectorAll("font[face]").forEach((el) => {
     const face = el.getAttribute("face")
     const span = doc.createElement("span")
@@ -109,7 +108,9 @@ function normalizeLegacyHtml(html: string): string {
       el.replaceWith(p)
     }
   })
-  return doc.body.innerHTML.replace(/(?:<p><br><\/p>\s*){2,}/gi, "<p><br></p>")
+  // Repeated blank paragraphs are significant in an imported Word document;
+  // they must survive loading just like repeated typed Enter presses do.
+  return doc.body.innerHTML
 }
 
 // ── Strip report-edited spans (keep inner content) ───────────────────────────
@@ -430,9 +431,6 @@ function ReportEditorInner() {
   // Keyed by category string rather than the narrow 4-value union, since the
   // clinic can create its own categories from that page.
   const [customTemplates, setCustomTemplates] = useState<Record<string, ReportTemplate[]>>({})
-  // Built-ins the clinic removed from the Add Template page — bundled in the app
-  // but no longer offered here.
-  const [hiddenBuiltIns, setHiddenBuiltIns] = useState<Set<string>>(new Set())
   const [templatesLoaded, setTemplatesLoaded] = useState(false)
   const [addTemplateOpen, setAddTemplateOpen] = useState(false)
 
@@ -456,49 +454,6 @@ function ReportEditorInner() {
     return () => ro.disconnect()
   }, [showTemplates])
 
-  // How tall the templates panel may be: exactly the distance from where it
-  // actually sits on screen down to the bottom of the window.
-  //
-  // It used to be a fixed `100dvh - 3.5rem - toolbar` height. Whenever that
-  // arithmetic came out even slightly tall — a wrapped toolbar, a browser
-  // chrome bar, any change to the app header — the panel's lower edge fell
-  // below the fold, and with it the last templates in the list: the content
-  // fit the (oversized) box, so nothing scrolled and they simply couldn't be
-  // reached. Measuring the panel's own position can't drift out of step.
-  const templatePanelRef = useRef<HTMLElement | null>(null)
-  const [panelMaxH, setPanelMaxH] = useState<number | null>(null)
-  useEffect(() => {
-    // Nothing to measure while the panel is closed; reopening re-measures.
-    if (!showTemplates) return
-    let frame = 0
-    const measure = () => {
-      cancelAnimationFrame(frame)
-      frame = requestAnimationFrame(() => {
-        const el = templatePanelRef.current
-        if (!el) return
-        const top = el.getBoundingClientRect().top
-        // 8px so the panel stops just clear of the window edge rather than
-        // bleeding into it. Capped at one viewport: on phones the panel isn't
-        // sticky, so once it has scrolled past the top this would otherwise
-        // keep growing and the panel would resize under the finger.
-        const next = Math.max(220, Math.min(
-          Math.round(window.innerHeight - top - 8),
-          Math.round(window.innerHeight)
-        ))
-        setPanelMaxH((prev) => (prev !== null && Math.abs(prev - next) < 2 ? prev : next))
-      })
-    }
-    measure()
-    // Capture phase: the page scrolls in a nested container, not the window.
-    window.addEventListener("scroll", measure, true)
-    window.addEventListener("resize", measure)
-    return () => {
-      cancelAnimationFrame(frame)
-      window.removeEventListener("scroll", measure, true)
-      window.removeEventListener("resize", measure)
-    }
-  }, [showTemplates, toolbarBottom])
-
   // Refetched every time the panel is opened, not once per session.
   //
   // A template re-imported meanwhile — from the Add Template page, another tab,
@@ -519,7 +474,6 @@ function ReportEditorInner() {
           grouped[cat].push({ id: t._id, _id: t._id, name: t.name, heading: t.heading, preview: t.preview, body: t.body, signatureCount: t.signatureCount, preserveSignature: t.preserveSignature })
         }
         setCustomTemplates(grouped)
-        setHiddenBuiltIns(new Set<string>((d.hiddenBuiltIns ?? []).map((h: { id: string }) => h.id)))
       })
       .catch(() => { })
       .finally(() => setTemplatesLoaded(true))
@@ -532,13 +486,15 @@ function ReportEditorInner() {
     : signatories.slice(0, templateSignatureCount)
   useEffect(() => { fetchSignatories().then(setSignatories) }, [])
 
-  // The signatures the clinic has actually uploaded on the Add Signature page.
-  // Signatories with no image are left out rather than shown as blanks — there
-  // is nothing to place for them.
+  // What the "Signature" button offers before anyone draws anything: every
+  // signature uploaded on the Signatures page, this report's own signatories
+  // first (they are ordered by `order`), the rest after them for the reports
+  // they don't normally sign. A signatory with no image uploaded yet has
+  // nothing to offer and is left out.
   const savedSignatures = useMemo(
     () => signatories
       .filter((s) => !!s.signatureImage)
-      .map((s) => ({ name: s.name, image: s.signatureImage })),
+      .map((s) => ({ id: String(s._id), label: s.name, image: s.signatureImage })),
     [signatories]
   )
 
@@ -548,9 +504,7 @@ function ReportEditorInner() {
   const allCategoryTabs: string[] = [...BUILTIN_CATS, ...customCategoryKeys]
 
   const allTemplates = (cat: string) => [
-    ...((BUILTIN_CATS as string[]).includes(cat)
-      ? REPORT_TEMPLATES[cat as TemplateCategory].filter((t) => !hiddenBuiltIns.has(t.id))
-      : []),
+    ...((BUILTIN_CATS as string[]).includes(cat) ? REPORT_TEMPLATES[cat as TemplateCategory] : []),
     ...(customTemplates[cat] ?? []),
   ]
 
@@ -1514,11 +1468,6 @@ function ReportEditorInner() {
 
   const openSignaturePad = () => {
     setSigPadKey((k) => k + 1)
-    // Re-read the signatures on the way in. They are otherwise fetched once
-    // when the editor mounts, so a signature uploaded or replaced on the Add
-    // Signature page while this report was open would offer the old image —
-    // exactly when the doctor is trying to place the new one.
-    void fetchSignatories().then(setSignatories).catch(() => {})
     setSigPadOpen(true)
   }
 
@@ -1936,9 +1885,7 @@ function ReportEditorInner() {
   }
 
   // Current heading text (falls back to the study name)
-  // Exactly what is in the heading box — no study-name fallback, so a report
-  // with no template applied saves, prints and exports with no heading.
-  const getDocTitle = () => (titleRef.current?.innerText ?? "").trim()
+  const getDocTitle = () => (titleRef.current?.innerText ?? "").trim() || getDisplayTitle(study).toUpperCase()
   const [docxLoading, setDocxLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
@@ -2149,10 +2096,13 @@ function ReportEditorInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showDoc, editor])
 
-  // The heading is NOT seeded from the study. A new report opens as a blank
-  // page: applying a template fills in that template's own heading (see
-  // applyTemplate), and until then the heading box stays empty. The study name
-  // is the referral/billing line on the patient box, not the document's title.
+  // ── Seed the editable heading with the study name (drafts/templates override it) ──
+  useEffect(() => {
+    if (!showDoc || !study) return
+    if (titleRef.current && !titleRef.current.innerText.trim()) {
+      titleRef.current.innerText = getDisplayTitle(study).toUpperCase()
+    }
+  }, [showDoc, study])
 
   // ── Save draft on browser close / hard refresh (belt-and-suspenders) ─────────
   useEffect(() => {
@@ -2310,14 +2260,9 @@ function ReportEditorInner() {
     const doctorsInSignOff = countSignatoriesIn(tpl.body.slice(strippedBody.length))
     editor.commands.setContent(normalizeLegacyHtml(strippedBody))
     clearPaginationDecorations()
-    // The study is NOT touched here. It is what the patient was referred for
-    // and what the bill and the register are keyed on; picking the template to
-    // write the report in doesn't change what was requested. (This used to set
-    // the study to the template's name, which then went back to the patient
-    // record on submit and renamed the referral.)
-    //
-    // The heading, on the other hand, always follows the template — that is
-    // where a report's title comes from.
+    // Update local study state
+    setCurrentStudy(tpl.name)
+    // ALWAYS update the study heading text to match the selected template
     const newHeading = tpl.heading || tpl.name.toUpperCase()
     if (titleRef.current) {
       titleRef.current.textContent = newHeading
@@ -3309,7 +3254,7 @@ function ReportEditorInner() {
                   <RibbonGroup label="Illustrations">
                     <button
                       type="button"
-                      title="Insert a signature — pick one already saved on the Add Signature page, or draw, type or upload a different one. Once placed, click it for the same picture toolbar as an image: text wrapping (Behind Text / In Front of Text) and Glow Edges to remove a scanned signature's white background."
+                      title="Insert a signature (draw, type or upload). Once placed, click it for the same picture toolbar as an image — text wrapping (Behind Text / In Front of Text) and Glow Edges to remove a scanned signature's white background."
                       onMouseDown={(e) => { e.preventDefault(); openSignaturePad() }}
                       className="h-7 px-2 flex items-center gap-1 rounded hover:bg-gray-200 text-gray-700 transition-colors text-[11px] font-medium"
                     >
@@ -3371,27 +3316,22 @@ function ReportEditorInner() {
 
         {/* ── Templates — a separate panel to the left of the document, never
             overlapping or sitting inside the report itself. It sticks below the
-            toolbar, and the whole panel is one scroll area: search, categories
-            and every card scroll together, so nothing can end up parked below
-            the fold out of reach. Its own title bar stays pinned while it
-            scrolls, so Close is always one click away. ── */}
+            toolbar at a fixed height so the list scrolls inside the panel rather
+            than with the page (3.5rem is the app header above the scroller). ── */}
         <AnimatePresence>
           {showTemplates && (
             <motion.aside
               key="template-sidebar"
-              ref={templatePanelRef}
               initial={{ opacity: 0, x: -16 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -16 }}
               transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-              style={{
-                "--tpl-top": `${toolbarBottom}px`,
-                maxHeight: panelMaxH ? `${panelMaxH}px` : undefined,
-              } as React.CSSProperties}
-              className="w-full sm:w-[300px] shrink-0 bg-white border-b sm:border-b-0 sm:border-r border-gray-200 flex flex-col overflow-y-auto overscroll-contain sm:sticky sm:self-start sm:top-[var(--tpl-top)]"
+              style={{ "--tpl-top": `${toolbarBottom}px` } as React.CSSProperties}
+              className="w-full sm:w-[300px] shrink-0 bg-white border-b sm:border-b-0 sm:border-r border-gray-200 flex flex-col sm:sticky sm:self-start sm:top-[var(--tpl-top)] sm:h-[calc(100dvh-3.5rem-var(--tpl-top))]"
             >
-              {/* Sidebar header */}
-              <div className="sticky top-0 z-10 flex items-center justify-between bg-white px-4 py-3 border-b border-gray-100">
+              {/* Sidebar header — the one part that stays put, so the panel can
+                  always be closed however far down the list you are */}
+              <div className="shrink-0 flex items-center justify-between px-4 py-3 border-b border-gray-100">
                 <div className="flex items-center gap-1.5">
                   <LayoutTemplate className="h-4 w-4 text-blue-500" />
                   <p className="text-sm font-semibold text-gray-800">Templates</p>
@@ -3406,95 +3346,105 @@ function ReportEditorInner() {
                 </button>
               </div>
 
-              {/* Search — spans every category, so nothing needs to be scrolled to find */}
-              <div className="px-4 pt-3">
-                <div className="relative">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
-                  <input
-                    type="text"
-                    value={templateSearch}
-                    onChange={(e) => setTemplateSearch(e.target.value)}
-                    placeholder="Search templates…"
-                    className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
-                  />
+              {/* Everything below the header scrolls as ONE column. The search box
+                  and the category buttons used to be pinned above a list scrolling
+                  in what was left — about 280px, two cards deep on a laptop. They
+                  scroll away with the list now, so the full height of the panel
+                  goes to templates. On a narrow window the panel has no height of
+                  its own (it sits above the document rather than beside it), so it
+                  is capped there instead of running the length of the page. */}
+              <div className="flex-1 min-h-0 overflow-y-auto max-h-[65vh] sm:max-h-none">
+
+                {/* Search — spans every category, so nothing needs to be scrolled to find */}
+                <div className="px-4 pt-3">
+                  <div className="relative">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-400" />
+                    <input
+                      type="text"
+                      value={templateSearch}
+                      onChange={(e) => setTemplateSearch(e.target.value)}
+                      placeholder="Search templates…"
+                      className="w-full pl-8 pr-3 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-100"
+                    />
+                  </div>
                 </div>
-              </div>
 
-              {/* Category buttons — hidden while searching, since search spans every category */}
-              {!templateSearch && (
-                <div className="grid grid-cols-2 gap-1.5 px-4 pt-3">
-                  {allCategoryTabs.map((cat) => {
-                    const active = templateTab === cat
-                    return (
-                      <button
-                        key={cat}
-                        type="button"
-                        onClick={() => setTemplateTab(cat)}
-                        className={`px-2 py-1.5 rounded-lg text-xs font-semibold border transition-colors truncate ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-600 border-gray-200 hover:border-blue-300 hover:text-blue-600"
-                          }`}
-                        title={categoryTabLabel(cat)}
-                      >
-                        {categoryTabLabel(cat)}
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-
-              {/* Adding a template happens right here — leaving the editor for
-                  the Add Template page meant abandoning the report being
-                  written. Removing one still lives on that page. */}
-              <div className="px-4 pt-3">
-                <button
-                  type="button"
-                  onClick={() => setAddTemplateOpen(true)}
-                  className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-200 text-gray-500 hover:border-blue-300 hover:text-blue-600 transition-colors"
-                >
-                  <Upload className="h-3.5 w-3.5" />Add Template
-                </button>
-              </div>
-
-              {/* Count label */}
-              <p className="px-4 pt-3 text-[11px] text-gray-400">
-                {(templateSearchResults ?? allTemplates(templateTab)).length} template
-                {(templateSearchResults ?? allTemplates(templateTab)).length !== 1 ? "s" : ""}
-              </p>
-
-              {/* Template list — single column. The panel around it does the
-                  scrolling; a second scrollbar in here only ever shrank the
-                  list into a sliver. */}
-              <div className="px-4 py-3 space-y-2">
-                {templateSearchResults !== null ? (
-                  templateSearchResults.length === 0 ? (
-                    <p className="text-center text-xs text-gray-400 py-8">No templates match &ldquo;{templateSearch}&rdquo;.</p>
-                  ) : (
-                    templateSearchResults.map((tpl) => (
-                      <TemplateCard
-                        key={tpl.id}
-                        tpl={tpl}
-                        categoryLabel={categoryTabLabel(tpl.category)}
-                        onApply={() => { void applyTemplate(tpl) }}
-                      />
-                    ))
-                  )
-                ) : (
-                  <AnimatePresence mode="wait">
-                    <motion.div key={templateTab} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="space-y-2">
-                      {allTemplates(templateTab).length === 0 ? (
-                        <p className="text-center text-xs text-gray-400 py-8">No templates in this category yet.</p>
-                      ) : (
-                        allTemplates(templateTab).map((tpl) => (
-                          <TemplateCard
-                            key={tpl.id}
-                            tpl={tpl}
-                            onApply={() => { void applyTemplate(tpl) }}
-                          />
-                        ))
-                      )}
-                    </motion.div>
-                  </AnimatePresence>
+                {/* Category buttons — hidden while searching, since search spans every category */}
+                {!templateSearch && (
+                  <div className="grid grid-cols-2 gap-1.5 px-4 pt-3">
+                    {allCategoryTabs.map((cat) => {
+                      const active = templateTab === cat
+                      return (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() => setTemplateTab(cat)}
+                          className={`px-2 py-1.5 rounded-lg text-xs font-semibold border transition-colors truncate ${active ? "bg-blue-600 text-white border-blue-600" : "bg-white text-gray-600 border-gray-200 hover:border-blue-300 hover:text-blue-600"
+                            }`}
+                          title={categoryTabLabel(cat)}
+                        >
+                          {categoryTabLabel(cat)}
+                        </button>
+                      )
+                    })}
+                  </div>
                 )}
-              </div>
+
+                {/* Adding a template happens right here — leaving the editor for
+                    the Add Template page meant abandoning the report being
+                    written. Removing one still lives on that page. */}
+                <div className="px-4 pt-3">
+                  <button
+                    type="button"
+                    onClick={() => setAddTemplateOpen(true)}
+                    className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border border-gray-200 text-gray-500 hover:border-blue-300 hover:text-blue-600 transition-colors"
+                  >
+                    <Upload className="h-3.5 w-3.5" />Add Template
+                  </button>
+                </div>
+
+                {/* Count label */}
+                <p className="px-4 pt-3 text-[11px] text-gray-400">
+                  {(templateSearchResults ?? allTemplates(templateTab)).length} template
+                  {(templateSearchResults ?? allTemplates(templateTab)).length !== 1 ? "s" : ""}
+                </p>
+
+                {/* Template list — single column, inside the panel's own scroller so
+                    it never needs to push or overlap the document beside it. */}
+                <div className="px-4 py-3 space-y-2">
+                  {templateSearchResults !== null ? (
+                    templateSearchResults.length === 0 ? (
+                      <p className="text-center text-xs text-gray-400 py-8">No templates match &ldquo;{templateSearch}&rdquo;.</p>
+                    ) : (
+                      templateSearchResults.map((tpl) => (
+                        <TemplateCard
+                          key={tpl.id}
+                          tpl={tpl}
+                          categoryLabel={categoryTabLabel(tpl.category)}
+                          onApply={() => { void applyTemplate(tpl) }}
+                        />
+                      ))
+                    )
+                  ) : (
+                    <AnimatePresence mode="wait">
+                      <motion.div key={templateTab} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="space-y-2">
+                        {allTemplates(templateTab).length === 0 ? (
+                          <p className="text-center text-xs text-gray-400 py-8">No templates in this category yet.</p>
+                        ) : (
+                          allTemplates(templateTab).map((tpl) => (
+                            <TemplateCard
+                              key={tpl.id}
+                              tpl={tpl}
+                              onApply={() => { void applyTemplate(tpl) }}
+                            />
+                          ))
+                        )}
+                      </motion.div>
+                    </AnimatePresence>
+                  )}
+                </div>
+
+              </div>{/* end of the panel's scroller */}
             </motion.aside>
           )}
         </AnimatePresence>
@@ -3927,16 +3877,11 @@ function ReportEditorInner() {
                           }
                         }}
                         title={isReadOnly ? undefined : "Click to edit the study heading"}
-                        // Empty until a template is applied — see the
-                        // `.doc-heading` rules in globals.css, which show this
-                        // hint while the box is editable and collapse the box
-                        // entirely on a submitted report that has no heading.
-                        data-placeholder="Apply a template, or type a heading"
                         style={{
                           ...(headingFont ? { fontFamily: headingFont } : {}),
                           ...(titleBoxWidthPx ? { width: `${titleBoxWidthPx}px` } : {}),
                         }}
-                        className={`doc-heading text-center font-bold text-base py-1 px-8 min-w-[240px] border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900 focus:outline-none${isReadOnly ? "" : " hover:bg-blue-50/60 focus:bg-blue-50/60 transition-colors cursor-text"
+                        className={`text-center font-bold text-base py-1 px-8 min-w-[240px] border-[1.5px] border-gray-700 underline underline-offset-4 tracking-wide text-gray-900 focus:outline-none${isReadOnly ? "" : " hover:bg-blue-50/60 focus:bg-blue-50/60 transition-colors cursor-text"
                           }`}
                       />
                       {!isReadOnly && (
@@ -4142,10 +4087,7 @@ function ReportEditorInner() {
         open={sigPadOpen}
         onClose={() => setSigPadOpen(false)}
         onInsert={insertSignature}
-        // Whatever the clinic has already uploaded on the Add Signature page,
-        // offered as one-click options — with a picker when more than one
-        // radiologist has a signature stored.
-        saved={savedSignatures}
+        savedSignatures={savedSignatures}
       />
     </div>
   )

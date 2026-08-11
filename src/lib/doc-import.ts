@@ -54,6 +54,27 @@ function looksLikeHeading(line: string): boolean {
     && !PATIENT_INFO_RE.test(line) && !SIGNATURE_RE.test(line) && !SECTION_LABEL_RE.test(line)
 }
 
+/**
+ * The readable text inside a fragment of HTML.
+ *
+ * Entities have to be decoded, not just tags stripped: a study titled
+ * "ULTRASOUND OF ABDOMEN & PELVIS" is stored as `&amp;`, and the leftover
+ * lowercase "amp" made every all-caps check below fail — so a title with an
+ * ampersand in it was never recognised as the heading, on any import path.
+ */
+export function htmlText(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;|&apos;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 export function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -71,40 +92,37 @@ const IMPRESSION_RE = /^IMPRESSION\s*:?$/i
 // section labels bolded ("LIVER :"), the IMPRESSION heading bolded+underlined,
 // and (once inside the impression) the conclusion sentences bolded in full.
 function formatLineAsHtml(line: string, boldWhole: boolean): string {
-  if (boldWhole) return `<div><b>${escapeHtml(line)}</b></div>`
-  const m = line.match(LABEL_LINE_RE)
+  // Keep tabs/leading spaces from binary .doc extraction. The report surface
+  // uses white-space:pre-wrap, so these remain real visual indentation in the
+  // editor instead of being trimmed at import time.
+  const leading = line.match(/^\s*/)?.[0] ?? ""
+  const content = line.slice(leading.length).trimEnd()
+  const prefix = escapeHtml(leading)
+  if (boldWhole) return `<div>${prefix}<b>${escapeHtml(content)}</b></div>`
+  const m = content.match(LABEL_LINE_RE)
   if (m) {
     const label = m[1].trim()
     const rest  = m[2].trim()
-    return `<div><b>${escapeHtml(label)} :</b>${rest ? " " + escapeHtml(rest) : ""}</div>`
+    return `<div>${prefix}<b>${escapeHtml(label)} :</b>${rest ? " " + escapeHtml(rest) : ""}</div>`
   }
-  return `<div>${escapeHtml(line)}</div>`
+  return `<div>${prefix}${escapeHtml(content)}</div>`
 }
 
 // Plain-text lines → the clinic's div-per-line + blank-line-between HTML shape.
 export function linesToClinicHtml(lines: string[]): string {
   let inImpression = false
   const parts: string[] = []
-  // Blank lines come from the DOCUMENT, not from this function.
-  //
-  // It used to drop every blank line in the source and then append one after
-  // EVERY line it emitted, so an imported report came back double-spaced
-  // throughout: two consecutive lines that sat together in Word ("Right kidney
-  // measures cm." / "Left kidney measures cm.") arrived with a blank line
-  // wedged between them, and a template that was two pages in Word became
-  // three here. Runs of blanks are capped at one, which is the section break
-  // the clinic's templates use — beyond that they are just noise from the
-  // .doc text extraction.
-  let blankRun = 0
+  // Blank lines come from the document and are significant. In particular,
+  // legacy .doc extraction represents paragraph spacing and manually inserted
+  // vertical space as repeated newlines; collapsing that run changes the layout.
   for (const raw of lines) {
-    const line = raw.trim()
-    if (!line) {
-      // Never lead with a blank line, and never stack them.
-      if (parts.length && blankRun === 0) { parts.push("<div><br></div>"); blankRun++ }
+    const line = raw.replace(/\r$/, "")
+    const meaningful = line.trim()
+    if (!meaningful) {
+      if (parts.length) parts.push("<div><br></div>")
       continue
     }
-    blankRun = 0
-    if (IMPRESSION_RE.test(line)) {
+    if (IMPRESSION_RE.test(meaningful)) {
       parts.push("<div><b><u>IMPRESSION</u> :</b></div>")
       inImpression = true
       continue
@@ -167,7 +185,12 @@ function looksLikeNameLine(text: string): boolean {
 }
 
 function isSignatureLine(text: string): boolean {
-  const t = text.trim()
+  // Word lays a two-doctor sign-off out as ONE line, the second name pushed
+  // across the page by a run of spaces or a tab. That padding is layout, not
+  // content, so it is collapsed before the length and residue tests — measured
+  // raw, a perfectly ordinary two-column sign-off runs past 300 characters and
+  // is dismissed as report text.
+  const t = text.replace(/\s+/g, " ").trim()
   if (!t || t.length > SIGNATURE_BLOCK_MAX) return false
   if (!SIGNATURE_RE.test(t)) return false
   const residue = t.replace(SIGNATURE_TOKENS, " ").replace(/[^A-Za-z0-9]+/g, " ").trim()
@@ -192,7 +215,7 @@ export function countTrailingSignatories(raw: string): number | undefined {
  * "Dr"-introduced names rather than lines. Returns 0 when there is no sign-off.
  */
 export function countSignatoriesIn(html: string): number {
-  const text = html.replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ")
+  const text = htmlText(html)
   // Case-insensitive: Word files mix "DR. A B" and "Dr C D" in the same
   // sign-off, and a case-sensitive count sees only the shouted one.
   return Math.min(2, text.match(/\bDRS?\.?\s*[A-Za-z]/gi)?.length ?? 0)
@@ -250,7 +273,7 @@ export function stripTrailingSignatureBlock(html: string): string {
     blocks.push({
       start: m.index,
       end: m.index + m[0].length,
-      text: m[0].replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim(),
+      text: htmlText(m[0]),
     })
   }
   if (!blocks.length) return html
@@ -290,7 +313,7 @@ function stripSignatureAfterLastBreak(html: string): string {
   let last: { start: number; end: number; whole: string; inner: string } | null = null
   let m: RegExpExecArray | null
   while ((m = blockRe.exec(html))) {
-    const text = m[0].replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").trim()
+    const text = htmlText(m[0])
     if (text) last = { start: m.index, end: m.index + m[0].length, whole: m[0], inner: m[2] }
   }
   if (!last) return html
@@ -301,7 +324,7 @@ function stripSignatureAfterLastBreak(html: string): string {
   let cut = parts.length
   let sawSignature = false
   for (let i = parts.length - 1; i >= 0; i--) {
-    const text = parts[i].replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/\s+/g, " ").trim()
+    const text = htmlText(parts[i])
     if (!text) { cut = i; continue }
     if (isSignatureLine(text)) { cut = i; sawSignature = true; continue }
     if (sawSignature && looksLikeNameLine(text)) { cut = i; continue }
@@ -325,7 +348,9 @@ export function splitHeaderFromPlainText(raw: string, preserveSignatureBlock = f
   // Blank lines are KEPT: they are the document's own paragraph breaks, and
   // linesToClinicHtml now reproduces them instead of inventing one after every
   // line. Dropping them here is what made that invention necessary.
-  const lines = raw.split(/\r?\n/).map((l) => l.trim())
+  // Keep the original whitespace for the body. Detection below uses a trimmed
+  // view of each line, but the slice passed to linesToClinicHtml is untouched.
+  const lines = raw.split(/\r?\n|\f/)
 
   // The real study title always immediately follows the patient-info block —
   // it's the FIRST plausible candidate, not the last. Scanning further and
@@ -335,12 +360,13 @@ export function splitHeaderFromPlainText(raw: string, preserveSignatureBlock = f
   let headingIdx = -1
   let scanned = 0
   for (let i = 0; i < lines.length && scanned < 15; i++) {
-    if (!lines[i]) continue          // blank lines don't count toward the window
+    const candidate = lines[i].trim()
+    if (!candidate) continue          // blank lines don't count toward the window
     scanned++
-    if (looksLikeHeading(lines[i])) { headingIdx = i; break }
+    if (looksLikeHeading(candidate)) { headingIdx = i; break }
   }
 
-  const heading      = headingIdx >= 0 ? lines[headingIdx] : ""
+  const heading      = headingIdx >= 0 ? lines[headingIdx].trim() : ""
   const afterHeading = headingIdx >= 0 ? lines.slice(headingIdx + 1) : lines
   let bodyLines      = preserveSignatureBlock ? afterHeading : truncateAtSignature(afterHeading)
   // Same safety net as above, one level up: if stripping the heading itself
@@ -352,7 +378,7 @@ export function splitHeaderFromPlainText(raw: string, preserveSignatureBlock = f
 }
 
 function hasVisibleText(html: string): boolean {
-  return html.replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, "").trim().length > 0
+  return htmlText(html).length > 0
 }
 
 // Converts mammoth's <p>-per-paragraph output into the same per-line <div>
@@ -386,7 +412,7 @@ export function convertParagraphsToDivs(html: string): string {
   const divRe = /<div>([\s\S]*?)<\/div>/gi
   let match: RegExpExecArray | null
   while ((match = divRe.exec(converted))) {
-    const text = match[1].replace(/<[^>]+>/g, "").trim()
+    const text = htmlText(match[1])
     if (text && SIGNATURE_RE.test(text)) {
       const truncated = converted.slice(0, match.index)
       return hasVisibleText(truncated) ? truncated : converted
@@ -410,8 +436,11 @@ function stripLeadingEmptyParagraphs(html: string): string {
   while (true) {
     const m = s.match(LEADING_P_RE)
     if (!m) break
-    const text = m[1].replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, "").trim()
-    if (text) break
+    // A leading paragraph holding nothing but punctuation — a stray full stop
+    // above the patient block, which several of the clinic's files have — counts
+    // as empty. Treated as content it stops the strip dead, and the whole
+    // patient-info table then arrives in the report body.
+    if (/[A-Za-z0-9]/.test(htmlText(m[1]))) break
     s = s.slice(m[0].length).trim()
   }
   return s
@@ -444,14 +473,17 @@ export function splitHeaderFromHtml(
   // just fail to detect it, so stripping stops the moment a table's content
   // doesn't look like patient info.
   let strippedAnyTable = false
-  while (true) {
-    const m = s.match(/^<table[\s\S]*?<\/table>/i)
-    if (!m) break
-    const tableText = m[0].replace(/<[^>]+>/g, " ")
-    if (!PATIENT_INFO_RE.test(tableText)) break
-    s = stripLeadingEmptyParagraphs(s.slice(m[0].length).trim())
-    strippedAnyTable = true
+  const stripPatientTables = () => {
+    while (true) {
+      const m = s.match(/^<table[\s\S]*?<\/table>/i)
+      if (!m) break
+      const tableText = htmlText(m[0])
+      if (!PATIENT_INFO_RE.test(tableText)) break
+      s = stripLeadingEmptyParagraphs(s.slice(m[0].length).trim())
+      strippedAnyTable = true
+    }
   }
+  stripPatientTables()
 
   // The next paragraph — or, for templates that box the title instead, the
   // next small table wrapping it — is the study heading if it's short and
@@ -460,9 +492,9 @@ export function splitHeaderFromHtml(
   const pMatch = s.match(LEADING_P_RE)
   const tMatch = !pMatch ? s.match(/^<table[\s\S]*?<\/table>/i) : null
   const candidate = pMatch
-    ? { whole: pMatch[0], text: pMatch[1].replace(/<[^>]+>/g, "").trim() }
+    ? { whole: pMatch[0], text: htmlText(pMatch[1]) }
     : tMatch
-    ? { whole: tMatch[0], text: tMatch[0].replace(/<[^>]+>/g, " ").trim() }
+    ? { whole: tMatch[0], text: htmlText(tMatch[0]) }
     : null
   if (candidate) {
     const remainder = s.slice(candidate.whole.length).trim()
@@ -471,7 +503,12 @@ export function splitHeaderFromHtml(
     // content in the document, and removing it would leave an empty body.
     if (looksLikeHeading(candidate.text) && hasVisibleText(remainder)) {
       heading = candidate.text
-      s = remainder
+      s = stripLeadingEmptyParagraphs(remainder)
+      // Some templates put the study title ABOVE the patient block instead of
+      // below it, so the patient table is only reachable once the heading has
+      // been taken off. Same content test as before — a table that doesn't read
+      // as patient info is left exactly where it is.
+      stripPatientTables()
     }
   }
 

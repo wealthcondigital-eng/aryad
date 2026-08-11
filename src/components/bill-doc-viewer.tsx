@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { useEffect, useState } from "react"
 import { receiptLetterheadHtml, receiptPatientBoxHtml, receiptItemsTableHtml, drawReceiptPatientBox, loadLogoDataUrl, CLINIC_ADDRESS, CLINIC_CONTACT_LINE } from "@/lib/receipt-letterhead"
 import { showAlert } from "@/components/confirm-dialog"
+import { receiptShareUrl } from "@/lib/share-links"
 
 interface EditEntry { editor: string; editedAt: string; changedFields: string[] }
 
@@ -285,11 +286,13 @@ export async function shareBillOnWhatsApp(p: BillShareData, opts: { forceLink?: 
       body: JSON.stringify({ billPdf: base64, editor: "System" }),
     })
 
-    // Prefer the pretty public link (/sagar-dutta-receipt/pdf); fall back to the id URL
-    let pdfUrl = `${window.location.origin}/api/billing/${p.id}/pdf`
+    // Prefer the pretty public link (/sagar-dutta-receipt.pdf); fall back to the id URL
+    let pdfUrl = receiptShareUrl(window.location.origin, { billId: p.id })
     try {
       const data = await res.json()
-      if (data?.bill?.billSlug) pdfUrl = `${window.location.origin}/${data.bill.billSlug}/pdf`
+      if (data?.bill?.billSlug) {
+        pdfUrl = receiptShareUrl(window.location.origin, { slug: data.bill.billSlug, billId: p.id })
+      }
     } catch { /* keep fallback URL */ }
 
     const msg = `Dear ${p.name},\n\nYour payment receipt for *${p.study}* from *Aarya Diagnostic Center* is ready.\n\n📄 Download Receipt:\n${pdfUrl}`

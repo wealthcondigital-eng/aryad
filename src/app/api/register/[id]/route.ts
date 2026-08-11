@@ -17,11 +17,14 @@ const EDITABLE = [
   "paid", "balance", "entryBy",
 ] as const
 
-// PATCH /api/register/[id] — correct one row of a month
+// PATCH /api/register/[id] — correct one cell (or several) of a row
 //
-// Rows mirrored from a patient record (sourceType "system") are not editable
-// here: the patient record is their source, and the next sync would overwrite
-// anything typed over them. Edit the patient instead.
+// Every row is editable, including the ones mirrored from a patient record. The
+// sheet is the centre's own book: if a figure on it needs correcting, it gets
+// corrected here. What keeps that correction is `editedFields` — the next sync
+// from the patient rewrites every column of a system row EXCEPT the ones listed
+// there, so a typed-over cell is never silently reverted while the rest of the
+// row stays in step with the patient.
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     await connectDB()
@@ -30,16 +33,14 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     const entry = await RegisterEntry.findById(id)
     if (!entry) return NextResponse.json({ error: "Not found" }, { status: 404 })
-    if (isSystemRow(entry)) {
-      return NextResponse.json(
-        { error: "This row mirrors a patient record — edit the patient to change it" },
-        { status: 409 }
-      )
-    }
+
+    const system = isSystemRow(entry)
+    const edited = new Set<string>(entry.editedFields ?? [])
 
     for (const key of EDITABLE) {
       if (!(key in body)) continue
       const v = body[key]
+      if (system) edited.add(key)
       switch (key) {
         case "srNo":
         case "age":
@@ -59,7 +60,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // Keep the balance honest unless it was explicitly supplied
     if (!("balance" in body)) {
       entry.balance = Math.max(0, entry.charges - entry.discount - entry.paid)
+      // A balance recomputed from a hand-set figure is itself hand-set, or the
+      // next sync would put the patient's balance back over this row's money.
+      if (system && edited.size > 0) edited.add("balance")
     }
+
+    if (system) entry.editedFields = Array.from(edited)
 
     await entry.save()
     return NextResponse.json({ entry })
@@ -69,7 +75,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   }
 }
 
-// DELETE /api/register/[id] — remove one row
+// DELETE /api/register/[id] — take one row off the sheet
 export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     await connectDB()
@@ -77,11 +83,15 @@ export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ 
 
     const entry = await RegisterEntry.findById(id)
     if (!entry) return NextResponse.json({ error: "Not found" }, { status: 404 })
+
+    // A system row is hidden rather than deleted: the patient it mirrors is
+    // still in the system, so a deleted row would simply reappear on the next
+    // sync or the next time the month is opened. Hiding sticks, and the patient
+    // record itself is untouched either way.
     if (isSystemRow(entry)) {
-      return NextResponse.json(
-        { error: "This row mirrors a patient record — delete the patient's study instead" },
-        { status: 409 }
-      )
+      entry.hidden = true
+      await entry.save()
+      return NextResponse.json({ deleted: true, hidden: true })
     }
 
     await entry.deleteOne()

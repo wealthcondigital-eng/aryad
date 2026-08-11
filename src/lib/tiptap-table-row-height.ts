@@ -1,4 +1,5 @@
 import TableRow from "@tiptap/extension-table-row"
+import { cssLengthToPx } from "@/lib/css-length"
 
 // Row heights for report-body tables.
 //
@@ -26,12 +27,12 @@ export const TableRowHeight = TableRow.extend({
         // imported table's own row heights are preserved rather than reset.
         parseHTML: (element: HTMLElement) => {
           const raw = element.style.height || element.getAttribute("height") || ""
-          const n = parseInt(raw, 10)
-          return Number.isFinite(n) && n > 0 ? n : null
+          const n = cssLengthToPx(raw)
+          return n != null && n > 0 ? n : null
         },
         renderHTML: (attributes: { height?: number | null }) => {
           if (!attributes.height) return {}
-          return { style: `height:${attributes.height}px` }
+          return { style: `height:${Number(attributes.height.toFixed(3))}px` }
         },
       },
     }

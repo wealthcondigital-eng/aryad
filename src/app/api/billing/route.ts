@@ -5,6 +5,7 @@ import Patient from "@/models/Patient"
 import Study from "@/models/Study"
 import { autoCategory } from "@/lib/study-catalogue"
 import { syncPatientToRegister } from "@/lib/register-sync"
+import { applyBillToStudies, patientTotals } from "@/lib/bill-allocation"
 
 // GET /api/billing
 export async function GET() {
@@ -47,9 +48,15 @@ function syncLegacyMirror(patient: any) {
   patient.reportSlug  = first.reportSlug
   patient.editHistory = first.editHistory
   patient.billId      = first.billId
-  patient.charges     = first.charges ?? 0
-  patient.paid        = first.paid ?? 0
-  patient.discount    = first.discount ?? 0
+  // The money mirrors the WHOLE patient, not studies[0] like the report fields
+  // do: now that each study carries its own share of the bill, the screens that
+  // still read these top-level figures (the dashboard's day total, the paid /
+  // pending badges) would under-count a multi-study patient by every study but
+  // the first.
+  const money = patientTotals(patient.studies)
+  patient.charges     = money.charges
+  patient.paid        = money.paid
+  patient.discount    = money.discount
   patient.paymentMode = first.paymentMode ?? "Cash"
 
   const statuses: string[] = patient.studies.map((s: any) => s.reportStatus)
@@ -84,14 +91,11 @@ export async function POST(req: NextRequest) {
       } else {
         targets = [patient.studies[Math.min(Math.max(rawIdx, 0), Math.max(patient.studies.length - 1, 0))]]
       }
-      for (const entry of targets) {
-        if (!entry) continue
-        entry.charges = body.charges
-        entry.paid = body.paid
-        entry.discount = body.discount
-        entry.paymentMode = body.paymentMode
-        entry.billId = bill._id
-      }
+      // Each study takes its own line off the bill, not the bill's total — a
+      // ₹1500 scan and a ₹700 scan on one ₹2200 bill are ₹1500 and ₹700.
+      const billed = targets.filter(Boolean)
+      applyBillToStudies(billed, body.items, body)
+      for (const entry of billed) entry.billId = bill._id
       syncLegacyMirror(patient)
       patient.markModified("studies")
 
@@ -110,8 +114,10 @@ export async function POST(req: NextRequest) {
 
       await patient.save()
 
-      // The bill's totals are what the monthly register's money columns show
-      await syncPatientToRegister(patient)
+      // The bill's totals are what the monthly register's money columns show —
+      // each study's own share of it, over anything typed onto the sheet before
+      // this bill existed.
+      await syncPatientToRegister(patient, "", { moneyFromBill: true })
 
       if (Object.keys(identitySync).length > 0) {
         await Bill.updateMany({ patientId: patient._id, _id: { $ne: bill._id } }, { $set: identitySync })

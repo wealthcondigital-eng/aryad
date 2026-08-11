@@ -1,5 +1,6 @@
 import { Extension } from "@tiptap/core"
 import { PAGE_BREAK_ATTR } from "@/lib/report-layout"
+import { cssLengthToPx } from "@/lib/css-length"
 
 // Word's Paragraph dialog, as node attributes on the report body's paragraphs:
 // left indent, first-line indent, space before/after, and "page break before".
@@ -27,11 +28,7 @@ export { PAGE_BREAK_ATTR } from "@/lib/report-layout"
  * back to this editor's own 0.5em paragraph gap — every line of an imported
  * report drifting half a line further down the page than the Word original.
  */
-function px(value: unknown): number | null {
-  if (value === "" || value == null) return null
-  const n = typeof value === "number" ? value : parseFloat(String(value))
-  return Number.isFinite(n) ? n : null
-}
+const px = cssLengthToPx
 
 declare module "@tiptap/core" {
   interface Commands<ReturnType> {
@@ -57,9 +54,15 @@ export const ParagraphFormat = Extension.create({
         attributes: {
           indent: {
             default: null,
-            parseHTML: (el: HTMLElement) => px(el.style.marginLeft),
+            parseHTML: (el: HTMLElement) => px(el.style.marginLeft || el.style.marginInlineStart),
             renderHTML: (attrs: { indent?: number | null }) =>
               attrs.indent != null ? { style: `margin-left: ${attrs.indent}px` } : {},
+          },
+          indentRight: {
+            default: null,
+            parseHTML: (el: HTMLElement) => px(el.style.marginRight || el.style.marginInlineEnd),
+            renderHTML: (attrs: { indentRight?: number | null }) =>
+              attrs.indentRight != null ? { style: `margin-right: ${attrs.indentRight}px` } : {},
           },
           firstLineIndent: {
             default: null,
