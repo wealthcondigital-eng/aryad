@@ -8,10 +8,13 @@
  * is why a report could be sent before any PDF of it existed. The conversion
  * now happens first, and the message is only composed once it has succeeded.
  *
- * The WhatsApp tab is opened before the await (a popup blocker discards a
- * window.open that happens after one) and shows a short "preparing" page
- * meanwhile, so the sender isn't left staring at a blank tab while a
- * multi-page report rasterizes.
+ * Nothing is opened until the PDF is ready. Opening the WhatsApp tab up front
+ * and parking a "preparing…" page in it does dodge the popup blocker, but it
+ * puts an idle about:blank tab in front of the sender for the whole
+ * conversion — so the wait is shown on the page that started the share
+ * (showConvertingOverlay) and the tab only appears when there is something to
+ * open. If the blocker swallows that late window.open, whatsAppPrompt turns the
+ * same overlay into a button, which opens on a fresh click.
  */
 
 import { buildAndStoreReportPdf } from "@/lib/report-pdf"
@@ -27,39 +30,55 @@ import { showAlert } from "@/components/confirm-dialog"
  * the three list screens (and anything added later) get it from the one share
  * function instead of each wiring up its own spinner state.
  */
-function showConvertingOverlay(): () => void {
-  if (typeof document === "undefined") return () => {}
+const OVERLAY_CSS =
+  "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;" +
+  "background:rgba(15,23,42,.45);backdrop-filter:blur(2px);font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif"
+
+const CARD_CSS =
+  "background:#fff;border-radius:16px;padding:24px 28px;box-shadow:0 20px 45px rgba(15,23,42,.25);text-align:center;min-width:260px"
+
+function overlay(inner: string): { host: HTMLDivElement; close: () => void } {
   const host = document.createElement("div")
   host.setAttribute("data-report-pdf-overlay", "")
-  host.style.cssText =
-    "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;" +
-    "background:rgba(15,23,42,.45);backdrop-filter:blur(2px);font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif"
-  host.innerHTML = `
-    <div style="background:#fff;border-radius:16px;padding:24px 28px;box-shadow:0 20px 45px rgba(15,23,42,.25);text-align:center;min-width:260px">
-      <div style="width:34px;height:34px;margin:0 auto 12px;border:3px solid #dbeafe;border-top-color:#2563eb;border-radius:50%;animation:aaryaSpin .8s linear infinite"></div>
-      <p style="margin:0;font-size:14px;font-weight:600;color:#0f172a">Converting the report to PDF…</p>
-      <p style="margin:6px 0 0;font-size:12px;color:#64748b">WhatsApp opens as soon as it is ready.</p>
-    </div>
-    <style>@keyframes aaryaSpin{to{transform:rotate(360deg)}}</style>`
+  host.style.cssText = OVERLAY_CSS
+  host.innerHTML = `<div style="${CARD_CSS}">${inner}</div>`
   document.body.appendChild(host)
-  return () => { try { host.remove() } catch {} }
+  return { host, close: () => { try { host.remove() } catch {} } }
 }
 
-function holdingPage(win: Window | null, message: string) {
-  if (!win) return
-  try {
-    win.document.write(`<!DOCTYPE html><meta charset="utf-8">
-<title>Preparing the report…</title>
-<body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
-             font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;background:#f1f5f9;color:#0f172a">
-  <div style="text-align:center">
-    <div style="font-size:28px;margin-bottom:10px">📄</div>
-    <p style="margin:0;font-size:15px;font-weight:600">${message}</p>
-    <p style="margin:6px 0 0;font-size:13px;color:#64748b">This tab will open WhatsApp automatically.</p>
-  </div>
-</body>`)
-    win.document.close()
-  } catch { /* cross-origin or blocked — the redirect below still works */ }
+function showConvertingOverlay(): () => void {
+  if (typeof document === "undefined") return () => {}
+  return overlay(`
+    <div style="width:34px;height:34px;margin:0 auto 12px;border:3px solid #dbeafe;border-top-color:#2563eb;border-radius:50%;animation:aaryaSpin .8s linear infinite"></div>
+    <p style="margin:0;font-size:14px;font-weight:600;color:#0f172a">Converting the report to PDF…</p>
+    <p style="margin:6px 0 0;font-size:12px;color:#64748b">WhatsApp opens as soon as it is ready.</p>
+    <style>@keyframes aaryaSpin{to{transform:rotate(360deg)}}</style>`).close
+}
+
+/**
+ * Shown only when the browser refused the WhatsApp tab.
+ *
+ * A popup blocker discards a window.open that happens after an await, and a
+ * report takes seconds to rasterize — so the click that started the share has
+ * usually stopped counting as one by the time the link exists. The button here
+ * is a fresh click, which is never blocked.
+ */
+function whatsAppPrompt(href: string) {
+  if (typeof document === "undefined") return
+  const { host, close } = overlay(`
+    <div style="font-size:26px;margin-bottom:8px">✅</div>
+    <p style="margin:0;font-size:14px;font-weight:600;color:#0f172a">The report PDF is ready.</p>
+    <p style="margin:6px 0 14px;font-size:12px;color:#64748b">Your browser blocked the new tab.</p>
+    <a href="${href}" target="_blank" rel="noopener noreferrer"
+       style="display:block;background:#16a34a;color:#fff;text-decoration:none;font-size:13px;font-weight:600;padding:10px 16px;border-radius:10px">
+      Open WhatsApp
+    </a>
+    <button type="button" data-close
+            style="margin-top:8px;background:none;border:0;color:#64748b;font-size:12px;cursor:pointer">Not now</button>`)
+  host.addEventListener("click", (e) => {
+    const el = e.target as HTMLElement
+    if (el === host || el.closest("[data-close]") || el.closest("a")) close()
+  })
 }
 
 export interface WhatsAppShareTarget {
@@ -73,8 +92,8 @@ export interface WhatsAppShareTarget {
 
 /**
  * Converts, stores, then opens WhatsApp. Returns the problem (already
- * human-readable) when there is one, so the caller can show it; the opened
- * tab is closed in that case rather than left hanging.
+ * human-readable) when there is one, so the caller can show it; nothing is
+ * opened on failure, since there is no report to send.
  */
 let sharing = false
 
@@ -84,8 +103,6 @@ export async function shareReportOnWhatsApp(t: WhatsAppShareTarget): Promise<{ o
   if (sharing) return { ok: true }
   sharing = true
 
-  const win = typeof window !== "undefined" ? window.open("", "_blank") : null
-  holdingPage(win, "Converting the report to PDF…")
   const hideOverlay = showConvertingOverlay()
 
   let result
@@ -97,7 +114,6 @@ export async function shareReportOnWhatsApp(t: WhatsAppShareTarget): Promise<{ o
   }
 
   if (!result.ok) {
-    try { win?.close() } catch {}
     const error = result.empty
       ? "This report has no content yet, so there is nothing to send."
       : result.error || "Couldn't prepare the PDF."
@@ -118,7 +134,8 @@ export async function shareReportOnWhatsApp(t: WhatsAppShareTarget): Promise<{ o
     ? `https://wa.me/91${digits}?text=${encodeURIComponent(msg)}`
     : `https://wa.me/?text=${encodeURIComponent(msg)}`
 
-  if (win) win.location.href = wa
-  else window.open(wa, "_blank")
+  const win = window.open(wa, "_blank")
+  if (win) win.focus()
+  else whatsAppPrompt(wa)
   return { ok: true }
 }
