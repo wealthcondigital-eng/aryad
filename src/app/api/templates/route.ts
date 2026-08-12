@@ -165,7 +165,17 @@ export async function POST(req: NextRequest) {
             previewSource = htmlText(split.bodyHtml)
           }
         }
-      } catch {
+      } catch (err) {
+        // Preserve the root cause in server logs: a host runtime mismatch
+        // otherwise appears to users as a corrupt Word document.
+        console.error("Template Word import failed", {
+          fileName,
+          fileSize: buffer.length,
+          format: isDocx ? "docx" : "doc",
+          error: err instanceof Error
+            ? { name: err.name, message: err.message, stack: err.stack }
+            : String(err),
+        })
         return NextResponse.json({ error: "Couldn't read this file — it may be corrupted, password-protected, or not a real Word document" }, { status: 400 })
       }
 
