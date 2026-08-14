@@ -568,7 +568,13 @@ function ReportEditorInner() {
   // so focus never actually leaves whichever region is currently focused; a
   // native <select> does steal focus though, so this flag is what lets the
   // font/spacing dropdowns route correctly even after that.
-  const lastActiveRef = useRef<"heading" | "body" | "patientBox">("body")
+  const lastActiveRef = useRef<"heading" | "body" | "patientBox" | "signature">("body")
+
+  // Which of the sign-off's four contentEditable blocks (name/credentials ×
+  // two doctors) the caret was last in. The heading is a single fixed element
+  // so titleRef alone identifies it; the signature block is not, so the target
+  // has to be remembered rather than looked up.
+  const activeSigTextRef = useRef<HTMLElement | null>(null)
 
   // The editor's own keymap runs inside the useEditor config below, which is
   // built before the editor (and before paginate) exists — these two refs are
@@ -1544,15 +1550,50 @@ function ReportEditorInner() {
   // straight off the DOM (mirrors readCleanBody()'s "imperative source of
   // truth, read at save time" pattern) so it can be persisted and threaded
   // into the DOCX/PDF/print exports.
+  // Reads one of the sign-off's contentEditable blocks, but ONLY reports it as
+  // an override once the doctor has actually typed in it. seedEditable stamps
+  // what the browser parsed onto the node; an untouched block still matches
+  // that, and returning it anyway would freeze a copy of the signatory's name
+  // into this report — after which renaming the doctor on the Signatures page
+  // would silently stop reaching it.
+  const readSigText = (kind: "name" | "credentials", index: number): string | undefined => {
+    const field = kind === "name" ? "nameHtml" : "credentialsHtml"
+    const saved = loadedSigLayout[index]?.[field]
+    const el = sigsRef.current?.querySelector<HTMLElement>(
+      `[data-sig-text="${kind}"][data-sig-text-idx="${index}"]`
+    )
+    if (!el) return saved
+    if (el.innerHTML === el.dataset.sigSeedHtml) return saved
+    // An emptied NAME reverts to the signatory record rather than saving a
+    // blank: an unnamed doctor on a medical report is a mistake every time,
+    // and storing "" would also desync the editor (which would seed empty)
+    // from every output (which falls back to the record). Credentials are
+    // different — a doctor may genuinely want only a name under the signature
+    // — so an empty credentials block is saved as the empty string it is.
+    if (kind === "name" && !el.textContent?.trim()) return undefined
+    return el.innerHTML
+  }
+
   const readSignatureLayout = (): (SignatureLayout | null)[] => {
     const layout: (SignatureLayout | null)[] = [null, null]
     for (let i = 0; i < 2; i++) {
+      // The name/credential text is edited independently of the image — a
+      // report can have a bolded sign-off and no stamp at all — so it is read
+      // for both branches below rather than only alongside an <img>.
+      const nameHtml = readSigText("name", i)
+      const credentialsHtml = readSigText("credentials", i)
+      const text = {
+        ...(nameHtml !== undefined ? { nameHtml } : {}),
+        ...(credentialsHtml !== undefined ? { credentialsHtml } : {}),
+      }
+
       const img = sigsRef.current?.querySelector<HTMLImageElement>(`img[data-sig-idx="${i}"]`)
       if (!img) {
         // A hidden/removed signature unmounts its <img> entirely (replaced by
         // the "+ Add Signature" placeholder) — state is the only remaining
         // record of that removal, so fall back to it instead of dropping it.
-        layout[i] = loadedSigLayout[i] ?? null
+        const prev = loadedSigLayout[i]
+        layout[i] = (prev || Object.keys(text).length) ? { ...(prev ?? {}), ...text } : null
         continue
       }
       const left = parseFloat(img.style.left) || 0
@@ -1561,7 +1602,7 @@ function ReportEditorInner() {
       const height = parseFloat(img.style.height) || 0
       const hidden = img.style.display === "none" || img.getAttribute("data-sig-hidden") === "true"
       const overrideImage = loadedSigLayout[i]?.overrideImage || (img.src?.startsWith("data:") ? img.src : undefined)
-      if (left || top || width || height || hidden || overrideImage) {
+      if (left || top || width || height || hidden || overrideImage || Object.keys(text).length) {
         layout[i] = {
           ...(left ? { left } : {}),
           ...(top ? { top } : {}),
@@ -1569,6 +1610,7 @@ function ReportEditorInner() {
           ...(height ? { height } : {}),
           ...(hidden ? { hidden } : {}),
           ...(overrideImage ? { overrideImage } : {}),
+          ...text,
         }
       }
     }
@@ -1863,17 +1905,29 @@ function ReportEditorInner() {
       if (titleRef.current?.contains(el)) {
         toolbarSelRangeRef.current = range.cloneRange()
         lastActiveRef.current = "heading"
+        return
+      }
+      // Same capture for the sign-off's name/credential blocks, so selecting a
+      // doctor's name and pressing Bold formats THAT, instead of the command
+      // landing on whichever region happened to be active before.
+      const sigText = el?.closest<HTMLElement>("[data-sig-text]")
+      if (sigText && sigsRef.current?.contains(sigText)) {
+        toolbarSelRangeRef.current = range.cloneRange()
+        activeSigTextRef.current = sigText
+        lastActiveRef.current = "signature"
       }
     }
     document.addEventListener("selectionchange", onSelectionChange)
     return () => document.removeEventListener("selectionchange", onSelectionChange)
   }, [])
 
-  // Restores the last selection made inside the heading/body onto the given
+  // Restores the last selection made inside the heading/sign-off onto its own
   // element and focuses it — used before toolbar commands that would otherwise
   // run against whatever picked up focus last (e.g. a <select>).
-  const restoreEditableSelection = (): HTMLDivElement | null => {
-    const target = titleRef.current
+  const restoreEditableSelection = (): HTMLElement | null => {
+    const target = lastActiveRef.current === "signature"
+      ? activeSigTextRef.current
+      : titleRef.current
     if (!target) return null
     target.focus()
     const sel = window.getSelection()
@@ -2364,6 +2418,15 @@ function ReportEditorInner() {
       schedulePaginate()
       return
     }
+    // The sign-off keeps its own markup, so the font lands in the saved HTML
+    // directly — no separate whole-block tracking, and crucially no
+    // setHeadingFont, which would restyle the study heading instead.
+    if (lastActiveRef.current === "signature") {
+      restoreEditableSelection()
+      document.execCommand("fontName", false, family)
+      schedulePaginate()
+      return
+    }
     // The heading only ever persists as plain text (getDocTitle() reads
     // .innerText), so per-character formatting from execCommand here is
     // cosmetic-only — but the font choice itself is tracked separately in
@@ -2734,9 +2797,14 @@ function ReportEditorInner() {
   // chain, based on which region last had real focus (see lastActiveRef).
   const runFormat = (headingCmd: string, bodyRun: (e: Editor) => void) => {
     if (lastActiveRef.current === "patientBox") return   // see changeFontSize
-    if (lastActiveRef.current === "heading") {
+    // The sign-off's name/credential blocks are plain contentEditables like the
+    // heading, so they take the same execCommand path — but unlike the heading
+    // their markup IS what gets saved (see readSigText), so the bold/italic a
+    // doctor applies here survives into print, PDF and the Word download.
+    if (lastActiveRef.current === "heading" || lastActiveRef.current === "signature") {
       restoreEditableSelection()
       document.execCommand(headingCmd)
+      schedulePaginate()
     } else if (editor) {
       bodyRun(editor)
     }
@@ -3926,9 +3994,16 @@ function ReportEditorInner() {
                       scroll was the "it jumps away while I'm adding something"
                       behaviour, since the end of the body can be well above the
                       signature block you just clicked. */}
+                  {/* Not `select-none`: the name/credential lines are
+                      contentEditable now, and a user-select:none ancestor makes
+                      them impossible to select — which is exactly what stopped
+                      a doctor from highlighting a name and pressing Bold. The
+                      signature IMAGE still opts out of selection on its own
+                      (see inlineStyle in SignatureColumns) so dragging a stamp
+                      never sweeps a text selection along with it. */}
                   <div
                     ref={sigsRef}
-                    className="mt-0 select-none text-gray-900 w-full cursor-text"
+                    className="mt-0 text-gray-900 w-full cursor-text"
                   >
                     <SignatureColumns
                       signatories={reportSignatories}

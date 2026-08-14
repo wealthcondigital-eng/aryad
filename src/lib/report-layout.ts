@@ -567,16 +567,24 @@ export function paginateDomBlocks(o: DomPageBreakOpts): number {
 // date / title / URL lines over the letterhead; the thead/tfoot spacers
 // repeat on every printed page so multi-page reports stay clear too.
 
-export const LETTERHEAD_TOP_MM = 40    // pre-printed logo band (default — doctors can resize per report)
-export const LETTERHEAD_BOTTOM_MM = 30 // pre-printed address band
+export const LETTERHEAD_TOP_MM = 26    // pre-printed logo band (default — doctors can resize per report)
+export const LETTERHEAD_BOTTOM_MM = 13 // pre-printed address band
 
 // Same bands expressed in on-screen pixels (A4 @ 96dpi: 1mm ≈ 3.7795px),
 // so the report editor's "paper" can reserve exactly the header/footer gap
 // the Word file and printout use — WYSIWYG with the final document.
 export const MM_TO_PX = 96 / 25.4
 export const A4_PAGE_PX = Math.round(297 * MM_TO_PX)          // 1123 — full A4 height
-export const LETTERHEAD_TOP_PX = Math.round(LETTERHEAD_TOP_MM * MM_TO_PX)       // 151
-export const LETTERHEAD_BOTTOM_PX = Math.round(LETTERHEAD_BOTTOM_MM * MM_TO_PX) // 113
+export const LETTERHEAD_TOP_PX = Math.round(LETTERHEAD_TOP_MM * MM_TO_PX)       // 98
+export const LETTERHEAD_BOTTOM_PX = Math.round(LETTERHEAD_BOTTOM_MM * MM_TO_PX) // 49
+
+// Word measures page margins in twips (1/20 pt, 1440 per inch). Exported so a
+// .docx reserves the SAME bands the screen/print/PDF do — the reports list used
+// to hardcode the twip pair, which meant changing the mm constants above moved
+// every output except the Word download.
+export const MM_TO_TWIPS = 1440 / 25.4
+export const LETTERHEAD_TOP_TWIPS = Math.round(LETTERHEAD_TOP_MM * MM_TO_TWIPS)
+export const LETTERHEAD_BOTTOM_TWIPS = Math.round(LETTERHEAD_BOTTOM_MM * MM_TO_TWIPS)
 
 // Drag bounds for the resizable header/footer bands in the built-in editor —
 // loose enough to fit anything from a thin logo strip to a tall clinic

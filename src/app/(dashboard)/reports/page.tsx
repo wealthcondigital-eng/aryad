@@ -19,7 +19,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import { useRole } from "@/lib/role-context"
-import { printShellHtml, reportHeaderHtml, reportTitleHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, MM_TO_PX, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
+import { printShellHtml, reportHeaderHtml, reportTitleHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, LETTERHEAD_TOP_TWIPS, LETTERHEAD_BOTTOM_TWIPS, MM_TO_PX, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, type SignatureLayout } from "@/lib/report-signatures"
 import { parseHtml, makeImageRun } from "@/lib/report-docx"
 import { ReportViewModal } from "@/components/report-view-modal"
@@ -242,9 +242,20 @@ async function generateDocxBase64(r: ReportRow, reportHtml: string, signatureLay
     }),
   ]
 
-  // 40mm top / 30mm bottom (in twips) keep the pre-printed letterhead bands empty
+  // Keep the pre-printed letterhead bands empty. Derived from the same mm
+  // constants the screen, print and PDF use, so all four agree.
   return await Packer.toBase64String(new Document({
-    sections: [{ properties: { page: { margin: { top: 2270, bottom: 1700, left: 1440, right: 1440 } } }, children }],
+    sections: [{
+      properties: {
+        page: {
+          margin: {
+            top: LETTERHEAD_TOP_TWIPS, bottom: LETTERHEAD_BOTTOM_TWIPS,
+            left: 1440, right: 1440,
+          },
+        },
+      },
+      children,
+    }],
   }))
 }
 

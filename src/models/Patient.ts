@@ -24,6 +24,8 @@ export interface ISignatureLayout {
   hidden?: boolean
   hiddenSignatory?: boolean
   overrideImage?: string
+  nameHtml?: string        // per-report rich text for the doctor's name line
+  credentialsHtml?: string // per-report rich text for the credential lines
 }
 
 // One study booked for the patient — each study gets its own separate report

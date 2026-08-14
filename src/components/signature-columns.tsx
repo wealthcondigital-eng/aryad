@@ -1,6 +1,25 @@
 "use client"
 
 import type { Signatory, SignatureLayout } from "@/lib/report-signatures"
+import { sanitizeSignatureHtml, escapeSignatureText } from "@/lib/report-signatures"
+
+// Writes the starting HTML into a contentEditable exactly once per distinct
+// value, tracked on the node itself. Without the guard every parent re-render
+// (pagination, autosave ticks, a signatory refetch) would reset innerHTML and
+// drop the caret mid-word; with a plain `dangerouslySetInnerHTML` React would
+// do the same on its own schedule. After the seed the DOM owns the content and
+// readSignatureLayout() in the editor reads it back at save time.
+function seedEditable(el: HTMLElement | null, html: string) {
+  if (!el) return
+  if (el.dataset.sigSeedKey === html) return
+  el.dataset.sigSeedKey = html
+  el.innerHTML = sanitizeSignatureHtml(html)
+  // What the browser actually parsed, not what we handed it — the editor
+  // compares against this to tell "the doctor typed here" from "untouched",
+  // and innerHTML round-trips (quoting, attribute order, implied tags) would
+  // otherwise read as an edit the moment the report loads.
+  el.dataset.sigSeedHtml = el.innerHTML
+}
 
 // Applies a saved drag/resize override exactly once per DOM node (idempotent,
 // tracked via a data attribute) so it survives unrelated re-renders of the
@@ -100,14 +119,67 @@ export function SignatureColumns({
 
   const renderText = (index: 0 | 1, s?: Signatory, layout?: SignatureLayout | null) => {
     if (!s || layout?.hiddenSignatory) return <div />
+
+    // Read-only (view modal, print preview): render the saved rich text if this
+    // report has any, else the plain signatory record — the same choice
+    // signatureColumnsHtml makes, so screen and paper agree.
+    if (!editable) {
+      return (
+        <div>
+          {layout?.nameHtml ? (
+            <p
+              className="font-bold text-[13px] uppercase"
+              dangerouslySetInnerHTML={{ __html: sanitizeSignatureHtml(layout.nameHtml) }}
+            />
+          ) : (
+            <p className="font-bold text-[13px] uppercase flex items-center gap-1.5">{s.name}</p>
+          )}
+          {layout?.credentialsHtml !== undefined ? (
+            <div
+              className="text-[10px] uppercase text-gray-600 mt-0.5"
+              dangerouslySetInnerHTML={{ __html: sanitizeSignatureHtml(layout.credentialsHtml) }}
+            />
+          ) : (
+            s.credentials.map((c, i) => (
+              <p key={i} className={`text-[10px] uppercase text-gray-600 ${i === 0 ? "mt-0.5" : ""}`}>{c}</p>
+            ))
+          )}
+        </div>
+      )
+    }
+
+    // Editable: the name and the credential block are contentEditable so the
+    // doctor can select the text and hit Bold (or any other toolbar control)
+    // exactly like body text. Seeded imperatively and never re-rendered from
+    // props — a reactive `children`/`dangerouslySetInnerHTML` would wipe the
+    // caret on every keystroke, the same reason the signature image's position
+    // is owned by the DOM once touched (see applyInitialLayout).
+    const defaultCredentialsHtml = s.credentials
+      .map((c) => `<div>${escapeSignatureText(c)}</div>`)
+      .join("")
+
     return (
       <div>
-        <p className="font-bold text-[13px] uppercase flex items-center gap-1.5">
-          {s.name}
-        </p>
-        {s.credentials.map((c, i) => (
-          <p key={i} className={`text-[10px] uppercase text-gray-600 ${i === 0 ? "mt-0.5" : ""}`}>{c}</p>
-        ))}
+        {/* A <div>, not the <p> the read-only view uses: pressing Enter in a
+            contentEditable makes the browser insert a block, and a <div>/<p>
+            nested inside a <p> is invalid — the parser silently closes the
+            outer <p> and the second line escapes the styled block. */}
+        <div
+          contentEditable
+          suppressContentEditableWarning
+          data-sig-text="name"
+          data-sig-text-idx={index}
+          ref={(el) => seedEditable(el, layout?.nameHtml ?? escapeSignatureText(s.name))}
+          className="font-bold text-[13px] uppercase outline-none focus:bg-blue-50/50 rounded-sm cursor-text min-h-[1.2em]"
+        />
+        <div
+          contentEditable
+          suppressContentEditableWarning
+          data-sig-text="credentials"
+          data-sig-text-idx={index}
+          ref={(el) => seedEditable(el, layout?.credentialsHtml ?? defaultCredentialsHtml)}
+          className="text-[10px] uppercase text-gray-600 mt-0.5 outline-none focus:bg-blue-50/50 rounded-sm cursor-text min-h-[1.2em]"
+        />
       </div>
     )
   }
