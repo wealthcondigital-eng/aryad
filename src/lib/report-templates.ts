@@ -10,6 +10,8 @@
 // editor and the Add Template page keep working; the lists are empty because
 // nothing ships with the app any more.
 
+import { buildStudyHeadingIndex, type StudyHeadingIndex } from "@/lib/report-layout"
+
 export type TemplateCategory = "usg" | "doppler" | "xray" | "pathology" | "obstetric"
 
 export interface ReportTemplate {
@@ -30,4 +32,21 @@ export const REPORT_TEMPLATES: Record<TemplateCategory, ReportTemplate[]> = {
   doppler: [],
   xray: [],
   pathology: [],
+}
+
+// Study name -> that template's study heading, for reports that have no
+// heading of their own yet (see getDisplayTitle). Deliberately hits the
+// `fields=headings` projection: the editor, the reports list and the view
+// modal all call this on mount, and the unprojected list would ship every
+// template's full report body to each of them.
+export async function fetchStudyHeadings(): Promise<StudyHeadingIndex> {
+  try {
+    const res = await fetch("/api/templates?fields=headings")
+    const data = await res.json()
+    return buildStudyHeadingIndex(data.headings ?? [])
+  } catch {
+    // A failed lookup just means titles fall back to the study name — never a
+    // reason to fail rendering the report itself.
+    return {}
+  }
 }

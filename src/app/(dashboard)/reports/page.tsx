@@ -21,6 +21,7 @@ import {
 import { useRole } from "@/lib/role-context"
 import { printShellHtml, reportHeaderHtml, reportTitleHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, LETTERHEAD_TOP_TWIPS, LETTERHEAD_BOTTOM_TWIPS, MM_TO_PX, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, buildDocxSignatureCells, type SignatureLayout } from "@/lib/report-signatures"
+import { fetchStudyHeadings } from "@/lib/report-templates"
 import { parseHtml, makeImageRun } from "@/lib/report-docx"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { motion } from "motion/react"
@@ -324,9 +325,11 @@ async function fetchStudyReport(r: ReportRow): Promise<{ body: string; docx: str
 // modal must always produce the same output, whichever one you click first.
 async function printReportDirect(r: ReportRow) {
   const { body: reportBody, heading, headingFont, patientBoxFont, headerHeightPx, footerHeightPx, signatureLayout } = await fetchStudyReport(r)
-  const signatories = await fetchSignatories()
+  const [signatories, studyHeadings] = await Promise.all([fetchSignatories(), fetchStudyHeadings()])
   const p = r.p
-  const title = heading || getDisplayTitle(r.study).toUpperCase()
+  // Same fallback the editor and the view modal use — a report with no heading
+  // of its own prints under its template's heading, not the bare study name.
+  const title = heading || getDisplayTitle(r.study, studyHeadings).toUpperCase()
 
   const cleanBody = stripReportEditMarks(reportBody)
   const body      = cleanBody || "<em style='color:#aaa;font-size:12px'>No report content saved.</em>"

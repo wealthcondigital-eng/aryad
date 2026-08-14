@@ -7,17 +7,43 @@
 import type { jsPDF } from "jspdf"
 import { reportFontFaceCss } from "@/lib/report-fonts"
 
+/** Lower-cased study/template name -> that template's study heading. */
+export type StudyHeadingIndex = Record<string, string>
+
 // Shared title fallback for a report with no heading of its own.
 //
-// This used to map a study name onto the matching bundled template's heading
-// (study "Abd Pelvis" -> "ULTRASONOGRAPHY OF ABDOMEN AND PELVIS"). Those
-// bundled templates are gone, and the clinic-added ones that replaced them
-// live in MongoDB — which this module can't read, because the editor, view
-// modal, reports list and PDF renderer all call it from the browser. So the
-// study name IS the fallback now; picking a template in the editor still fills
-// the heading in from that template, and it is saved with the report.
-export function getDisplayTitle(studyName: string): string {
-  return studyName || ""
+// A report only carries a heading of its own once a template has been applied
+// or a doctor has typed one; until then every view of it (editor, view modal,
+// reports list, print, PDF) has to agree on the same fallback, or the same
+// report shows a different title depending on which screen printed it.
+//
+// The fallback is the matching template's OWN heading — the study-title line
+// lifted out of the clinic's Word file at import time, e.g. study
+// "Abd Pel Male" -> "ULTRASOUND OF ABDOMEN & PELVIS". The bare study name is
+// only the last resort, for a study with no template of that name at all.
+//
+// The index is passed in rather than looked up here: templates live in MongoDB
+// now, and every caller of this function runs in the browser.
+export function getDisplayTitle(studyName: string, headings?: StudyHeadingIndex): string {
+  if (!studyName) return ""
+  return headings?.[studyName.trim().toLowerCase()] || studyName
+}
+
+/** Builds the lookup getDisplayTitle takes, from `/api/templates` rows. */
+export function buildStudyHeadingIndex(
+  templates: { name?: string; heading?: string }[]
+): StudyHeadingIndex {
+  const index: StudyHeadingIndex = {}
+  for (const t of templates) {
+    const name = (t.name ?? "").trim().toLowerCase()
+    const heading = (t.heading ?? "").trim()
+    // A heading that merely echoes the template's own name teaches the lookup
+    // nothing — leaving it out means the caller falls through to the study
+    // name and gets the identical string, without pretending it was resolved.
+    if (!name || !heading || heading.toLowerCase() === name) continue
+    if (!index[name]) index[name] = heading
+  }
+  return index
 }
 
 // Belt-and-suspenders version of the `.report-paper` CSS rule in globals.css:

@@ -19,12 +19,12 @@ import { StudyComboInput } from "@/components/combo-input"
 import { useRole } from "@/lib/role-context"
 import { useConfirm } from "@/components/confirm-dialog"
 import { motion, AnimatePresence } from "framer-motion"
-import { REPORT_TEMPLATES, ReportTemplate, TemplateCategory } from "@/lib/report-templates"
+import { REPORT_TEMPLATES, ReportTemplate, TemplateCategory, fetchStudyHeadings } from "@/lib/report-templates"
 import {
   reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle,
   LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, MM_TO_PX,
   BAND_HEIGHT_MIN_PX, BAND_HEIGHT_MAX_PX, REPORT_BODY_STYLE, REPORT_SIGS_STYLE,
-  DEFAULT_REPORT_FONT,
+  DEFAULT_REPORT_FONT, type StudyHeadingIndex,
 } from "@/lib/report-layout"
 import { fetchSignatories, signatureColumnsHtml, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
 import { buildReportDocxBase64 } from "@/lib/report-docx"
@@ -478,6 +478,18 @@ function ReportEditorInner() {
       .catch(() => { })
       .finally(() => setTemplatesLoaded(true))
   }, [showTemplates])
+
+  // Study -> template heading, for a report that has no heading of its own.
+  // Fetched unconditionally (unlike the full template list above, which only
+  // loads when the Templates panel is opened) because the heading is needed to
+  // render the document itself, not just to browse templates.
+  const [studyHeadings, setStudyHeadings] = useState<StudyHeadingIndex>({})
+  const [headingsLoaded, setHeadingsLoaded] = useState(false)
+  useEffect(() => {
+    fetchStudyHeadings()
+      .then(setStudyHeadings)
+      .finally(() => setHeadingsLoaded(true))
+  }, [])
 
   const [signatories, setSignatories] = useState<Signatory[]>([])
   const [templateSignatureCount, setTemplateSignatureCount] = useState<number | undefined>()
@@ -1939,7 +1951,7 @@ function ReportEditorInner() {
   }
 
   // Current heading text (falls back to the study name)
-  const getDocTitle = () => (titleRef.current?.innerText ?? "").trim() || getDisplayTitle(study).toUpperCase()
+  const getDocTitle = () => (titleRef.current?.innerText ?? "").trim() || getDisplayTitle(study, studyHeadings).toUpperCase()
   const [docxLoading, setDocxLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
@@ -2150,13 +2162,17 @@ function ReportEditorInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showDoc, editor])
 
-  // ── Seed the editable heading with the study name (drafts/templates override it) ──
+  // ── Seed the editable heading from the study's template (drafts/templates override it) ──
+  // Waits for the heading index: seeding the bare study name first and swapping
+  // it once the fetch lands would be a visible flicker, and worse, the "already
+  // has a heading" guard below would see the study name sitting there and
+  // refuse to replace it — leaving every report titled with the study name.
   useEffect(() => {
-    if (!showDoc || !study) return
+    if (!showDoc || !study || !headingsLoaded) return
     if (titleRef.current && !titleRef.current.innerText.trim()) {
-      titleRef.current.innerText = getDisplayTitle(study).toUpperCase()
+      titleRef.current.innerText = getDisplayTitle(study, studyHeadings).toUpperCase()
     }
-  }, [showDoc, study])
+  }, [showDoc, study, headingsLoaded, studyHeadings])
 
   // ── Save draft on browser close / hard refresh (belt-and-suspenders) ─────────
   useEffect(() => {

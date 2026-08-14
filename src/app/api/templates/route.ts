@@ -35,9 +35,19 @@ async function findDuplicateByName(name: string): Promise<{ source: "custom" | "
 // load. Leaving it out doesn't just hide the "removed" badge — it makes the
 // page treat every built-in as present again, so a template deleted before a
 // refresh silently comes back after one.
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
     await connectDB()
+
+    // `?fields=headings` — just the name/heading pairs, for resolving a
+    // report's fallback title (see getDisplayTitle). The full list below
+    // carries every template's entire report body, which is megabytes the
+    // reports list and the view modal have no use for.
+    if (req.nextUrl.searchParams.get("fields") === "headings") {
+      const rows = await Template.find({}, { name: 1, heading: 1, _id: 0 }).lean()
+      return NextResponse.json({ headings: rows })
+    }
+
     const [templates, hidden] = await Promise.all([
       Template.find().sort({ createdAt: -1 }),
       HiddenTemplate.find().sort({ createdAt: -1 }),

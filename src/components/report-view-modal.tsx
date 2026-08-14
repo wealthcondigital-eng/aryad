@@ -4,7 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import { X, Printer, Share2, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, MM_TO_PX, applyReportBodySpacing, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE, paginateDomBlocks, stripPageSpacerRows } from "@/lib/report-layout"
+import { reportHeaderHtml, reportTitleHtml, printShellHtml, getDisplayTitle, LETTERHEAD_TOP_PX, LETTERHEAD_BOTTOM_PX, A4_PAGE_PX, MM_TO_PX, applyReportBodySpacing, stripReportEditMarks, REPORT_BODY_STYLE, REPORT_SIGS_STYLE, paginateDomBlocks, stripPageSpacerRows, type StudyHeadingIndex } from "@/lib/report-layout"
+import { fetchStudyHeadings } from "@/lib/report-templates"
 import { fetchSignatories, signatureColumnsHtml, type Signatory, type SignatureLayout } from "@/lib/report-signatures"
 import { SignatureColumns } from "@/components/signature-columns"
 import { showAlert } from "@/components/confirm-dialog"
@@ -55,9 +56,13 @@ export function ReportViewModal({
   const [headerPx, setHeaderPx] = useState<number>(LETTERHEAD_TOP_PX)
   const [footerPx, setFooterPx] = useState<number>(LETTERHEAD_BOTTOM_PX)
   // A saved heading keeps the exact casing the doctor typed; only the derived
-  // fallback is upper-cased (matching how the editor seeds it).
-  const displayTitle = savedHeading || getDisplayTitle(patient.study).toUpperCase()
+  // fallback is upper-cased (matching how the editor seeds it). The fallback
+  // resolves the study to its template's heading — same index, same result as
+  // the editor, so a report reads identically here, on paper and in the PDF.
+  const [studyHeadings, setStudyHeadings] = useState<StudyHeadingIndex>({})
+  const displayTitle = savedHeading || getDisplayTitle(patient.study, studyHeadings).toUpperCase()
   useEffect(() => { fetchSignatories().then(setSignatories) }, [])
+  useEffect(() => { fetchStudyHeadings().then(setStudyHeadings) }, [])
 
   // Pagination: lay the preview out as A4 sheets so the doctor sees where pages
   // break, with a plain empty gap at the top (letterhead header) and bottom
