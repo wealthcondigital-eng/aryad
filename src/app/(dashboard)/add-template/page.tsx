@@ -56,7 +56,9 @@ function deriveNameFromFile(fileName: string) {
 }
 
 function isWordFile(file: File) {
-  return /\.docx?$/i.test(file.name)
+  // Word creates tiny `~$…` companion files while a document is open. They
+  // only contain lock/owner metadata, never the document contents.
+  return /\.docx?$/i.test(file.name) && !/^~\$/i.test(file.name)
 }
 
 interface TemplateRow {
@@ -167,7 +169,6 @@ export default function AddTemplatePage() {
 
   const allDocs = [...builtInDocs, ...customDocs, ...(showRemoved ? removedDocs : [])]
   const customCount  = customDocs.length
-  const builtInCount = builtInDocs.length
 
   // Every distinct category actually in use — the built-ins (always shown)
   // plus any the clinic has created, alphabetised after the built-ins.
@@ -201,7 +202,11 @@ export default function AddTemplatePage() {
 
   const addFiles = (files: File[]) => {
     const word = files.filter(isWordFile)
-    if (word.length !== files.length) {
+    const lockFiles = files.filter((file) => /^~\$/i.test(file.name))
+    const unsupported = files.length - word.length - lockFiles.length
+    if (lockFiles.length) {
+      setAddError(`${lockFiles.length} temporary Word lock file${lockFiles.length === 1 ? " was" : "s were"} skipped. Close Word and select the matching file without “~$”.`)
+    } else if (unsupported) {
       setAddError("Only .doc and .docx files can be imported — the rest were left out.")
     } else {
       setAddError("")
@@ -350,11 +355,12 @@ export default function AddTemplatePage() {
     }
   }
 
+  // No "Built-in" tile: nothing ships with the app any more, so it would read 0
+  // forever. Every template here is one the clinic imported.
   const STATS = [
     { label: "Total Templates",   value: loading ? null : String(builtInDocs.length + customCount), icon: FileStack, color: "text-blue-500" },
     { label: "Categories",        value: String(allCategoryKeys.length),          icon: Layers,     color: "text-violet-500" },
     { label: "Imported (Custom)", value: loading ? null : String(customCount),    icon: Upload,     color: "text-emerald-500" },
-    { label: "Built-in",          value: String(builtInCount),                    icon: LayoutTemplate, color: "text-gray-400" },
   ]
 
   return (
@@ -642,7 +648,7 @@ export default function AddTemplatePage() {
       </Dialog>
 
       {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
         {STATS.map((s, i) => (
           <motion.div key={s.label} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.07, duration: 0.3 }}>
             <Card className="h-full">
@@ -719,7 +725,9 @@ export default function AddTemplatePage() {
             <>
               {filtered.length === 0 && (
                 <p className="text-center py-10 text-muted-foreground text-sm">
-                  {allCategoryKeys.length === 0 ? "No templates yet." : "No templates match your search."}
+                  {allDocs.length === 0
+                    ? "No templates yet — import a Word format to get started."
+                    : "No templates match your search."}
                 </p>
               )}
               {allCategoryKeys.filter((cat) => grouped[cat]?.length).map((cat) => {

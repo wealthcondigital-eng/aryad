@@ -5,23 +5,19 @@
 // print output and the WhatsApp-shared PDF so they all look identical.
 
 import type { jsPDF } from "jspdf"
-import { REPORT_TEMPLATES } from "@/lib/report-templates"
 import { reportFontFaceCss } from "@/lib/report-fonts"
 
-// Shared title fallback: a report only gets a custom heading once a doctor
-// has actually edited it — until then, every view of it (editor, view modal,
-// reports list) should fall back to the SAME canonical template heading
-// (e.g. study "Abd Pelvis" -> "ULTRASONOGRAPHY OF ABDOMEN AND PELVIS"), not
-// just the raw study name, or the same report would show a different title
-// depending on which screen you printed it from.
+// Shared title fallback for a report with no heading of its own.
+//
+// This used to map a study name onto the matching bundled template's heading
+// (study "Abd Pelvis" -> "ULTRASONOGRAPHY OF ABDOMEN AND PELVIS"). Those
+// bundled templates are gone, and the clinic-added ones that replaced them
+// live in MongoDB — which this module can't read, because the editor, view
+// modal, reports list and PDF renderer all call it from the browser. So the
+// study name IS the fallback now; picking a template in the editor still fills
+// the heading in from that template, and it is saved with the report.
 export function getDisplayTitle(studyName: string): string {
-  if (!studyName) return ""
-  for (const cat of Object.keys(REPORT_TEMPLATES)) {
-    const list = REPORT_TEMPLATES[cat as keyof typeof REPORT_TEMPLATES]
-    const found = list.find((t) => t.name.toLowerCase() === studyName.toLowerCase())
-    if (found) return found.heading
-  }
-  return studyName
+  return studyName || ""
 }
 
 // Belt-and-suspenders version of the `.report-paper` CSS rule in globals.css:

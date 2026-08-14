@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import Template from "@/models/Template"
+import HiddenTemplate from "@/models/HiddenTemplate"
 import { countTrailingSignatories, htmlText, splitHeaderFromHtml, splitHeaderFromPlainText } from "@/lib/doc-import"
 import { REPORT_TEMPLATES, TemplateCategory } from "@/lib/report-templates"
 
@@ -26,12 +27,25 @@ async function findDuplicateByName(name: string): Promise<{ source: "custom" | "
   return null
 }
 
-// GET /api/templates — every clinic-added template (built-ins live in report-templates.ts)
+// GET /api/templates — every clinic-added template, plus the ids of any built-in
+// that has been removed.
+//
+// `hiddenBuiltIns` has to be part of THIS response: the Add Template page keeps
+// the removed-ids list in component state and rebuilds it from here on every
+// load. Leaving it out doesn't just hide the "removed" badge — it makes the
+// page treat every built-in as present again, so a template deleted before a
+// refresh silently comes back after one.
 export async function GET() {
   try {
     await connectDB()
-    const templates = await Template.find().sort({ createdAt: -1 })
-    return NextResponse.json({ templates })
+    const [templates, hidden] = await Promise.all([
+      Template.find().sort({ createdAt: -1 }),
+      HiddenTemplate.find().sort({ createdAt: -1 }),
+    ])
+    return NextResponse.json({
+      templates,
+      hiddenBuiltIns: hidden.map((h) => ({ id: h.templateId, name: h.name, category: h.category })),
+    })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: "Server error" }, { status: 500 })
@@ -65,6 +79,11 @@ export async function POST(req: NextRequest) {
       }
 
       const fileName = (file as File).name || "Template"
+      if (/^~\$/i.test(fileName)) {
+        return NextResponse.json({
+          error: "This is a temporary Microsoft Word lock file, not a document. Close Word and select the matching file without “~$” at the beginning.",
+        }, { status: 400 })
+      }
       const isDocx = /\.docx$/i.test(fileName)
       const isDoc  = /\.doc$/i.test(fileName) && !isDocx
       if (!isDocx && !isDoc) {

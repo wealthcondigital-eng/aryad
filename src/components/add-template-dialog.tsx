@@ -63,7 +63,13 @@ export function AddTemplateDialog({
   }, [open, defaultCategory])
 
   const pickFile = (f: File | null) => {
+    if (f && /^~\$/i.test(f.name)) {
+      setFile(null)
+      setError("This is a temporary Word lock file, not a template. Close Word and select the matching file without “~$”.")
+      return
+    }
     setFile(f)
+    setError("")
     setDuplicate(null)
     // The name follows the file until the doctor types one of their own.
     if (f && !nameEdited) setName(nameFromFile(f.name))
@@ -74,6 +80,7 @@ export function AddTemplateDialog({
     const cat = category === NEW_CATEGORY ? newCategory.trim() : category
     if (!cat) { setError("Enter a name for the new category."); return }
     if (source === "file" && !file) { setError("Choose a .doc or .docx file to import."); return }
+    if (source === "file" && file && /^~\$/i.test(file.name)) { setError("Temporary Word lock files cannot be imported. Select the matching file without “~$”."); return }
     if (source === "current" && !currentBodyHtml.trim()) { setError("This report is empty — there is nothing to save."); return }
     if (source === "current" && !name.trim()) { setError("Give the template a name."); return }
 
