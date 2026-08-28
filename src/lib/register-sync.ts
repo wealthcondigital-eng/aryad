@@ -9,7 +9,7 @@
 // happens in @/lib/bill-allocation when the bill is saved.
 
 import RegisterEntry from "@/models/RegisterEntry"
-import RegisterSheet from "@/models/RegisterSheet"
+import { ensureRegisterSheet } from "@/lib/register-sheet"
 import RegisterRowRemoval from "@/models/RegisterRowRemoval"
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -201,7 +201,7 @@ export async function syncPatientToRegister(
     if (ops.length > 0) await RegisterEntry.bulkWrite(ops, { ordered: false })
 
     // A booking in a month the register hasn't seen yet opens that month's sheet
-    await RegisterSheet.updateOne({ month }, { $setOnInsert: { month, createdBy: "system" } }, { upsert: true })
+    await ensureRegisterSheet(month, "system")
 
     // Studies removed from the patient must not linger in the month, and nor
     // must a row for a study whose line was deleted off the sheet by hand.

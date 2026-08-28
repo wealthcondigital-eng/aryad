@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import RegisterEntry from "@/models/RegisterEntry"
 import RegisterSheet from "@/models/RegisterSheet"
+import { ensureRegisterSheet } from "@/lib/register-sheet"
 import Patient from "@/models/Patient"
 import RegisterRowRemoval from "@/models/RegisterRowRemoval"
 import { syncPatientToRegister, nextRegisterSerial, removalKey, registerMonthLabel } from "@/lib/register-sync"
@@ -235,7 +236,7 @@ export async function POST(req: NextRequest) {
     })
 
     // Typing into a month is also how a sheet gets started
-    await RegisterSheet.updateOne({ month }, { $setOnInsert: { month, createdBy: str(body.entryBy) } }, { upsert: true })
+    await ensureRegisterSheet(month, str(body.entryBy))
 
     return NextResponse.json({ entry, month, movedSheet: month !== sheetMonth }, { status: 201 })
   } catch (err) {

@@ -7,7 +7,7 @@
 // date belongs to — have to hold whichever way the write arrived.
 
 import RegisterEntry from "@/models/RegisterEntry"
-import RegisterSheet from "@/models/RegisterSheet"
+import { ensureRegisterSheet } from "@/lib/register-sheet"
 import { registerMonthLabel, nextRegisterSerial } from "@/lib/register-sync"
 import { isCustomColumn } from "@/lib/register-column-keys"
 
@@ -64,11 +64,7 @@ export async function applyCellEdits(entry: Entry, fields: Record<string, unknow
           if (moved !== entry.month) {
             entry.month = moved
             entry.srNo  = await nextRegisterSerial(moved)
-            await RegisterSheet.updateOne(
-              { month: moved },
-              { $setOnInsert: { month: moved, createdBy: "system" } },
-              { upsert: true }
-            )
+            await ensureRegisterSheet(moved, "system")
           }
         }
         break

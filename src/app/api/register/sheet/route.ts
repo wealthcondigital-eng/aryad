@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import RegisterSheet from "@/models/RegisterSheet"
+import { ensureRegisterSheet } from "@/lib/register-sheet"
 import RegisterEntry from "@/models/RegisterEntry"
 import { customColumnKey, isCustomColumn } from "@/lib/register-cells"
 
@@ -19,11 +20,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `"${month}" is not a month` }, { status: 400 })
     }
 
-    const sheet = await RegisterSheet.findOneAndUpdate(
-      { month },
-      { $setOnInsert: { month, createdBy: String(body.createdBy ?? "").trim() } },
-      { upsert: true, returnDocument: "after" }
-    )
+    // Starts with the same columns as the newest sheet, so a month opened here
+    // doesn't put back columns the clinic has taken off.
+    await ensureRegisterSheet(month, String(body.createdBy ?? "").trim())
+    const sheet = await RegisterSheet.findOne({ month })
 
     return NextResponse.json({ sheet }, { status: 201 })
   } catch (err) {

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import RegisterEntry from "@/models/RegisterEntry"
-import RegisterSheet from "@/models/RegisterSheet"
+import { ensureRegisterSheet } from "@/lib/register-sheet"
 
 const MAX_ROWS = 20_000
 
@@ -96,7 +96,7 @@ export async function POST(req: NextRequest) {
     const res = await RegisterEntry.bulkWrite(ops, { ordered: false })
 
     // The month now has a sheet of its own, so its tab survives row deletions
-    await RegisterSheet.updateOne({ month }, { $setOnInsert: { month, createdBy: importedBy } }, { upsert: true })
+    await ensureRegisterSheet(month, importedBy)
 
     let removed = 0
     if (replace) {
