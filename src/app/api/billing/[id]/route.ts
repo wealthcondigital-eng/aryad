@@ -3,7 +3,7 @@ import { connectDB } from "@/lib/db"
 import Bill from "@/models/Bill"
 import Patient from "@/models/Patient"
 import Study from "@/models/Study"
-import { autoCategory } from "@/lib/study-catalogue"
+import { resolveStudyCategory } from "@/lib/study-category"
 import { syncPatientToRegister } from "@/lib/register-sync"
 import { applyBillToStudies, patientTotals } from "@/lib/bill-allocation"
 
@@ -11,7 +11,7 @@ function ensureStudies(patient: any) {
   if ((patient.studies?.length ?? 0) === 0 && patient.study) {
     patient.studies = [{
       name:         patient.study,
-      category:     autoCategory(patient.study),
+      category:     "",
       reportStatus: patient.reportStatus ?? "pending",
       reportBody:   patient.reportBody ?? "",
       reportDocx:   patient.reportDocx ?? "",
@@ -171,7 +171,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
   const items: Array<{ study: string; price: number }> = updatedFields.items ?? current.items ?? []
   for (const item of items) {
     if (!item.study || !item.price) continue
-    const cat = autoCategory(item.study)
+    const cat = await resolveStudyCategory(item.study)
     await Study.findOneAndUpdate(
       { name: item.study },
       {

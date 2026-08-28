@@ -2,12 +2,28 @@ import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import Template from "@/models/Template"
 import HiddenTemplate from "@/models/HiddenTemplate"
+import Study from "@/models/Study"
+import { canonicalCategory } from "@/lib/study-catalogue"
 import { countTrailingSignatories, htmlText, splitHeaderFromHtml, splitHeaderFromPlainText } from "@/lib/doc-import"
 import { REPORT_TEMPLATES, TemplateCategory } from "@/lib/report-templates"
 
 function buildPreview(text: string, max = 150): string {
   const clean = text.replace(/\s+/g, " ").trim()
   return clean.length > max ? `${clean.slice(0, max)}…` : clean
+}
+
+// A study of the same name that nobody has filed yet takes the category the
+// template was imported under — that is the clinic saying what this study is,
+// and it saves them filing the same thing twice. A study that already has a
+// category is left alone; the Studies page is the place to change that.
+async function adoptTemplateCategory(name: string, category: string) {
+  const cat = canonicalCategory(category)
+  if (!name.trim() || !cat) return
+  const nameRe = new RegExp(`^${name.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i")
+  await Study.updateMany(
+    { name: nameRe, $or: [{ category: "" }, { category: { $exists: false } }, { category: null }] },
+    { $set: { category: cat } }
+  )
 }
 
 // Case-insensitive exact-name match against both clinic-added templates (DB)
@@ -224,6 +240,7 @@ export async function POST(req: NextRequest) {
         category, name, heading, preview, body, signatureCount,
         preserveSignature: true,
       })
+      await adoptTemplateCategory(name, category)
       return NextResponse.json({ template }, { status: 201 })
     }
 
@@ -251,6 +268,7 @@ export async function POST(req: NextRequest) {
 
     const preview = buildPreview(htmlText(body))
     const template = await Template.create({ category, name, heading, preview, body })
+    await adoptTemplateCategory(name, category)
     return NextResponse.json({ template }, { status: 201 })
   } catch (err) {
     console.error(err)

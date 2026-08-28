@@ -11,6 +11,10 @@ import { RegisterRow } from "@/lib/xlsx-read"
 export interface SavedRegisterRow extends RegisterRow {
   _id?: string
   month?: string
+  /** The patient's system-wide id (1001, 1002…); absent on Excel and hand-typed rows. */
+  patientSrNo?: number | null
+  /** Values for the columns the clinic added to the sheet, keyed by `x_…`. */
+  extra?: Record<string, string>
   sourceType?: "excel" | "manual" | "system"
   patientId?: string
   studyIndex?: number
@@ -86,7 +90,7 @@ const EDIT_SPEC: Record<string, Partial<ExcelColumn<SavedRegisterRow>>> = {
 // patient billed for two studies gets a row per study, and these are written
 // once — the way the centre's own sheets put the second investigation on the
 // next line with the Sr No left blank.
-const VISIT_COLUMNS = new Set(["srNo", "date", "name", "age", "gender", "contact", "referredBy", "entryBy"])
+const VISIT_COLUMNS = new Set(["srNo", "patientSrNo", "date", "name", "age", "gender", "contact", "referredBy", "entryBy"])
 
 // Distinct values already in use, offered as type-ahead per column
 export type RegisterSuggestions = Partial<Record<string, string[]>>
@@ -141,6 +145,16 @@ export function registerColumns(
   cols.push(
     { key: "srNo", label: "Sr No", width: 62, numeric: true, align: "center",
       text: (r) => (r.srNo == null ? "" : String(r.srNo)), sortValue: (r) => r.srNo ?? 0 },
+    // The patient record behind the row. Read-only on purpose: it is an id, not
+    // a figure — typing over it would claim the row mirrors a different patient
+    // without actually re-linking anything. Blank on Excel and hand-typed rows,
+    // which have no patient record.
+    { key: "patientSrNo", label: "Patient ID", width: 84, numeric: true, align: "center",
+      text: (r) => (r.patientSrNo == null ? "" : String(r.patientSrNo)),
+      sortValue: (r) => r.patientSrNo ?? 0,
+      render: (r) => (r.patientSrNo == null
+        ? <span className="text-gray-300">—</span>
+        : <span className="font-mono text-[11px] text-gray-500">#{r.patientSrNo}</span>) },
     { key: "date", label: "Date", width: 100,
       text: (r) => fmtRegisterDate(r.date), sortValue: (r) => (r.date ? new Date(r.date).getTime() : 0) },
     { key: "name", label: "Name of Patient", width: 185,

@@ -6,9 +6,11 @@ import Study from "@/models/Study"
 import Bill from "@/models/Bill"
 import Notification from "@/models/Notification"
 import RegisterEntry from "@/models/RegisterEntry"
-import { autoCategory } from "@/lib/study-catalogue"
+import { canonicalCategory } from "@/lib/study-catalogue"
+import { categoryFor, resolveStudyCategories, resolveStudyCategory } from "@/lib/study-category"
 import { generateReportSlug } from "@/lib/report-slug"
 import { syncPatientToRegister } from "@/lib/register-sync"
+import { visitDateToTimestamp } from "@/lib/visit-date"
 import { applyBillToStudies, patientTotals } from "@/lib/bill-allocation"
 
 type PatientDoc = InstanceType<typeof Patient>
@@ -22,7 +24,7 @@ function ensureStudies(patient: PatientDoc) {
   if ((patient.studies?.length ?? 0) === 0 && patient.study) {
     patient.studies = [{
       name:         patient.study,
-      category:     autoCategory(patient.study),
+      category:     "",
       reportStatus: patient.reportStatus ?? "pending",
       reportBody:   patient.reportBody ?? "",
       reportDocx:   patient.reportDocx ?? "",
@@ -208,6 +210,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       studyName,
       studies: studiesUpdate,
       reportStatus, reportBody, reportDocx, reportPdf, heading, headingFont, patientBoxFont, headerHeightPx, footerHeightPx, reportDate, signatureLayout,
+      visitDate,
       ...regularFields
     } = body
 
@@ -219,6 +222,21 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // a billed patient). Only then may the register's money columns overwrite
     // what was typed onto the sheet — a plain report save must never do that.
     let billMoneyMoved = false
+
+    // ── The date the patient was seen ──
+    // Held in createdAt, which is what the register, the report date and every
+    // "patients on this day" view read. Mongoose refuses to change createdAt
+    // through the model — the timestamps plugin strips it from saves and
+    // updates alike — so the one write that moves it goes through the driver.
+    // The in-memory value is set too, because the register sync below reads it
+    // to work out the row's date and which month's sheet it belongs on.
+    const seenOn = visitDateToTimestamp(visitDate)
+    let visitDateMoved = false
+    if (seenOn && seenOn.getTime() !== new Date(patient.createdAt).getTime()) {
+      await Patient.collection.updateOne({ _id: patient._id }, { $set: { createdAt: seenOn } })
+      patient.createdAt = seenOn
+      visitDateMoved = true
+    }
 
     // ── Delete one study's report (drops the study + its bill line) ──
     // Removing the last remaining study deletes the whole patient record —
@@ -267,12 +285,25 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     // ── Replace / reconcile the study list (registration edit) ──
     if (Array.isArray(studiesUpdate)) {
-      const cleaned = studiesUpdate
+      const requested = studiesUpdate
         .map((s: { name?: string; category?: string }) => ({
           name: String(s.name ?? "").trim(),
-          category: s.category || autoCategory(String(s.name ?? "")),
+          category: canonicalCategory(s.category),
         }))
         .filter((s) => s.name)
+        .map((s) => ({ ...s, explicit: !!s.category }))
+      // A client that sends no category isn't asking for one to be invented.
+      // The study keeps the category it already has on this patient, or picks
+      // up the one on record for that name — an edit to the phone number must
+      // never quietly re-file every study on the patient.
+      const known = await resolveStudyCategories(requested.filter((s) => !s.explicit).map((s) => s.name))
+      const cleaned = requested.map((s) => s.explicit ? s : {
+        ...s,
+        category:
+          canonicalCategory(patient.studies.find((o: { name: string; category?: string }) => o.name === s.name)?.category)
+          || known.get(s.name.toLowerCase())
+          || "",
+      })
       if (cleaned.length > 0) {
         const old = patient.studies
         // Matched by name, but each old entry is only used ONCE (a proper
@@ -289,7 +320,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
             return { name: s.name, category: s.category, reportStatus: "pending", reportBody: "", reportDocx: "", reportPdf: "", reportSlug: "", editHistory: [] }
           }
           usedOldIndices.add(matchIdx)
-          return Object.assign(old[matchIdx], { category: s.category })
+          return Object.assign(old[matchIdx], s.category ? { category: s.category } : {})
         })
         const removed = old.filter((_: unknown, i: number) => !usedOldIndices.has(i))
         if (removed.length > 0 && await cascadeRemoveStudiesFromBills(patient, removed)) billMoneyMoved = true
@@ -298,7 +329,12 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
         await Promise.all(cleaned.map((s) =>
           Study.findOneAndUpdate(
             { name: s.name },
-            { $setOnInsert: { name: s.name, category: s.category, price: 0, fromCatalogue: false, firstSeenAt: new Date() } },
+            {
+              // Only a category the edit actually chose is pushed back onto the
+              // catalogue; a derived one came from there in the first place.
+              ...(s.explicit ? { $set: { category: s.category } } : {}),
+              $setOnInsert: { name: s.name, ...(s.explicit ? {} : { category: s.category }), price: 0, fromCatalogue: false, firstSeenAt: new Date() },
+            },
             { upsert: true }
           )
         ))
@@ -312,14 +348,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     // ── Append a new study ──
     if (addStudy?.name && String(addStudy.name).trim()) {
       const name = String(addStudy.name).trim()
-      const category = addStudy.category || autoCategory(name)
+      const chosen   = canonicalCategory(addStudy.category)
+      const category = await categoryFor(name, chosen)
       patient.studies.push({
         name, category,
         reportStatus: "pending", reportBody: "", reportDocx: "", reportPdf: "", reportSlug: "", editHistory: [],
       })
       await Study.findOneAndUpdate(
         { name },
-        { $setOnInsert: { name, category, price: 0, fromCatalogue: false, firstSeenAt: new Date() } },
+        {
+          ...(chosen ? { $set: { category: chosen } } : {}),
+          $setOnInsert: { name, ...(chosen ? {} : { category }), price: 0, fromCatalogue: false, firstSeenAt: new Date() },
+        },
         { upsert: true }
       )
       if (await cascadeAddStudiesToBill(patient, [patient.studies[patient.studies.length - 1]])) billMoneyMoved = true
@@ -332,7 +372,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       if (entry && entry.name !== studyName.trim()) {
         const oldName = entry.name
         entry.name = studyName.trim()
-        entry.category = autoCategory(entry.name)
+        // Switching the report to another template re-files the study under
+        // that template's category — but only if one is on record for the new
+        // name. Nothing known means the study keeps the category it had.
+        entry.category = (await resolveStudyCategory(entry.name)) || entry.category || ""
         await Study.findOneAndUpdate(
           { name: entry.name },
           { $setOnInsert: { name: entry.name, category: entry.category, price: 0, fromCatalogue: false, firstSeenAt: new Date() } },
@@ -478,7 +521,10 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       })
     }
 
-    return NextResponse.json({ patient })
+    // `visitDateMoved` tells the client the register row may have jumped to
+    // another month's sheet, so it can say so rather than leaving the row
+    // apparently vanished from the month being looked at.
+    return NextResponse.json({ patient, visitDateMoved })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: "Server error" }, { status: 500 })

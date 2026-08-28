@@ -10,11 +10,42 @@
 
 import RegisterEntry from "@/models/RegisterEntry"
 import RegisterSheet from "@/models/RegisterSheet"
+import RegisterRowRemoval from "@/models/RegisterRowRemoval"
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 export function registerMonthLabel(d: Date) {
   return `${MONTHS[d.getMonth()]} ${d.getFullYear()}`
+}
+
+/**
+ * The next serial on a month's sheet — the register's own 1, 2, 3…, continuing
+ * whatever numbering the sheet already carries (an imported month picks up
+ * after its last Excel row).
+ *
+ * Deliberately NOT the patient's Sr No: that is a system-wide id starting at
+ * 1001, and writing it into the register turned a sheet that should read
+ * 1, 2, 3 into 1001, 1002, 1003.
+ */
+export async function nextRegisterSerial(month: string): Promise<number> {
+  const top = await RegisterEntry.findOne({ month }).sort({ srNo: -1 }).select("srNo").lean<{ srNo?: number | null }>()
+  return (top?.srNo ?? 0) + 1
+}
+
+/** How a removal is matched to a study: the slot it sits in and what is in it. */
+export const removalKey = (studyIndex: number, studyName: string) =>
+  `${studyIndex}::${String(studyName ?? "").trim().toLowerCase()}`
+
+/**
+ * The studies of one patient whose register rows were deleted by hand. Those
+ * rows stay gone — recreating them is exactly what deleting them was meant to
+ * stop. See models/RegisterRowRemoval.ts.
+ */
+export async function removedRowKeys(patientId: unknown): Promise<Set<string>> {
+  const rows = await RegisterRowRemoval.find({ patientId })
+    .select("studyIndex studyName")
+    .lean<{ studyIndex: number; studyName: string }[]>()
+  return new Set(rows.map((r) => removalKey(r.studyIndex, r.studyName)))
 }
 
 interface SyncStudy {
@@ -28,6 +59,11 @@ interface SyncStudy {
 
 interface SyncPatient {
   _id: unknown
+  /**
+   * The patient's system-wide id (1001, 1002…). It goes in the register's own
+   * PATIENT ID column, NOT in SR NO — that is the sheet's serial, see
+   * nextRegisterSerial.
+   */
   srNo?: number
   name?: string
   age?: number
@@ -85,15 +121,28 @@ export async function syncPatientToRegister(
 
     if (studies.length === 0) return
 
+    // Rows deleted off the sheet by hand stay deleted. Skipped before anything
+    // else so a removed study can't be written back by this sync — and any
+    // stray row for one is cleared out below.
+    const removed = await removedRowKeys(patient._id)
+
     // What has already been typed over by hand on this patient's rows. Those
     // columns are left alone below — a correction made on the sheet must not be
     // undone by the next bill or registration edit.
     const existing = await RegisterEntry.find({ patientId: patient._id })
-      .select("importKey editedFields")
-      .lean<{ importKey: string; editedFields?: string[] }[]>()
+      .select("importKey editedFields srNo month")
+      .lean<{ importKey: string; editedFields?: string[]; srNo?: number | null; month?: string }[]>()
     const editedByKey = new Map(existing.map((e) => [e.importKey, new Set(e.editedFields ?? [])]))
 
-    const ops = studies.map((s, idx) => {
+    // Every study of one visit shares one serial, the way the sheet writes the
+    // Sr No once and leaves it blank on the continuation lines. A visit already
+    // on this month's sheet keeps the number it was given; a new one takes the
+    // next free one. Re-syncing must never renumber the sheet.
+    const srNo = existing.find((e) => e.month === month && e.srNo != null)?.srNo
+      ?? await nextRegisterSerial(month)
+
+    const ops = studies.flatMap((s, idx) => {
+      if (removed.has(removalKey(idx, s.name ?? ""))) return []
       const charges  = num(s.charges)
       const discount = num(s.discount)
       const paid     = num(s.paid)
@@ -102,7 +151,8 @@ export async function syncPatientToRegister(
       if (opts.moneyFromBill) for (const k of MONEY_FIELDS) edited.delete(k)
 
       const mirrored: Record<string, unknown> = {
-        srNo: patient.srNo ?? null,
+        srNo,
+        patientSrNo: patient.srNo ?? null,
         date: created,
         name: (patient.name ?? "").trim(),
         age: patient.age ?? null,
@@ -125,7 +175,7 @@ export async function syncPatientToRegister(
       // hand-typed figure it has just replaced.
       if (opts.moneyFromBill) mirrored.editedFields = Array.from(edited)
 
-      return {
+      return [{
         updateOne: {
           filter: { importKey },
           update: {
@@ -145,19 +195,26 @@ export async function syncPatientToRegister(
           },
           upsert: true,
         },
-      }
+      }]
     })
 
-    await RegisterEntry.bulkWrite(ops, { ordered: false })
+    if (ops.length > 0) await RegisterEntry.bulkWrite(ops, { ordered: false })
 
     // A booking in a month the register hasn't seen yet opens that month's sheet
     await RegisterSheet.updateOne({ month }, { $setOnInsert: { month, createdBy: "system" } }, { upsert: true })
 
-    // Studies removed from the patient must not linger in the month
+    // Studies removed from the patient must not linger in the month, and nor
+    // must a row for a study whose line was deleted off the sheet by hand.
+    const suppressed = studies
+      .map((s, idx) => (removed.has(removalKey(idx, s.name ?? "")) ? idx : -1))
+      .filter((idx) => idx >= 0)
     await RegisterEntry.deleteMany({
       sourceType: "system",
       patientId: patient._id,
-      studyIndex: { $gte: studies.length },
+      $or: [
+        { studyIndex: { $gte: studies.length } },
+        ...(suppressed.length > 0 ? [{ studyIndex: { $in: suppressed } }] : []),
+      ],
     })
   } catch (err) {
     console.error("register sync failed", err)

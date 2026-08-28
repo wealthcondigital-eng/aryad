@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from "mongoose"
+import { defineModel } from "@/lib/model"
 
 // One row of an imported monthly Excel register (the JAN/FEB/.../JUN sheets the
 // centre has always kept by hand). These are historical bookkeeping rows, kept
@@ -21,7 +22,11 @@ export interface IRegisterEntry extends Document {
   fileName: string
   rowNo: number            // row number in the sheet, for tracing back
   importKey: string        // `${month}::${srNo || "r" + rowNo}`, or `sys::${patientId}::${studyIndex}`
-  srNo: number | null
+  srNo: number | null      // the sheet's own serial — 1, 2, 3… within this month
+  // The patient's system-wide id (1001, 1002…), so a row can be traced back to
+  // the record it mirrors. Null on rows imported from Excel or typed by hand,
+  // which have no patient record behind them.
+  patientSrNo: number | null
   date: Date | null
   name: string
   age: number | null
@@ -40,9 +45,17 @@ export interface IRegisterEntry extends Document {
   // patient except for these — otherwise the next bill or registration edit
   // would silently undo the correction that was just made on the sheet.
   editedFields: string[]
-  // A row taken off the sheet by hand. System rows are kept rather than deleted
-  // outright, because the patient they mirror is still there and the next sync
-  // would simply put the row back.
+  /**
+   * Values for the columns the clinic added to the sheet itself, keyed by the
+   * column's `x_…` key. Free-form because those columns are — the register's
+   * own fields stay named fields above. See RegisterSheet.customColumns.
+   */
+  extra: Record<string, string>
+  // Legacy: system rows used to be flagged here instead of deleted, because the
+  // patient they mirror is still there and the next sync would put the row
+  // back. Deleting a row now removes it and records a RegisterRowRemoval, which
+  // is what stops the sync recreating it. Nothing sets this any more; every
+  // read still filters on it so any old flagged row stays off the sheet.
   hidden: boolean
   importedAt: Date
   importedBy: string
@@ -61,6 +74,7 @@ const RegisterEntrySchema = new Schema<IRegisterEntry>(
     rowNo:         { type: Number, default: 0 },
     importKey:     { type: String, required: true, unique: true },
     srNo:          { type: Number, default: null },
+    patientSrNo:   { type: Number, default: null },
     date:          { type: Date,   default: null },
     name:          { type: String, default: "", trim: true },
     age:           { type: Number, default: null },
@@ -76,6 +90,7 @@ const RegisterEntrySchema = new Schema<IRegisterEntry>(
     balance:       { type: Number, default: 0 },
     entryBy:       { type: String, default: "" },
     editedFields:  { type: [String], default: [] },
+    extra:         { type: Schema.Types.Mixed, default: () => ({}) },
     hidden:        { type: Boolean, default: false, index: true },
     importedAt:    { type: Date,   default: Date.now },
     importedBy:    { type: String, default: "" },
@@ -83,5 +98,4 @@ const RegisterEntrySchema = new Schema<IRegisterEntry>(
   { timestamps: true }
 )
 
-export default mongoose.models.RegisterEntry ||
-  mongoose.model<IRegisterEntry>("RegisterEntry", RegisterEntrySchema)
+export default defineModel<IRegisterEntry>("RegisterEntry", RegisterEntrySchema)

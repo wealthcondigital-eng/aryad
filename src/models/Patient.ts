@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from "mongoose"
+import { defineModel } from "@/lib/model"
 
 export interface IEditHistoryEntry {
   editor: string
@@ -81,7 +82,16 @@ export interface IPatient extends Document {
   discount: number
   paymentMode: string
   billId?: mongoose.Types.ObjectId
+  /**
+   * The date the patient was seen — settable on the registration form, so an
+   * entry typed in days later still files under the day the work was done.
+   * Everything downstream reads this: the register's DATE and which month's
+   * sheet the row sits on, the report date, "today's patients", the dashboard
+   * and analytics. See lib/visit-date.ts.
+   */
   createdAt: Date
+  /** When the record was actually typed. Never backdated — the audit trail. */
+  enteredAt?: Date
   updatedAt: Date
 }
 
@@ -160,8 +170,9 @@ const PatientSchema = new Schema<IPatient>(
     discount:                { type: Number, default: 0 },
     paymentMode:             { type: String, default: "Cash" },
     billId:                  { type: Schema.Types.ObjectId, ref: "Bill", default: null },
+    enteredAt:               { type: Date },
   },
   { timestamps: true }
 )
 
-export default mongoose.models.Patient || mongoose.model<IPatient>("Patient", PatientSchema)
+export default defineModel<IPatient>("Patient", PatientSchema)

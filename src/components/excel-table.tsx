@@ -20,9 +20,15 @@ export interface ExcelColumn<T> {
   align?: "left" | "center" | "right"
   filterable?: boolean          // default true
   total?: boolean               // sum this column in the footer row
+  // Pinned to the left edge, so it stays put while the sheet scrolls sideways.
+  // Only meaningful on the leading column(s).
+  sticky?: boolean
   text: (row: T) => string
   sortValue?: (row: T) => number | string
   render?: (row: T) => React.ReactNode
+  // Replaces the header's label — for a select-all box, say. `visibleKeys` is
+  // the rowKeys currently on screen, in the order they are drawn.
+  renderHeader?: (ctx: { visibleKeys: string[] }) => React.ReactNode
   // ── Inline editing (needs onCellCommit on the table) ──
   editable?: boolean
   inputType?: "text" | "number" | "date"
@@ -204,7 +210,7 @@ function FilterMenu({
 
 export function ExcelTable<T>({
   rows, columns, filters, onFiltersChange, rowKey, emptyMessage = "No rows match the current filters.", maxHeight = "62vh",
-  onCellCommit, isRowLocked, newRow,
+  onCellCommit, isRowLocked, newRow, selectedKeys, selectedColumnKey, onColumnSelect, onRowSelect, onPaste,
 }: {
   rows: T[]
   columns: ExcelColumn<T>[]
@@ -217,6 +223,24 @@ export function ExcelTable<T>({
   onCellCommit?: (row: T, colKey: string, value: string) => void | Promise<void>
   isRowLocked?: (row: T) => boolean
   newRow?: NewRowSpec
+  // rowKeys currently picked out (for toolbar actions that act on rows) —
+  // drawn with a blue tint the way selected sheet rows are
+  selectedKeys?: ReadonlySet<string>
+  // The column picked out the same way, by clicking its header. Supplying
+  // `onColumnSelect` is what turns the headers into pickers; only columns you
+  // can type into can be picked, since a read-only column has nothing a
+  // column-level action could do to it.
+  selectedColumnKey?: string | null
+  onColumnSelect?: (key: string | null) => void
+  // Clicking a read-only cell picks its row out. Supplying this is what turns
+  // those cells into row pickers instead of dead space. `visibleKeys` is the
+  // on-screen row order, so a shift-click range follows what is actually drawn
+  // rather than the caller's own idea of the order.
+  onRowSelect?: (row: T, key: string, mods: { shift: boolean; meta: boolean }, visibleKeys: string[]) => void
+  // Ctrl/Cmd+V over the grid, already split into a grid of cells. `startRowKey`
+  // and `startColKey` are where the paste lands — the cell being edited, or the
+  // first cell of the first selected row.
+  onPaste?: (startRowKey: string | null, startColKey: string | null, cells: string[][]) => void
 }) {
   const [sort, setSort] = useState<SortState>(null)
   const [open, setOpen] = useState<{ key: string; rect: DOMRect } | null>(null)
@@ -256,6 +280,7 @@ export function ExcelTable<T>({
     return i < 0 ? undefined : editableKeys[i + dir]
   }
 
+
   // Cell text matrix — filtering, sorting and the value lists all read from here
   const grid = useMemo(
     () => rows.map((r) => {
@@ -290,6 +315,33 @@ export function ExcelTable<T>({
     return idx
   }, [rows, grid, passes, sort, columns])
 
+  // ── Moving between rows ──────────────────────────────────────────────────
+  // Enter and the up/down arrows carry the editor to the same column on the
+  // next row, the way they do in a spreadsheet. Both walk what is on screen, so
+  // a filtered or sorted sheet moves to the row you can actually see next.
+  const visibleOrder = useMemo(
+    () => visibleRows.map((i) => ({ key: rowKey(rows[i], i), row: rows[i] })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [visibleRows, rows]
+  )
+  const visibleKeys = useMemo(() => visibleOrder.map((r) => r.key), [visibleOrder])
+
+  const rowNeighbour = (key: string, dir: 1 | -1) => {
+    const i = visibleOrder.findIndex((r) => r.key === key)
+    return i < 0 ? undefined : visibleOrder[i + dir]
+  }
+
+  // Commit what is being typed, then open the same column on another row
+  const moveToRow = async (row: T, original: string, colKey: string, dir: 1 | -1) => {
+    if (!edit) return
+    const next = rowNeighbour(edit.rowKey, dir)
+    const col  = columns.find((c) => c.key === colKey)
+    const { value } = edit
+    skipBlur.current = true
+    setEdit(next && col ? { rowKey: next.key, colKey, value: (col.editValue ?? col.text)(next.row) ?? "" } : null)
+    if (value !== original) await onCellCommit?.(row, colKey, value)
+  }
+
   // Excel behaviour: a column's dropdown lists values still reachable under the
   // other columns' filters, not the whole raw set.
   const optionsFor = (key: string) => {
@@ -314,6 +366,48 @@ export function ExcelTable<T>({
 
   const activeKeys = Object.keys(filters)
 
+  // ── Clipboard ────────────────────────────────────────────────────────────
+  // Tab-separated, which is what Excel puts on the clipboard and what it reads
+  // back — so a copy here pastes into a spreadsheet as cells, not as one blob
+  // of text, and a block copied from Excel pastes back in as cells.
+  const copyColumns = columns.filter((c) => !c.sticky)
+
+  const clipboardText = (): string | null => {
+    if (selectedColumnKey) {
+      const col = columns.find((c) => c.key === selectedColumnKey)
+      if (!col) return null
+      return [col.label, ...visibleOrder.map(({ row }) => col.text(row) ?? "")].join("\n")
+    }
+    if (selectedKeys?.size) {
+      const picked = visibleOrder.filter((r) => selectedKeys.has(r.key))
+      if (picked.length === 0) return null
+      return picked.map(({ row }) => copyColumns.map((c) => c.text(row) ?? "").join("\t")).join("\n")
+    }
+    return null
+  }
+
+  const onGridKeyDown = async (e: React.KeyboardEvent) => {
+    if (!(e.ctrlKey || e.metaKey)) return
+    // While a cell is open for typing the browser's own copy/paste is what you
+    // want — it acts on the text in the box, not on the sheet.
+    const typing = !!edit
+    if (e.key === "c" && !typing) {
+      const text = clipboardText()
+      if (!text) return
+      e.preventDefault()
+      try { await navigator.clipboard.writeText(text) } catch {}
+    }
+    if (e.key === "v" && !typing && onPaste) {
+      let text = ""
+      try { text = await navigator.clipboard.readText() } catch { return }
+      if (!text.trim()) return
+      e.preventDefault()
+      const cells = text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n").map((line) => line.split("\t"))
+      const firstPicked = visibleOrder.find((r) => selectedKeys?.has(r.key))
+      onPaste(firstPicked?.key ?? null, selectedColumnKey ?? null, cells)
+    }
+  }
+
   const align = (c: ExcelColumn<T>) =>
     c.align === "right" ? "text-right" : c.align === "center" ? "text-center" : "text-left"
 
@@ -326,6 +420,23 @@ export function ExcelTable<T>({
 
   const listId = (key: string) => `${uid}-dl-${key}`
 
+  // Where each pinned column starts, so two of them sit side by side rather
+  // than on top of each other.
+  const stickyLeft = (ci: number) =>
+    columns.slice(0, ci).reduce((x, c) => x + (c.sticky ? c.width ?? 120 : 0), 0)
+  const stickyCell = (c: ExcelColumn<T>, ci: number) =>
+    c.sticky ? { position: "sticky" as const, left: stickyLeft(ci) } : undefined
+
+  // The footer's row count goes in the first ordinary column — a pinned action
+  // column is too narrow to read it in.
+  const countColumn = Math.max(0, columns.findIndex((c) => !c.sticky))
+
+  // Every real column can be picked, including read-only ones: a column you
+  // can't type into can still be taken off the sheet. The action column at the
+  // edge isn't a column of the sheet, so it opts out with `sticky`.
+  const canPickColumn = (c: ExcelColumn<T>) => !!onColumnSelect && !c.sticky
+  const columnPicked  = (key: string) => !!selectedColumnKey && selectedColumnKey === key
+
   // A stored value the column doesn't list (the system writes "Male" where the
   // sheets write "M") must still be selectable, or opening the dropdown would
   // silently blank it.
@@ -337,7 +448,7 @@ export function ExcelTable<T>({
             
               <tr className="bg-emerald-50/30">
                 {columns.map((c, ci) => (
-                  <td key={c.key} className={`border border-emerald-200 ${CELL_PAD} align-middle ${align(c)}`}>
+                  <td key={c.key} style={stickyCell(c, ci)} className={`border border-emerald-200 ${CELL_PAD} align-middle ${align(c)} ${c.sticky ? "z-10 bg-emerald-50" : ""}`}>
                     {c.editable ? (
                       c.options ? (
                         <select
@@ -414,22 +525,41 @@ export function ExcelTable<T>({
         </p>
       )}
 
-      {/* Grid */}
-      <div className="overflow-auto" style={{ maxHeight }}>
+      {/* Grid. tabIndex makes it a focus target so Ctrl+C / Ctrl+V reach it. */}
+      <div
+        className="overflow-auto focus:outline-none"
+        style={{ maxHeight }}
+        tabIndex={-1}
+        onKeyDown={onGridKeyDown}
+      >
         <table className="w-full border-collapse text-xs" style={{ minWidth: columns.reduce((s, c) => s + (c.width ?? 120), 0) }}>
           <thead>
             <tr>
-              {columns.map((c) => {
+              {columns.map((c, ci) => {
                 const filtered = filters[c.key] !== undefined
                 const sorted   = sort?.key === c.key
                 return (
                   <th
                     key={c.key}
-                    style={{ width: c.width, minWidth: c.width }}
-                    className={`sticky top-0 z-20 bg-slate-100 border border-gray-200 px-2 py-2 font-bold text-[10.5px] uppercase tracking-wide text-gray-600 whitespace-nowrap ${align(c)}`}
+                    style={{ width: c.width, minWidth: c.width, ...(c.sticky ? { left: stickyLeft(ci) } : {}) }}
+                    className={`sticky top-0 ${c.sticky ? "z-30" : "z-20"} ${
+                      columnPicked(c.key) ? "bg-blue-200 text-blue-900" : "bg-slate-100 text-gray-600"
+                    } border ${columnPicked(c.key) ? "border-blue-400" : "border-gray-200"} px-2 py-2 font-bold text-[10.5px] uppercase tracking-wide whitespace-nowrap ${align(c)}`}
                   >
                     <div className="flex items-center gap-1 justify-between">
-                      <span className="truncate">{c.label}</span>
+                      {c.renderHeader ? (
+                        c.renderHeader({ visibleKeys })
+                      ) : canPickColumn(c) ? (
+                        <button
+                          onClick={() => onColumnSelect!(columnPicked(c.key) ? null : c.key)}
+                          title={columnPicked(c.key) ? `Deselect the ${c.label} column` : `Select the whole ${c.label} column`}
+                          className="truncate text-left hover:underline decoration-dotted underline-offset-2"
+                        >
+                          {c.label}
+                        </button>
+                      ) : (
+                        <span className="truncate">{c.label}</span>
+                      )}
                       {c.filterable !== false && (
                         <button
                           onClick={(e) => {
@@ -457,12 +587,16 @@ export function ExcelTable<T>({
             {newRow?.at === "bottom" ? null : newRowTr}
 
             {visibleRows.map((i, n) => {
-              const row    = rows[i]
-              const key    = rowKey(row, i)
-              const locked = isRowLocked?.(row) ?? false
+              const row      = rows[i]
+              const key      = rowKey(row, i)
+              const locked   = isRowLocked?.(row) ?? false
+              const picked   = !!selectedKeys?.has(key)
+              // Pinned cells need the row's own background painted on them —
+              // a transparent one would let the columns it floats over show through.
+              const rowBg    = picked ? "bg-blue-50" : n % 2 ? "bg-slate-50" : "bg-white"
               return (
-                <tr key={key} className={n % 2 ? "bg-slate-50/60" : "bg-white"}>
-                  {columns.map((c) => {
+                <tr key={key} className={rowBg}>
+                  {columns.map((c, ci) => {
                     const canEdit   = !!onCellCommit && !!c.editable && !locked
                     const isEditing = edit?.rowKey === key && edit.colKey === c.key
                     const original  = (c.editValue ?? c.text)(row) ?? ""
@@ -478,17 +612,25 @@ export function ExcelTable<T>({
                           commitEdit(row, original)
                         },
                         onKeyDown: (e: React.KeyboardEvent) => {
-                          if (e.key === "Enter")       { e.preventDefault(); commitEdit(row, original) }
+                          // Enter commits and drops to the row below, arrows walk
+                          // up and down the column, Tab walks across — a sheet's
+                          // keys, so a month can be typed without the mouse.
+                          if (e.key === "Enter")       { e.preventDefault(); moveToRow(row, original, c.key, 1) }
                           else if (e.key === "Escape") { e.preventDefault(); setEdit(null) }
                           else if (e.key === "Tab")    {
                             e.preventDefault()
                             commitEdit(row, original, neighbourKey(c.key, e.shiftKey ? -1 : 1))
                           }
+                          // On a dropdown the arrows belong to the list of options
+                          else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !c.options) {
+                            e.preventDefault()
+                            moveToRow(row, original, c.key, e.key === "ArrowDown" ? 1 : -1)
+                          }
                         },
                         className: inputCls(c),
                       }
                       return (
-                        <td key={c.key} className={`border border-blue-400 ${CELL_PAD} bg-blue-50/40 align-middle`}>
+                        <td key={c.key} style={stickyCell(c, ci)} className={`border border-blue-400 ${CELL_PAD} bg-blue-50 align-middle ${c.sticky ? "z-10" : ""}`}>
                           {c.options
                             ? <select {...common}>
                                 <option value=""></option>
@@ -506,10 +648,26 @@ export function ExcelTable<T>({
                     return (
                       <td
                         key={c.key}
-                        onClick={canEdit ? () => beginEdit(row, key, c) : undefined}
-                        title={canEdit ? "Click to edit" : locked && c.editable ? "Comes from a patient record" : undefined}
+                        style={stickyCell(c, ci)}
+                        // A cell you can't type into still picks its row out —
+                        // clicking SOURCE or PATIENT ID selects the line, the
+                        // way clicking any cell in Excel makes that row current.
+                        onClick={
+                          canEdit ? () => beginEdit(row, key, c)
+                          : c.sticky || !onRowSelect ? undefined
+                          : (e) => onRowSelect(row, key, { shift: e.shiftKey, meta: e.ctrlKey || e.metaKey }, visibleKeys)
+                        }
+                        title={
+                          canEdit ? "Click to edit"
+                          : locked && c.editable ? "Comes from a patient record"
+                          : !c.sticky && onRowSelect ? "Click to select this row"
+                          : undefined
+                        }
                         className={`border border-gray-200 ${CELL_PAD} text-gray-700 align-middle ${align(c)} ${
-                          canEdit ? "cursor-text hover:bg-blue-50/60 hover:ring-1 hover:ring-inset hover:ring-blue-200" : ""
+                          c.sticky ? `z-10 ${rowBg}` : columnPicked(c.key) ? "bg-blue-50" : ""
+                        } ${
+                          canEdit ? "cursor-text hover:bg-blue-50/60 hover:ring-1 hover:ring-inset hover:ring-blue-200"
+                          : !c.sticky && onRowSelect ? "cursor-pointer hover:bg-blue-50/40" : ""
                         }`}
                       >
                         {c.render ? c.render(row) : grid[i][c.key] === BLANK_LABEL ? <span className="text-gray-300">—</span> : grid[i][c.key]}
@@ -535,8 +693,12 @@ export function ExcelTable<T>({
             <tfoot>
               <tr>
                 {columns.map((c, ci) => (
-                  <td key={c.key} className={`sticky bottom-0 z-10 bg-slate-100 border border-gray-200 px-2 py-1.5 font-bold text-gray-700 ${align(c)}`}>
-                    {ci === 0 ? `${visibleRows.length} rows` : c.total ? `₹${totals[c.key].toLocaleString("en-IN")}` : ""}
+                  <td
+                    key={c.key}
+                    style={c.sticky ? { left: stickyLeft(ci) } : undefined}
+                    className={`sticky bottom-0 ${c.sticky ? "z-20" : "z-10"} bg-slate-100 border border-gray-200 px-2 py-1.5 font-bold text-gray-700 ${align(c)}`}
+                  >
+                    {ci === countColumn ? `${visibleRows.length} rows` : c.total ? `₹${totals[c.key].toLocaleString("en-IN")}` : ""}
                   </td>
                 ))}
               </tr>

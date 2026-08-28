@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from "mongoose"
+import { defineModel } from "@/lib/model"
 
 export interface INotification extends Document {
   recipientRole: "doctor" | "receptionist" | "admin"
@@ -27,5 +28,4 @@ const NotificationSchema = new Schema<INotification>(
   { timestamps: true }
 )
 
-export default mongoose.models.Notification ||
-  mongoose.model<INotification>("Notification", NotificationSchema)
+export default defineModel<INotification>("Notification", NotificationSchema)

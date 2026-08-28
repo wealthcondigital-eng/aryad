@@ -26,7 +26,9 @@ import { useRole } from "@/lib/role-context"
 import { ReportViewModal } from "@/components/report-view-modal"
 import { motion } from "motion/react"
 import { BillDocViewer } from "@/components/bill-doc-viewer"
-import { ComboInput, StudyComboInput, INITIAL_DOCTORS, getSavedDoctors, saveDoctor } from "@/components/combo-input"
+import { ComboInput, StudyComboInput, CategorySelect, useCategories, INITIAL_DOCTORS, getSavedDoctors, saveDoctor } from "@/components/combo-input"
+import { canonicalCategory } from "@/lib/study-catalogue"
+import { toDateInput } from "@/lib/visit-date"
 import { shareReportOnWhatsApp } from "@/lib/share-whatsapp"
 
 interface RegistrationEditEntry {
@@ -289,9 +291,11 @@ function EditPatientModal({
   const [contact,      setContact]    = useState(patient.contact)
   const [address,      setAddress]    = useState(patient.address || "")
   const [referredBy,   setReferredBy] = useState(patient.referredBy || "")
-  const [studyRows,    setStudyRows]  = useState<{ id: number; name: string }[]>(() =>
-    studiesOf(patient).map((s, i) => ({ id: i + 1, name: s.name }))
+  const [visitDate,    setVisitDate]  = useState(() => toDateInput(patient.createdAt))
+  const [studyRows,    setStudyRows]  = useState<{ id: number; name: string; category: string }[]>(() =>
+    studiesOf(patient).map((s, i) => ({ id: i + 1, name: s.name, category: canonicalCategory(s.category) }))
   )
+  const [categories, addCategory] = useCategories()
   const [loading,      setLoading]    = useState(false)
   const [error,        setError]      = useState("")
   const [savedDoctors, setSavedDoctors] = useState<string[]>(() =>
@@ -303,9 +307,16 @@ function EditPatientModal({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const validStudyRows = studyRows.map((r) => r.name.trim()).filter(Boolean)
+  const validStudies    = studyRows
+    .map((r) => ({ name: r.name.trim(), category: canonicalCategory(r.category) }))
+    .filter((r) => r.name)
+  const validStudyRows  = validStudies.map((r) => r.name)
   const originalStudies = studiesOf(patient).map((s) => s.name).join(", ")
-  const studiesChanged  = validStudyRows.join(", ") !== originalStudies
+  // Re-filing a study under another category is a change to the study list
+  // too — it is what moves the study in the monthly register.
+  const studiesChanged  =
+    validStudyRows.join(", ") !== originalStudies ||
+    validStudies.map((r) => r.category).join("|") !== studiesOf(patient).map((s) => canonicalCategory(s.category)).join("|")
 
   // Detect which fields changed
   const changedFields = [
@@ -315,6 +326,7 @@ function EditPatientModal({
     contact.trim()    !== patient.contact.trim()           && "contact",
     address.trim()    !== (patient.address || "").trim()   && "address",
     referredBy.trim() !== (patient.referredBy || "").trim() && "referredBy",
+    !!visitDate && visitDate !== toDateInput(patient.createdAt) && "visitDate",
     studiesChanged                                          && "study",
   ].filter(Boolean) as string[]
 
@@ -328,7 +340,10 @@ function EditPatientModal({
 
     const previousValues: Record<string, unknown> = {}
     changedFields.forEach((f) => {
-      previousValues[f] = f === "study" ? originalStudies : patient[f as keyof PatientDoc]
+      previousValues[f] =
+        f === "study"     ? originalStudies :
+        f === "visitDate" ? toDateInput(patient.createdAt) :
+        patient[f as keyof PatientDoc]
     })
 
     const updateFields: Record<string, unknown> = {}
@@ -338,7 +353,8 @@ function EditPatientModal({
     if (changedFields.includes("contact"))    updateFields.contact    = contact.trim()
     if (changedFields.includes("address"))    updateFields.address    = address.trim()
     if (changedFields.includes("referredBy")) updateFields.referredBy = referredBy.trim() || "Self"
-    if (changedFields.includes("study"))      updateFields.studies    = validStudyRows.map((n) => ({ name: n }))
+    if (changedFields.includes("visitDate")) updateFields.visitDate = visitDate
+    if (changedFields.includes("study"))      updateFields.studies    = validStudies
 
     const registrationEditHistoryEntry = {
       editor:         editorName,
@@ -458,11 +474,26 @@ function EditPatientModal({
             </div>
 
             <div className="space-y-1.5">
+              <Label>Date of Visit</Label>
+              <Input
+                type="date"
+                value={visitDate}
+                onChange={(e) => setVisitDate(e.target.value)}
+                className={changedFields.includes("visitDate") ? "border-blue-400 ring-1 ring-blue-200" : ""}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                {changedFields.includes("visitDate")
+                  ? "The report date moves with this, and the register row moves to that date's month sheet."
+                  : "The day this patient was seen — correct it here if the entry was typed in on a different day."}
+              </p>
+            </div>
+
+            <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <Label>Studies / Tests <span className="text-red-500">*</span></Label>
                 <button
                   type="button"
-                  onClick={() => setStudyRows((prev) => [...prev, { id: Date.now(), name: "" }])}
+                  onClick={() => setStudyRows((prev) => [...prev, { id: Date.now(), name: "", category: "" }])}
                   className="text-xs font-medium text-blue-600 hover:text-blue-800 transition-colors"
                 >
                   + Add study
@@ -470,17 +501,30 @@ function EditPatientModal({
               </div>
               <div className={`space-y-2 ${changedFields.includes("study") ? "rounded-md ring-1 ring-blue-200 border border-blue-400 p-2" : ""}`}>
                 {studyRows.map((row) => (
-                  <div key={row.id} className="flex items-center gap-2">
-                    <div className="flex-1">
+                  <div key={row.id} className="flex items-start gap-2">
+                    <div className="flex-1 space-y-1.5">
                       <StudyComboInput
                         value={row.name}
                         onChange={(v) => setStudyRows((prev) => prev.map((r) => r.id === row.id ? { ...r, name: v } : r))}
-                        onSelect={(n) => setStudyRows((prev) => prev.map((r) => r.id === row.id ? { ...r, name: n } : r))}
+                        onSelect={(n, _p, cat) => setStudyRows((prev) => prev.map((r) => r.id === row.id ? { ...r, name: n, category: cat || r.category } : r))}
                       />
+                      {row.name.trim() && (
+                        <div className="flex items-center gap-2">
+                          <span className="text-[11px] text-muted-foreground shrink-0">Category</span>
+                          <CategorySelect
+                            value={row.category}
+                            onChange={(c) => setStudyRows((prev) => prev.map((r) => r.id === row.id ? { ...r, category: c } : r))}
+                            categories={categories}
+                            onCategoryAdded={addCategory}
+                            placeholder="Uncategorised"
+                            className="h-8 text-xs flex-1"
+                          />
+                        </div>
+                      )}
                     </div>
                     <button
                       type="button"
-                      className="p-1.5 rounded text-muted-foreground hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-30"
+                      className="p-1.5 mt-2 rounded text-muted-foreground hover:text-red-500 hover:bg-red-50 transition-colors disabled:opacity-30"
                       onClick={() => setStudyRows((prev) => prev.length === 1 ? prev : prev.filter((r) => r.id !== row.id))}
                       disabled={studyRows.length === 1}
                     >
@@ -489,7 +533,8 @@ function EditPatientModal({
                   </div>
                 ))}
                 <p className="text-[11px] text-muted-foreground">
-                  Removing a study deletes its report and removes it from billing. Each study keeps its own separate report.
+                  Removing a study deletes its report and removes it from billing. Each study keeps its own separate
+                  report. Changing a category re-files that study in the monthly register.
                 </p>
               </div>
             </div>
@@ -1000,7 +1045,9 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
   const [historyPatient, setHistoryPatient] = useState<PatientDoc | null>(null)
   const [addingStudyFor, setAddingStudyFor] = useState<PatientDoc | null>(null)
   const [newStudyName,   setNewStudyName]   = useState("")
+  const [newStudyCat,    setNewStudyCat]    = useState("")
   const [addStudySaving, setAddStudySaving] = useState(false)
+  const [categories, addCategory] = useCategories()
   const [search,         setSearch]        = useState("")
   const [monthFilter,    setMonthFilter]   = useState("All Months")
   // Patient ids whose linked study rows are collapsed (default: expanded)
@@ -1020,13 +1067,13 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
       const res = await fetch(`/api/patients/${addingStudyFor._id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ addStudy: { name: newStudyName.trim() } }),
+        body: JSON.stringify({ addStudy: { name: newStudyName.trim(), category: newStudyCat } }),
       })
       if (res.ok) {
         const { patient: updated } = await res.json()
         setPatients((prev) => prev.map((p) => p._id === updated._id ? { ...p, ...updated } : p))
         setAddingStudyFor(null)
-        setNewStudyName("")
+        setNewStudyName(""); setNewStudyCat("")
       }
     } finally {
       setAddStudySaving(false)
@@ -1105,10 +1152,24 @@ function AllPatientsView({ canCreate, canEdit }: { canCreate: boolean; canEdit: 
               <StudyComboInput
                 value={newStudyName}
                 onChange={setNewStudyName}
-                onSelect={setNewStudyName}
+                onSelect={(n, _p, cat) => { setNewStudyName(n); if (cat) setNewStudyCat(cat) }}
               />
+              {newStudyName.trim() && (
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-muted-foreground shrink-0">Category</span>
+                  <CategorySelect
+                    value={newStudyCat}
+                    onChange={setNewStudyCat}
+                    categories={categories}
+                    onCategoryAdded={addCategory}
+                    placeholder="Uncategorised"
+                    className="h-8 text-xs flex-1"
+                  />
+                </div>
+              )}
               <p className="text-[11px] text-muted-foreground">
                 The new study is added alongside the existing one{studiesOf(addingStudyFor).length > 1 ? "s" : ""} and gets its own separate report.
+                Its category decides the department it lands under in the monthly register.
               </p>
             </div>
             <div className="flex items-center justify-end gap-2 px-5 py-4 border-t">

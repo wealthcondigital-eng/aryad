@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from "mongoose"
+import { defineModel } from "@/lib/model"
 
 export interface IReport extends Document {
   patientId: mongoose.Types.ObjectId
@@ -37,4 +38,4 @@ const ReportSchema = new Schema<IReport>(
   { timestamps: true }
 )
 
-export default mongoose.models.Report || mongoose.model<IReport>("Report", ReportSchema)
+export default defineModel<IReport>("Report", ReportSchema)

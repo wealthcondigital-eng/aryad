@@ -3,6 +3,10 @@ import mongoose from "mongoose"
 import { connectDB } from "@/lib/db"
 import Template from "@/models/Template"
 import HiddenTemplate from "@/models/HiddenTemplate"
+import Study from "@/models/Study"
+import Patient from "@/models/Patient"
+import RegisterEntry from "@/models/RegisterEntry"
+import { canonicalCategory } from "@/lib/study-catalogue"
 import { REPORT_TEMPLATES, TemplateCategory } from "@/lib/report-templates"
 
 /** The bundled built-in with this slug id, plus the category it lives in. */
@@ -80,7 +84,30 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 
     const template = await Template.findByIdAndUpdate(id, update, { new: true })
     if (!template) return NextResponse.json({ error: "Not found" }, { status: 404 })
-    return NextResponse.json({ template })
+
+    // Studies are filed under the same categories templates are, and a study
+    // is normally the template of the same name. Moving the template is
+    // therefore also the answer to "this study is in the wrong department" —
+    // the study, the patients carrying it and their register rows all follow.
+    // Rows whose DEPARTMENT was typed over by hand keep what was typed.
+    let movedRows = 0
+    if (update.category !== undefined) {
+      const category = canonicalCategory(update.category)
+      const nameRe = new RegExp(`^${template.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i")
+      await Study.updateMany({ name: nameRe }, { $set: { category } })
+      await Patient.updateMany(
+        { "studies.name": nameRe },
+        { $set: { "studies.$[s].category": category } },
+        { arrayFilters: [{ "s.name": nameRe }] }
+      )
+      const res = await RegisterEntry.updateMany(
+        { investigation: nameRe, sourceType: "system", editedFields: { $ne: "department" } },
+        { $set: { department: category } }
+      )
+      movedRows = res.modifiedCount ?? 0
+    }
+
+    return NextResponse.json({ template, movedRows })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: "Server error" }, { status: 500 })

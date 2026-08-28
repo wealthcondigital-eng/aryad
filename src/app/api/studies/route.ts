@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server"
 import { connectDB } from "@/lib/db"
 import Study from "@/models/Study"
 import Patient from "@/models/Patient"
-import { STUDY_CATEGORIES, autoCategory } from "@/lib/study-catalogue"
+import { canonicalCategory } from "@/lib/study-catalogue"
+import { resolveStudyCategory } from "@/lib/study-category"
 
 export async function GET() {
   try {
@@ -41,9 +42,10 @@ export async function POST(req: NextRequest) {
     const name = String(body.name ?? "").trim()
     if (!name) return NextResponse.json({ error: "Study name is required" }, { status: 400 })
 
-    const category = (STUDY_CATEGORIES as readonly string[]).includes(body.category)
-      ? body.category
-      : autoCategory(name)
+    // Categories are whatever the clinic has created — the five bundled ones
+    // are only a starting list, not a closed set. An unfiled study is saved
+    // uncategorised rather than guessed into the wrong department.
+    const category = canonicalCategory(body.category) || await resolveStudyCategory(name)
 
     const price = Math.max(0, Number(body.price) || 0)
 

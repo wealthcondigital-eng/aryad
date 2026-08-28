@@ -1,4 +1,5 @@
-import mongoose, { Schema, Document } from "mongoose"
+import { Schema, Document } from "mongoose"
+import { defineModel } from "@/lib/model"
 
 // The consultant radiologists who sign off on reports (not to be confused
 // with the "Doctors" directory, which tracks referring physicians). There are
@@ -22,4 +23,4 @@ const SignatorySchema = new Schema<ISignatory>(
   { timestamps: true }
 )
 
-export default mongoose.models.Signatory || mongoose.model<ISignatory>("Signatory", SignatorySchema)
+export default defineModel<ISignatory>("Signatory", SignatorySchema)

@@ -1,4 +1,5 @@
-import mongoose, { Schema, Document } from "mongoose"
+import { Schema, Document } from "mongoose"
+import { defineModel } from "@/lib/model"
 
 // A built-in template the clinic has removed.
 //
@@ -23,5 +24,4 @@ const HiddenTemplateSchema = new Schema<IHiddenTemplate>(
   { timestamps: true }
 )
 
-export default mongoose.models.HiddenTemplate ||
-  mongoose.model<IHiddenTemplate>("HiddenTemplate", HiddenTemplateSchema)
+export default defineModel<IHiddenTemplate>("HiddenTemplate", HiddenTemplateSchema)

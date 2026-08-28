@@ -1,4 +1,5 @@
-import mongoose, { Schema, Document } from "mongoose"
+import { Schema, Document } from "mongoose"
+import { defineModel } from "@/lib/model"
 
 // Word's AutoText / Quick Parts: a stock sentence a doctor drops into a report
 // instead of retyping it. Distinct from a Template, which is a WHOLE report body
@@ -22,4 +23,4 @@ const PhraseSchema = new Schema<IPhrase>(
   { timestamps: true }
 )
 
-export default mongoose.models.Phrase || mongoose.model<IPhrase>("Phrase", PhraseSchema)
+export default defineModel<IPhrase>("Phrase", PhraseSchema)

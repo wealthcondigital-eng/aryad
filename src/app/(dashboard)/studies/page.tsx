@@ -14,8 +14,8 @@ import {
 import { useRole } from "@/lib/role-context"
 import { useConfirm } from "@/components/confirm-dialog"
 import { motion } from "motion/react"
-import { STUDY_CATEGORIES, autoCategory } from "@/lib/study-catalogue"
-import { categoryColor } from "@/components/combo-input"
+import { UNCATEGORISED_LABEL, canonicalCategory } from "@/lib/study-catalogue"
+import { categoryColor, CategorySelect, useCategories } from "@/components/combo-input"
 
 interface StudyDoc {
   _id: string
@@ -43,6 +43,7 @@ export default function StudiesPage() {
   const [loading,    setLoading]    = useState(true)
   const [search,     setSearch]     = useState("")
   const [catFilter,  setCatFilter]  = useState("All Categories")
+  const [categories, addCategory]   = useCategories()
 
   // Add-study dialog state
   const [addOpen,    setAddOpen]    = useState(false)
@@ -65,6 +66,7 @@ export default function StudiesPage() {
   const [editingCatId, setEditingCatId] = useState<string | null>(null)
   const [editCat,      setEditCat]      = useState("")
   const [savingCatId,  setSavingCatId]  = useState<string | null>(null)
+  const [catMoved,     setCatMoved]     = useState("")
 
   useEffect(() => {
     fetch("/api/studies")
@@ -126,7 +128,7 @@ export default function StudiesPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
-          category: newCat || autoCategory(name),
+          category: newCat,
           price: Number(newPrice) || 0,
         }),
       })
@@ -171,35 +173,47 @@ export default function StudiesPage() {
   const cancelEditCat = () => { setEditingCatId(null); setEditCat("") }
 
   const saveCategory = async (s: StudyDoc) => {
-    if (!editCat || editCat === s.category) { cancelEditCat(); return }
+    const category = canonicalCategory(editCat)
+    if (!category || category === s.category) { cancelEditCat(); return }
     setSavingCatId(s._id)
     try {
       const res = await fetch(`/api/studies/${s._id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ category: editCat }),
+        body: JSON.stringify({ category }),
       })
+      const data = await res.json().catch(() => ({}))
       if (res.ok) {
-        setStudies((prev) => prev.map((st) => st._id === s._id ? { ...st, category: editCat } : st))
-        setStats((prev) => prev ? { ...prev, categories: new Set(studies.map((st) => st._id === s._id ? editCat : st.category)).size } : prev)
+        setStudies((prev) => prev.map((st) => st._id === s._id ? { ...st, category } : st))
+        setStats((prev) => prev ? { ...prev, categories: new Set(studies.map((st) => st._id === s._id ? category : st.category)).size } : prev)
+        addCategory(category)
+        // Re-filing is retrospective — say how much of the register moved with it.
+        setCatMoved(data.movedRows > 0
+          ? `${s.name} moved to ${category} — ${data.movedRows} register row${data.movedRows === 1 ? "" : "s"} re-filed.`
+          : `${s.name} moved to ${category}.`)
       }
     } finally {
       setSavingCatId(null); setEditingCatId(null); setEditCat("")
     }
   }
 
-  const filterCategories = ["All Categories", ...Array.from(new Set(studies.map((s) => s.category))).sort()]
+  // A study nobody has filed yet groups under "Uncategorised" rather than
+  // disappearing into a blank heading.
+  const catOf = (s: StudyDoc) => canonicalCategory(s.category) || UNCATEGORISED_LABEL
+
+  const filterCategories = ["All Categories", ...Array.from(new Set(studies.map(catOf))).sort()]
 
   const filtered = studies.filter((s) => {
     const matchSearch = !search || s.name.toLowerCase().includes(search.toLowerCase())
-    const matchCat    = catFilter === "All Categories" || s.category === catFilter
+    const matchCat    = catFilter === "All Categories" || catOf(s) === catFilter
     return matchSearch && matchCat
   })
 
   const grouped: Record<string, StudyDoc[]> = {}
   for (const s of filtered) {
-    if (!grouped[s.category]) grouped[s.category] = []
-    grouped[s.category].push(s)
+    const cat = catOf(s)
+    if (!grouped[cat]) grouped[cat] = []
+    grouped[cat].push(s)
   }
 
   return (
@@ -208,13 +222,23 @@ export default function StudiesPage() {
         <div>
           <h1 className="text-2xl font-bold">Studies &amp; Tests</h1>
           <p className="text-muted-foreground text-sm mt-0.5">
-            X-Ray, Sonography &amp; Pathology studies added by the staff
+            Studies added by the staff, filed under the categories the clinic has created.
+            Re-filing one here also moves it in the monthly register.
           </p>
         </div>
         <Button onClick={() => setAddOpen(true)} className="bg-blue-600 hover:bg-blue-700 gap-1.5">
           <Plus className="h-4 w-4" />Add Study
         </Button>
       </div>
+
+      {catMoved && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-green-200 bg-green-50 px-3 py-2">
+          <p className="text-sm text-green-700">{catMoved}</p>
+          <button onClick={() => setCatMoved("")} className="text-green-600 hover:text-green-800">
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Add Study dialog */}
       <Dialog open={addOpen} onOpenChange={(o) => { if (!o) { setAddOpen(false); setAddError("") } }}>
@@ -228,10 +252,7 @@ export default function StudiesPage() {
               <Input
                 value={newName}
                 autoFocus
-                onChange={(e) => {
-                  setNewName(e.target.value)
-                  if (!newCat && e.target.value.trim()) setNewCat(autoCategory(e.target.value.trim()))
-                }}
+                onChange={(e) => setNewName(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") void handleAddStudy() }}
                 placeholder="e.g. X-Ray Chest PA"
               />
@@ -239,12 +260,13 @@ export default function StudiesPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label>Category <span className="text-red-500">*</span></Label>
-                <Select value={newCat} onValueChange={setNewCat}>
-                  <SelectTrigger><SelectValue placeholder="Select" /></SelectTrigger>
-                  <SelectContent>
-                    {STUDY_CATEGORIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
-                  </SelectContent>
-                </Select>
+                <CategorySelect
+                  value={newCat}
+                  onChange={setNewCat}
+                  categories={categories}
+                  onCategoryAdded={addCategory}
+                  placeholder="Select"
+                />
               </div>
               <div className="space-y-1.5">
                 <Label>Price (₹)</Label>
@@ -370,12 +392,13 @@ export default function StudiesPage() {
                             {/* Category — editable for admin/doctor */}
                             {editingCatId === s._id ? (
                               <div className="flex items-center gap-1">
-                                <Select value={editCat} onValueChange={setEditCat}>
-                                  <SelectTrigger className="h-6 text-[11px] px-2 w-32"><SelectValue /></SelectTrigger>
-                                  <SelectContent>
-                                    {STUDY_CATEGORIES.map((c) => <SelectItem key={c} value={c} className="text-xs">{c}</SelectItem>)}
-                                  </SelectContent>
-                                </Select>
+                                <CategorySelect
+                                  value={editCat}
+                                  onChange={setEditCat}
+                                  categories={categories}
+                                  onCategoryAdded={addCategory}
+                                  className="h-6 text-[11px] px-2 w-40"
+                                />
                                 <button
                                   onClick={() => saveCategory(s)}
                                   disabled={!!savingCatId}
@@ -390,7 +413,7 @@ export default function StudiesPage() {
                             ) : (
                               <div className="flex items-center gap-1">
                                 <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${categoryColor(s.category)}`}>
-                                  {s.category}
+                                  {s.category || UNCATEGORISED_LABEL}
                                 </span>
                                 {canEditCategory && (
                                   <button

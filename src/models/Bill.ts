@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from "mongoose"
+import { defineModel } from "@/lib/model"
 
 export interface IBillItem {
   study: string
@@ -81,4 +82,4 @@ const BillSchema = new Schema<IBill>(
   { timestamps: true }
 )
 
-export default mongoose.models.Bill || mongoose.model<IBill>("Bill", BillSchema)
+export default defineModel<IBill>("Bill", BillSchema)

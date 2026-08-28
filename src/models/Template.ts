@@ -1,4 +1,5 @@
-import mongoose, { Schema, Document } from "mongoose"
+import { Schema, Document } from "mongoose"
+import { defineModel } from "@/lib/model"
 
 // A clinic-added report template — created either by typing one up directly
 // or by importing a .docx file (converted to HTML on the server via mammoth).
@@ -29,4 +30,4 @@ const TemplateSchema = new Schema<ITemplate>(
   { timestamps: true }
 )
 
-export default mongoose.models.Template || mongoose.model<ITemplate>("Template", TemplateSchema)
+export default defineModel<ITemplate>("Template", TemplateSchema)

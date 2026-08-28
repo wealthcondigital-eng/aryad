@@ -3,22 +3,30 @@ import { connectDB } from "@/lib/db"
 import Patient from "@/models/Patient"
 import Study from "@/models/Study"
 import Notification from "@/models/Notification"
-import { autoCategory } from "@/lib/study-catalogue"
+import { canonicalCategory } from "@/lib/study-catalogue"
+import { resolveStudyCategories } from "@/lib/study-category"
 import { syncPatientToRegister } from "@/lib/register-sync"
+import { visitDateToTimestamp } from "@/lib/visit-date"
 
 type StudyInput = { name: string; category?: string }
 
-// Add typed-in studies to the Study catalogue if they aren't known yet
+// Add typed-in studies to the Study catalogue if they aren't known yet.
+// A category chosen during registration is also written back onto an existing
+// catalogue entry: the registration form is one of the places the clinic is
+// meant to be able to file a study, so the next booking has to offer the
+// category that was just picked rather than the one it is replacing.
 async function upsertCatalogue(studies: StudyInput[]) {
   for (const s of studies) {
-    const name = String(s.name ?? "").trim()
+    const name     = String(s.name ?? "").trim()
+    const category = canonicalCategory(s.category)
     if (!name) continue
     await Study.findOneAndUpdate(
       { name },
       {
+        ...(category ? { $set: { category } } : {}),
         $setOnInsert: {
           name,
-          category:      s.category || autoCategory(name),
+          ...(category ? {} : { category: "" }),
           price:         0,
           fromCatalogue: false,
           firstSeenAt:   new Date(),
@@ -29,6 +37,19 @@ async function upsertCatalogue(studies: StudyInput[]) {
   }
 }
 
+// Fill in the category of any study the caller didn't file itself, from the
+// catalogue or from the report template of the same name. Never guessed from
+// the study's name — an uncategorised study stays uncategorised.
+async function withResolvedCategories(studies: StudyInput[]): Promise<{ name: string; category: string }[]> {
+  const cleaned = studies
+    .map((s) => ({ name: String(s.name ?? "").trim(), category: canonicalCategory(s.category) }))
+    .filter((s) => s.name)
+  const missing = cleaned.filter((s) => !s.category).map((s) => s.name)
+  if (missing.length === 0) return cleaned
+  const known = await resolveStudyCategories(missing)
+  return cleaned.map((s) => (s.category ? s : { ...s, category: known.get(s.name.toLowerCase()) ?? "" }))
+}
+
 // Ensure every patient object returned to the UI has a materialized
 // `studies` array (older records only have the single legacy `study` field).
 function normalizeStudies(p: Record<string, unknown>) {
@@ -37,7 +58,7 @@ function normalizeStudies(p: Record<string, unknown>) {
     p.studies = p.study
       ? [{
           name:         p.study,
-          category:     autoCategory(String(p.study)),
+          category:     "",
           reportStatus: p.reportStatus ?? "pending",
           reportBody:   p.reportBody ?? "",
           reportSlug:   p.reportSlug ?? "",
@@ -112,9 +133,7 @@ export async function POST(req: NextRequest) {
       ? [{ name: body.study, category: body.studyCategory }]
       : []
 
-    const studyEntries = rawStudies
-      .map((s) => ({ name: String(s.name ?? "").trim(), category: s.category || autoCategory(String(s.name ?? "")) }))
-      .filter((s) => s.name)
+    const studyEntries = await withResolvedCategories(rawStudies)
 
     if (studyEntries.length === 0) {
       return NextResponse.json({ error: "At least one study is required" }, { status: 400 })
@@ -126,10 +145,18 @@ export async function POST(req: NextRequest) {
     const last = await Patient.findOne().sort({ srNo: -1 })
     const srNo = last ? last.srNo + 1 : 1001
 
-    const { studies: _studies, studyCategory: _sc, ...rest } = body
+    const { studies: _studies, studyCategory: _sc, visitDate: _vd, createdAt: _ca, ...rest } = body
+
+    // The date the patient was seen, which the form may have backdated. Mongoose
+    // honours an explicit createdAt on create, so nothing else has to change:
+    // the register, the report date and every "patients on this day" view all
+    // read createdAt already. `enteredAt` keeps when it was really typed.
+    const seenOn = visitDateToTimestamp(body.visitDate)
 
     const patient = await Patient.create({
       ...rest,
+      ...(seenOn ? { createdAt: seenOn } : {}),
+      enteredAt: new Date(),
       srNo,
       study:   studyEntries[0].name,               // legacy mirror
       studies: studyEntries.map((s) => ({

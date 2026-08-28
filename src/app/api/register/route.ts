@@ -3,7 +3,8 @@ import { connectDB } from "@/lib/db"
 import RegisterEntry from "@/models/RegisterEntry"
 import RegisterSheet from "@/models/RegisterSheet"
 import Patient from "@/models/Patient"
-import { syncPatientToRegister } from "@/lib/register-sync"
+import RegisterRowRemoval from "@/models/RegisterRowRemoval"
+import { syncPatientToRegister, nextRegisterSerial, removalKey, registerMonthLabel } from "@/lib/register-sync"
 
 // "Jun 2026" → sortable timestamp, so the month list reads newest-first
 function monthStamp(month: string) {
@@ -28,11 +29,22 @@ async function backfillSystemRows(month: string) {
   const existing = await RegisterEntry.find({ month, importKey: { $regex: "^sys::" } }).select("importKey").lean<{ importKey: string }[]>()
   const have = new Set(existing.map((e) => e.importKey))
 
+  // Rows deleted off the sheet by hand are not "missing" — they were removed on
+  // purpose, and topping the month up must not be what brings them back.
+  const removals = await RegisterRowRemoval.find({ patientId: { $in: patients.map((p) => p._id) } })
+    .select("patientId studyIndex studyName")
+    .lean<{ patientId: unknown; studyIndex: number; studyName: string }[]>()
+  const removed = new Set(removals.map((r) => `${String(r.patientId)}::${removalKey(r.studyIndex, r.studyName)}`))
+
   for (const p of patients) {
-    const studies = (p.studies as unknown[] | undefined) ?? []
+    const studies = (p.studies as { name?: string }[] | undefined) ?? []
     const count   = studies.length || (p.study ? 1 : 0)
     let missing = false
-    for (let i = 0; i < count; i++) if (!have.has(`sys::${String(p._id)}::${i}`)) { missing = true; break }
+    for (let i = 0; i < count; i++) {
+      const name = studies[i]?.name ?? (p.study as string | undefined) ?? ""
+      if (removed.has(`${String(p._id)}::${removalKey(i, name)}`)) continue
+      if (!have.has(`sys::${String(p._id)}::${i}`)) { missing = true; break }
+    }
     if (missing) await syncPatientToRegister(p as unknown as Parameters<typeof syncPatientToRegister>[0])
   }
 }
@@ -115,7 +127,10 @@ export async function GET(req: NextRequest) {
     ])
 
     // Sheets started but not yet filled in belong on the list too
-    const started = await RegisterSheet.find().select("month").lean<{ month: string }[]>()
+    const started = await RegisterSheet.find().select("month hiddenColumns customColumns")
+      .lean<{ month: string; hiddenColumns?: string[]; customColumns?: { key: string; label: string; after: string }[] }[]>()
+    const hiddenByMonth = Object.fromEntries(started.map((s) => [s.month, s.hiddenColumns ?? []]))
+    const customByMonth = Object.fromEntries(started.map((s) => [s.month, s.customColumns ?? []]))
     const withRows = new Set(grouped.map((g) => g._id as string))
     const empties = started
       .filter((s) => !withRows.has(s.month))
@@ -154,6 +169,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       months,
       entries,
+      // Columns taken off the sheet being looked at, so the grid can leave them
+      // out and the "Columns" menu can offer them back.
+      hiddenColumns: month && month !== "all" ? hiddenByMonth[month] ?? [] : [],
+      customColumns: month && month !== "all" ? customByMonth[month] ?? [] : [],
       ...(wantFacets ? { facets: await suggestionFacets() } : {}),
     })
   } catch (err) {
@@ -172,20 +191,24 @@ export async function POST(req: NextRequest) {
   try {
     await connectDB()
     const body = await req.json()
-    const month = str(body.month)
-    if (!month) return NextResponse.json({ error: "month is required" }, { status: 400 })
+    const sheetMonth = str(body.month)
+    if (!sheetMonth) return NextResponse.json({ error: "month is required" }, { status: 400 })
     if (!str(body.name)) return NextResponse.json({ error: "Patient name is required" }, { status: 400 })
-
-    let srNo = body.srNo == null || str(body.srNo) === "" ? null : num(body.srNo)
-    if (srNo == null) {
-      const top = await RegisterEntry.findOne({ month }).sort({ srNo: -1 }).select("srNo").lean<{ srNo?: number }>()
-      srNo = (top?.srNo ?? 0) + 1
-    }
 
     const charges  = num(body.charges)
     const discount = num(body.discount)
     const paid     = num(body.paid)
-    const date     = body.date ? new Date(body.date) : new Date(`1 ${month}`)
+    const date     = body.date ? new Date(body.date) : new Date(`1 ${sheetMonth}`)
+
+    // A row filed under a date in another month belongs on that month's sheet,
+    // not on the one that happened to be open — that is the whole point of
+    // typing a past date on a visit that was missed at the time. The response
+    // says where it went, so the page can follow it there.
+    const month = isNaN(date.getTime()) ? sheetMonth : registerMonthLabel(date)
+
+    const srNo = body.srNo == null || str(body.srNo) === ""
+      ? await nextRegisterSerial(month)
+      : num(body.srNo)
 
     const entry = await RegisterEntry.create({
       month,
@@ -214,7 +237,76 @@ export async function POST(req: NextRequest) {
     // Typing into a month is also how a sheet gets started
     await RegisterSheet.updateOne({ month }, { $setOnInsert: { month, createdBy: str(body.entryBy) } }, { upsert: true })
 
-    return NextResponse.json({ entry }, { status: 201 })
+    return NextResponse.json({ entry, month, movedSheet: month !== sheetMonth }, { status: 201 })
+  } catch (err) {
+    console.error(err)
+    return NextResponse.json({ error: "Server error" }, { status: 500 })
+  }
+}
+
+// What "empty" means for each column, and which columns can be emptied at all.
+// The register's columns are the Excel sheet's own and are fixed, so clearing a
+// column empties it down the month rather than removing it — the same thing
+// selecting a column in a spreadsheet and pressing Delete does.
+const COLUMN_BLANK: Record<string, string | number | null> = {
+  srNo: null, date: null, name: "", age: null, gender: "", contact: "",
+  department: "", investigation: "", referredBy: "", paymentType: "",
+  charges: 0, discount: 0, paid: 0, balance: 0, entryBy: "",
+}
+// Emptying any of these leaves the row's balance wrong until it is recomputed
+const MONEY_COLUMNS = new Set(["charges", "discount", "paid"])
+
+// PATCH /api/register — empty one column across a month's sheet
+// Body: { month: "Aug 2026", clearColumn: "department" }
+export async function PATCH(req: NextRequest) {
+  try {
+    await connectDB()
+    const body = await req.json()
+    const month  = str(body.month)
+    const column = str(body.clearColumn)
+
+    if (!month) return NextResponse.json({ error: "month is required" }, { status: 400 })
+    if (!(column in COLUMN_BLANK)) {
+      return NextResponse.json({ error: "That column can't be emptied" }, { status: 400 })
+    }
+
+    // A row mirrored from a patient is rewritten by the next sync from that
+    // patient — except for the columns listed in editedFields. Emptying a
+    // column by hand is exactly such a correction, so it is recorded there or
+    // the clearing would silently undo itself.
+    const isSystem = {
+      $or: [{ $eq: ["$sourceType", "system"] }, { $ne: [{ $ifNull: ["$patientId", null] }, null] }],
+    }
+    const touched = MONEY_COLUMNS.has(column) ? [column, "balance"] : [column]
+
+    const stages: Record<string, unknown>[] = [{ $set: { [column]: COLUMN_BLANK[column] } }]
+    if (MONEY_COLUMNS.has(column)) {
+      stages.push({
+        $set: {
+          balance: { $max: [0, { $subtract: [{ $subtract: ["$charges", "$discount"] }, "$paid"] }] },
+        },
+      })
+    }
+    stages.push({
+      $set: {
+        editedFields: {
+          $cond: [
+            isSystem,
+            { $setUnion: [{ $ifNull: ["$editedFields", []] }, { $literal: touched }] },
+            { $ifNull: ["$editedFields", []] },
+          ],
+        },
+      },
+    })
+
+    // `updatePipeline` is required from Mongoose 9: without it an array update
+    // is rejected rather than being sent on to Mongo as an aggregation pipeline.
+    const res = await RegisterEntry.updateMany(
+      { month, hidden: { $ne: true } },
+      stages,
+      { updatePipeline: true },
+    )
+    return NextResponse.json({ column, cleared: res.modifiedCount ?? 0 })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: "Server error" }, { status: 500 })

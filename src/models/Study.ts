@@ -1,4 +1,5 @@
-import mongoose, { Schema, Document } from "mongoose"
+import { Schema, Document } from "mongoose"
+import { defineModel } from "@/lib/model"
 
 export interface IStudy extends Document {
   name: string
@@ -21,4 +22,4 @@ const StudySchema = new Schema<IStudy>(
   { timestamps: true }
 )
 
-export default mongoose.models.Study || mongoose.model<IStudy>("Study", StudySchema)
+export default defineModel<IStudy>("Study", StudySchema)
